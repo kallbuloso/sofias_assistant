@@ -3,7 +3,7 @@
 from typing import Any
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine as sqlalchemy_create_async_engine
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -17,6 +17,11 @@ def create_async_engine(database_url: str) -> AsyncEngine:
         _configure_sqlite_pragmas(engine)
 
     return engine
+
+
+def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """Create independent async sessions bound to an explicit engine."""
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 def _configure_sqlite_pragmas(engine: AsyncEngine) -> None:
