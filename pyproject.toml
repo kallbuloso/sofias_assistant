@@ -1,0 +1,54 @@
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13"]
+build-backend = "uv_build"
+
+[project]
+name = "sofias-assistant"
+version = "0.1.0.dev0"
+description = "Local-first personal AI assistant."
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = ["src"]
+explicit_package_bases = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+markers = [
+    "integration: tests that exercise real infrastructure boundaries.",
+    "smoke: process-level end-to-end checks.",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["sofias_assistant"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
