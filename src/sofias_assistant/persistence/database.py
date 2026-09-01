@@ -2,11 +2,12 @@
 
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine as sqlalchemy_create_async_engine
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_JOURNAL_MODE_WAL = "wal"
 
 
 def create_async_engine(database_url: str) -> AsyncEngine:
@@ -22,6 +23,21 @@ def create_async_engine(database_url: str) -> AsyncEngine:
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     """Create independent async sessions bound to an explicit engine."""
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def enable_sqlite_file_wal(engine: AsyncEngine) -> None:
+    """Enable and verify WAL once for a file-backed SQLite database."""
+
+    if engine.dialect.name != "sqlite":
+        raise ValueError("WAL initialization requires a SQLite engine")
+    if engine.url.database in {None, ":memory:"}:
+        raise ValueError("WAL initialization requires a file-backed SQLite database")
+
+    async with engine.connect() as connection:
+        journal_mode = await connection.scalar(text("PRAGMA journal_mode=WAL"))
+
+    if str(journal_mode).lower() != SQLITE_JOURNAL_MODE_WAL:
+        raise RuntimeError("SQLite did not enable WAL journal mode")
 
 
 def _configure_sqlite_pragmas(engine: AsyncEngine) -> None:
