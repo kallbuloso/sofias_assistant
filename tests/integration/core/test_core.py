@@ -16,8 +16,50 @@ from sofias_assistant.persistence.database import (
 )
 from sofias_assistant.persistence.models import RuntimeSession, RuntimeSessionStatus
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from sofias_assistant.runtime import operational_database_url
+from sofias_assistant.runtime import CoreAlreadyRunningError, operational_database_url
 from sofias_assistant.secrets.models import SecretRef, SecretValue
+
+
+class FakeOwnership:
+    """In-memory Core ownership fake used to keep Core tests platform-neutral."""
+
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.acquired = False
+        self.release_calls = 0
+        self.events = events
+        self.acquire_error: BaseException | None = None
+
+    def acquire(self) -> None:
+        if self.events is not None:
+            self.events.append("ownership.acquire")
+        if self.acquire_error is not None:
+            raise self.acquire_error
+        self.acquired = True
+
+    def release(self) -> None:
+        if self.events is not None:
+            self.events.append("ownership.release")
+        self.release_calls += 1
+        self.acquired = False
+
+
+class RecordingOwnershipFactory:
+    """Factory fake that proves ownership is constructed lazily."""
+
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.calls = 0
+        self.events = events
+        self.ownership = FakeOwnership(events)
+
+    def __call__(self, _: Path) -> FakeOwnership:
+        self.calls += 1
+        if self.events is not None:
+            self.events.append("ownership.factory")
+        return self.ownership
+
+
+def fake_ownership_factory(_: Path) -> FakeOwnership:
+    return FakeOwnership()
 
 
 class FakeSecretStore:
@@ -67,11 +109,13 @@ async def persisted_sessions(database_path: Path) -> dict[UUID, RuntimeSession]:
 def test_construction_is_side_effect_free(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     factory = RecordingSecretStoreFactory()
+    ownership_factory = RecordingOwnershipFactory()
 
     core = SofiaCore(
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=factory,
+        instance_ownership_factory=ownership_factory,
     )
 
     assert core.state is CoreState.CREATED
@@ -80,6 +124,7 @@ def test_construction_is_side_effect_free(tmp_path: Path) -> None:
     assert core.health.status is HealthStatus.UNKNOWN
     assert not config.paths.data_dir.exists()
     assert factory.calls == 0
+    assert ownership_factory.calls == 0
     with pytest.raises(RuntimeError, match="only available"):
         _ = core.secret_service
 
@@ -92,6 +137,7 @@ async def test_successful_start_composes_foundation_resources(tmp_path: Path) ->
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=factory,
+        instance_ownership_factory=fake_ownership_factory,
     )
     try:
         await core.start()
@@ -111,11 +157,47 @@ async def test_successful_start_composes_foundation_resources(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_start_acquires_ownership_before_constructing_secret_store(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    ownership_factory = RecordingOwnershipFactory(events)
+    secret_factory = RecordingSecretStoreFactory()
+
+    def recording_secret_factory() -> FakeSecretStore:
+        events.append("secret.factory")
+        return secret_factory()
+
+    core = SofiaCore(
+        runtime_config(tmp_path),
+        application_version="0.1.0.dev0",
+        secret_store_factory=recording_secret_factory,
+        instance_ownership_factory=ownership_factory,
+    )
+    try:
+        await core.start()
+
+        assert ownership_factory.calls == 1
+        assert ownership_factory.ownership.acquired is True
+        assert events[:3] == [
+            "ownership.factory",
+            "ownership.acquire",
+            "secret.factory",
+        ]
+    finally:
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+    assert ownership_factory.ownership.release_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_running_health_snapshot_is_ordered_and_unknown(tmp_path: Path) -> None:
     core = SofiaCore(
         runtime_config(tmp_path),
         application_version="0.1.0.dev0",
         secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
     )
     try:
         await core.start()
@@ -144,6 +226,7 @@ async def test_secret_service_uses_the_injected_store(tmp_path: Path) -> None:
         runtime_config(tmp_path),
         application_version="0.1.0.dev0",
         secret_store_factory=factory,
+        instance_ownership_factory=fake_ownership_factory,
     )
     ref = SecretRef("test/core")
     value = SecretValue("test-value")
@@ -165,10 +248,12 @@ async def test_secret_service_uses_the_injected_store(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_clean_stop_releases_core_owned_resources(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
+    ownership_factory = RecordingOwnershipFactory()
     core = SofiaCore(
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=ownership_factory,
     )
 
     await core.start()
@@ -185,6 +270,7 @@ async def test_clean_stop_releases_core_owned_resources(tmp_path: Path) -> None:
     assert stopped_at.tzinfo is UTC
     assert core.health.components == ()
     assert core.health.status is HealthStatus.UNKNOWN
+    assert ownership_factory.ownership.release_calls == 1
     with pytest.raises(RuntimeError, match="only available"):
         _ = core.secret_service
 
@@ -195,6 +281,7 @@ async def test_invalid_start_transitions_are_rejected(tmp_path: Path) -> None:
         runtime_config(tmp_path),
         application_version="0.1.0.dev0",
         secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
     )
 
     await core.start()
@@ -217,6 +304,7 @@ async def test_stop_before_start_has_no_side_effects(tmp_path: Path) -> None:
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
     )
 
     with pytest.raises(RuntimeError, match="only stop from the running"):
@@ -255,6 +343,7 @@ def test_blank_application_version_is_rejected(
             config,
             application_version=application_version,
             secret_store_factory=factory,
+            instance_ownership_factory=fake_ownership_factory,
         )
 
     assert not config.paths.data_dir.exists()
@@ -275,6 +364,7 @@ async def test_secret_backend_construction_failure_preserves_original_error(
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=failing_factory,
+        instance_ownership_factory=fake_ownership_factory,
     )
 
     with pytest.raises(RuntimeError) as error:
@@ -293,10 +383,12 @@ async def test_bootstrap_failure_clears_composed_services(tmp_path: Path) -> Non
     data_dir = tmp_path / "not-a-directory"
     data_dir.write_text("not a directory")
     config = RuntimeConfig(paths=AppPaths(data_dir=data_dir))
+    ownership_factory = RecordingOwnershipFactory()
     core = SofiaCore(
         config,
         application_version="0.1.0.dev0",
         secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=ownership_factory,
     )
 
     with pytest.raises(FileExistsError):
@@ -304,5 +396,33 @@ async def test_bootstrap_failure_clears_composed_services(tmp_path: Path) -> Non
 
     assert core.state is CoreState.FAILED
     assert core.health.components == ()
+    assert ownership_factory.ownership.release_calls == 1
     with pytest.raises(RuntimeError, match="only available"):
         _ = core.secret_service
+
+
+@pytest.mark.asyncio
+async def test_already_running_fails_before_secret_or_operational_store(
+    tmp_path: Path,
+) -> None:
+    config = runtime_config(tmp_path)
+    secret_factory = RecordingSecretStoreFactory()
+    ownership_factory = RecordingOwnershipFactory()
+    expected_error = CoreAlreadyRunningError()
+    ownership_factory.ownership.acquire_error = expected_error
+    core = SofiaCore(
+        config,
+        application_version="0.1.0.dev0",
+        secret_store_factory=secret_factory,
+        instance_ownership_factory=ownership_factory,
+    )
+
+    with pytest.raises(CoreAlreadyRunningError) as error:
+        await core.start()
+
+    assert error.value is expected_error
+    assert core.state is CoreState.FAILED
+    assert secret_factory.calls == 0
+    assert not config.paths.data_dir.exists()
+    assert not config.paths.operational_database.exists()
+    assert core.runtime_session_id is None

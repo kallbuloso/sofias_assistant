@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from enum import StrEnum
+from pathlib import Path
 from uuid import UUID
 
 from sofias_assistant.config.models import RuntimeConfig
@@ -11,6 +12,10 @@ from sofias_assistant.health.models import (
     RuntimeHealthSnapshot,
 )
 from sofias_assistant.runtime.bootstrap import RuntimeResources, bootstrap_runtime
+from sofias_assistant.runtime.instance_ownership import (
+    CoreInstanceOwnership,
+    InstanceOwnership,
+)
 from sofias_assistant.runtime.session_lifecycle import RuntimeSessionLifecycle
 from sofias_assistant.secrets.service import SecretService
 from sofias_assistant.secrets.store import SecretStore
@@ -37,6 +42,9 @@ class SofiaCore:
         *,
         application_version: str,
         secret_store_factory: Callable[[], SecretStore] = WindowsCredentialStore,
+        instance_ownership_factory: Callable[
+            [Path], InstanceOwnership
+        ] = CoreInstanceOwnership,
     ) -> None:
         if not application_version.strip():
             raise ValueError("Application version must not be blank")
@@ -44,10 +52,13 @@ class SofiaCore:
         self._config = config
         self._application_version = application_version
         self._secret_store_factory = secret_store_factory
+        self._instance_ownership_factory = instance_ownership_factory
         self._state = CoreState.CREATED
         self._resources: RuntimeResources | None = None
         self._session_lifecycle: RuntimeSessionLifecycle | None = None
         self._secret_service: SecretService | None = None
+        self._instance_ownership: InstanceOwnership | None = None
+        self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())
 
     @property
@@ -88,6 +99,11 @@ class SofiaCore:
 
         self._state = CoreState.STARTING
         try:
+            self._instance_ownership = self._instance_ownership_factory(
+                self._config.paths.data_dir
+            )
+            self._instance_ownership.acquire()
+            self._instance_ownership_acquired = True
             self._secret_service = SecretService(self._secret_store_factory())
             self._resources = await bootstrap_runtime(self._config)
             self._session_lifecycle = RuntimeSessionLifecycle(
@@ -121,29 +137,33 @@ class SofiaCore:
         lifecycle = self._session_lifecycle
         if resources is None or lifecycle is None:
             self._state = CoreState.FAILED
+            await self._release_ownership_best_effort()
             self._clear_owned_references()
             raise RuntimeError("SofiaCore running state is missing owned resources")
 
         self._state = CoreState.STOPPING
+        primary_error: BaseException | None = None
         try:
             await lifecycle.stop()
-        except BaseException:
-            try:
-                await resources.close()
-            except BaseException:
-                pass
-            self._clear_owned_references()
-            self._state = CoreState.FAILED
-            raise
-
+        except BaseException as error:
+            primary_error = error
         try:
             await resources.close()
-        except BaseException:
-            self._clear_owned_references()
-            self._state = CoreState.FAILED
-            raise
-
+        except BaseException as error:
+            if primary_error is None:
+                primary_error = error
+        ownership_error: BaseException | None = None
+        try:
+            self._release_ownership()
+        except BaseException as error:
+            ownership_error = error
         self._clear_owned_references()
+        if primary_error is not None:
+            self._state = CoreState.FAILED
+            raise primary_error
+        if ownership_error is not None:
+            self._state = CoreState.FAILED
+            raise ownership_error
         self._state = CoreState.STOPPED
 
     async def _cleanup_failed_start(self) -> None:
@@ -160,10 +180,27 @@ class SofiaCore:
                 await resources.close()
             except BaseException:
                 pass
+        await self._release_ownership_best_effort()
         self._clear_owned_references()
+
+    def _release_ownership(self) -> None:
+        ownership = self._instance_ownership
+        if ownership is not None and self._instance_ownership_acquired:
+            try:
+                ownership.release()
+            finally:
+                self._instance_ownership_acquired = False
+
+    async def _release_ownership_best_effort(self) -> None:
+        try:
+            self._release_ownership()
+        except BaseException:
+            pass
 
     def _clear_owned_references(self) -> None:
         self._resources = None
         self._session_lifecycle = None
         self._secret_service = None
+        self._instance_ownership = None
+        self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())
