@@ -1,0 +1,1 @@
+"""Sofia's Assistant package."""
