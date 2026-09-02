@@ -1,6 +1,9 @@
 """Core-independent composition and lifecycle for the local client boundary."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+from fastapi import FastAPI
 
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
 from sofias_assistant.client_boundary.http_api import create_local_http_app
@@ -24,8 +27,16 @@ class LocalClientAccess:
 class LocalClientBoundary:
     """Compose and own one ephemeral authenticator, registry, app, and server."""
 
-    def __init__(self, *, port: int = DEFAULT_LOCAL_API_PORT) -> None:
+    def __init__(
+        self,
+        *,
+        port: int = DEFAULT_LOCAL_API_PORT,
+        app_factory: Callable[
+            [LocalClientAuthenticator, ClientSessionRegistry], FastAPI
+        ] = create_local_http_app,
+    ) -> None:
         self._port = port
+        self._app_factory = app_factory
         self._server: LocalHttpServer | None = None
         self._sessions: ClientSessionRegistry | None = None
         self._started = False
@@ -40,12 +51,13 @@ class LocalClientBoundary:
 
         authenticator, credential = LocalClientAuthenticator.create()
         sessions = ClientSessionRegistry(authenticator)
-        server = LocalHttpServer(
-            create_local_http_app(authenticator, sessions), port=self._port
-        )
         self._sessions = sessions
-        self._server = server
+        server: LocalHttpServer | None = None
         try:
+            server = LocalHttpServer(
+                self._app_factory(authenticator, sessions), port=self._port
+            )
+            self._server = server
             await server.start()
             bound_port = server.bound_port
             if bound_port is None:
@@ -57,7 +69,7 @@ class LocalClientBoundary:
                 credential=credential,
             )
         except BaseException:
-            if server.bound_port is not None:
+            if server is not None and server.bound_port is not None:
                 try:
                     await server.stop()
                 except BaseException:

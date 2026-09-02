@@ -1,7 +1,7 @@
 """In-process ASGI contract for the future loopback local client boundary."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Protocol
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
@@ -11,6 +11,12 @@ from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
 from sofias_assistant.client_boundary.sessions import (
     ClientSession,
     ClientSessionRegistry,
+)
+from sofias_assistant.core.core import CoreState
+from sofias_assistant.health.models import (
+    ComponentHealth,
+    HealthStatus,
+    RuntimeHealthSnapshot,
 )
 from sofias_assistant.secrets.models import SecretValue
 
@@ -30,9 +36,79 @@ class ClientSessionResponse(BaseModel):
         return cls(id=session.id, created_at=session.created_at)
 
 
+class CoreReadApi(Protocol):
+    """Minimal read-only Core contract exposed by the local HTTP adapter."""
+
+    @property
+    def state(self) -> CoreState: ...
+
+    @property
+    def runtime_session_id(self) -> UUID | None: ...
+
+    @property
+    def health(self) -> RuntimeHealthSnapshot: ...
+
+
+class ComponentHealthResponse(BaseModel):
+    """Transport-only representation of one Core health component."""
+
+    name: str
+    status: HealthStatus
+    detail: str | None
+
+    @classmethod
+    def from_component(cls, component: ComponentHealth) -> "ComponentHealthResponse":
+        """Create the transport representation while preserving component fields."""
+
+        return cls(
+            name=component.name,
+            status=component.status,
+            detail=component.detail,
+        )
+
+
+class RuntimeHealthResponse(BaseModel):
+    """Transport-only representation of the ordered Core health snapshot."""
+
+    status: HealthStatus
+    components: list[ComponentHealthResponse]
+
+    @classmethod
+    def from_snapshot(cls, snapshot: RuntimeHealthSnapshot) -> "RuntimeHealthResponse":
+        """Create an ordered transport health response from the Core snapshot."""
+
+        return cls(
+            status=snapshot.status,
+            components=[
+                ComponentHealthResponse.from_component(component)
+                for component in snapshot.components
+            ],
+        )
+
+
+class CoreResponse(BaseModel):
+    """Transport-safe read-only snapshot of the Core runtime."""
+
+    state: CoreState
+    runtime_session_id: UUID | None
+    health: RuntimeHealthResponse
+
+    @classmethod
+    def from_core(cls, core: CoreReadApi) -> "CoreResponse":
+        """Create a response without exposing Core resources or configuration."""
+
+        return cls(
+            state=core.state,
+            runtime_session_id=core.runtime_session_id,
+            health=RuntimeHealthResponse.from_snapshot(core.health),
+        )
+
+
 def create_local_http_app(
     authenticator: LocalClientAuthenticator,
     sessions: ClientSessionRegistry,
+    *,
+    core: CoreReadApi | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -92,6 +168,16 @@ def create_local_http_app(
 
         sessions.close_session(session.id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    if core is not None:
+
+        @app.get("/api/v1/core", response_model=CoreResponse)
+        async def get_core(
+            _: Annotated[ClientSession, Depends(require_session)],
+        ) -> CoreResponse:
+            """Return the authenticated, transport-safe Core runtime snapshot."""
+
+            return CoreResponse.from_core(core)
 
     return app
 

@@ -1,5 +1,6 @@
 """In-process integration tests for the local HTTP client-boundary contract."""
 
+import hashlib
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -11,6 +12,23 @@ from sofias_assistant.client_boundary import (
     LocalClientAuthenticator,
 )
 from sofias_assistant.client_boundary.http_api import create_local_http_app
+from sofias_assistant.core import CoreState
+from sofias_assistant.health import ComponentHealth, HealthStatus, RuntimeHealthSnapshot
+from sofias_assistant.secrets.models import SecretValue
+
+
+class FakeCoreReadApi:
+    """Small read-only Core fake for HTTP adapter contract coverage."""
+
+    def __init__(self) -> None:
+        self.state = CoreState.RUNNING
+        self.runtime_session_id = uuid4()
+        self.health = RuntimeHealthSnapshot(
+            (
+                ComponentHealth("operational-store", HealthStatus.HEALTHY),
+                ComponentHealth("secret-store", HealthStatus.UNKNOWN, "configured"),
+            )
+        )
 
 
 @pytest.fixture
@@ -194,3 +212,37 @@ def test_independent_boundaries_do_not_share_credentials() -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_core_route_is_not_registered_without_a_core(
+    boundary: tuple[TestClient, ClientSessionRegistry, str],
+) -> None:
+    client, _, _ = boundary
+
+    assert client.get("/api/v1/core").status_code == 404
+
+
+def test_core_route_requires_the_existing_session_authentication() -> None:
+    credential = SecretValue("client-core-http-super-secret-sentinel")
+    authenticator = LocalClientAuthenticator(
+        hashlib.sha256(credential.reveal().encode("utf-8")).digest()
+    )
+    sessions = ClientSessionRegistry(authenticator)
+    client = TestClient(
+        create_local_http_app(authenticator, sessions, core=FakeCoreReadApi())
+    )
+
+    assert client.get("/api/v1/core").status_code == 401
+    assert (
+        client.get("/api/v1/core", headers=_bearer(credential.reveal())).status_code
+        == 401
+    )
+
+    opened = _open_session(client, credential.reveal())
+    headers = _bearer(credential.reveal()) | {"X-Sofia-Client-Session-ID": opened["id"]}
+    response = client.get("/api/v1/core", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "running"
+    assert response.json()["runtime_session_id"] is not None
+    assert credential.reveal() not in response.text
