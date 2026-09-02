@@ -12,6 +12,7 @@ dependencies = [
     "alembic>=1.19,<2",
     "fastapi>=0.141,<0.142",
     "sqlalchemy>=2.0,<2.1",
+    "uvicorn>=0.52,<0.53",
 ]
 
 [dependency-groups]
