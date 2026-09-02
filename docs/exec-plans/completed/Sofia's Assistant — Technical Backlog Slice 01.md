@@ -8,6 +8,22 @@
 
 ---
 
+## Closure Record
+
+**Status:** COMPLETED  
+**Gate:** I1 — Core Alive  
+**Gate verdict:** PASS  
+**Closed:** 2026-09-02  
+**Audited implementation baseline:** `161a52b4cf1c487e9cac2b001fc1e2e5a2af6ef2`  
+**Local validation:** 146 passed, 1 skipped, 0 warnings  
+**Remote CI:** GitHub Actions PASS
+
+Items beyond Slice 01 remain deferred, including process host, WebSocket,
+Desktop Client, AI providers, Conversation runtime, ContextBuilder, and
+Policy/Tools/Tasks/Agents.
+
+---
+
 # 1. Objective
 
 Este primeiro slice deverá construir o **runtime fundamental do Sofia's Assistant antes da introdução de qualquer LLM**.
