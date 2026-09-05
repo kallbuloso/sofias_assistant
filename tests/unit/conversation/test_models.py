@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -290,14 +291,34 @@ def test_terminal_transitions_reuse_provider_correlation_invariants() -> None:
         )
 
 
-def test_terminal_transitions_preserve_cloud_context_eligibility() -> None:
-    processing = processing_turn(cloud_context_eligible=True)
+@pytest.mark.parametrize(
+    ("source_eligible", "override", "expected"),
+    [
+        (True, False, False),
+        (True, True, True),
+        (True, None, True),
+        (False, False, False),
+        (False, None, False),
+    ],
+)
+def test_terminal_transitions_apply_monotonic_cloud_context_eligibility(
+    source_eligible: bool,
+    override: bool | None,
+    expected: bool,
+) -> None:
+    processing = processing_turn(cloud_context_eligible=source_eligible)
     finished_at = CREATED_AT + timedelta(seconds=1)
     completed = processing.complete(
-        assistant_text="answer", updated_at=finished_at, finished_at=finished_at
+        assistant_text="answer",
+        updated_at=finished_at,
+        finished_at=finished_at,
+        cloud_context_eligible=override,
     )
     interrupted = processing.interrupt(
-        assistant_text=None, updated_at=finished_at, finished_at=finished_at
+        assistant_text=None,
+        updated_at=finished_at,
+        finished_at=finished_at,
+        cloud_context_eligible=override,
     )
     failed = processing.fail(
         assistant_text=None,
@@ -305,9 +326,70 @@ def test_terminal_transitions_preserve_cloud_context_eligibility() -> None:
         error_message="safe failure",
         updated_at=finished_at,
         finished_at=finished_at,
+        cloud_context_eligible=override,
     )
 
-    assert completed.cloud_context_eligible is True
-    assert interrupted.cloud_context_eligible is True
-    assert failed.cloud_context_eligible is True
-    assert processing.cloud_context_eligible is True
+    assert completed.cloud_context_eligible is expected
+    assert interrupted.cloud_context_eligible is expected
+    assert failed.cloud_context_eligible is expected
+    assert processing.cloud_context_eligible is source_eligible
+
+
+def test_terminal_transitions_reject_cloud_context_eligibility_widening() -> None:
+    processing = processing_turn(cloud_context_eligible=False)
+    finished_at = CREATED_AT + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="False to True"):
+        processing.complete(
+            assistant_text="answer",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=True,
+        )
+    with pytest.raises(ValueError, match="False to True"):
+        processing.interrupt(
+            assistant_text=None,
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=True,
+        )
+    with pytest.raises(ValueError, match="False to True"):
+        processing.fail(
+            assistant_text=None,
+            error_category=None,
+            error_message="safe failure",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=True,
+        )
+
+
+@pytest.mark.parametrize("override", [0, 1, "false"])
+def test_terminal_transitions_reject_non_bool_cloud_context_override(
+    override: object,
+) -> None:
+    processing = processing_turn()
+    finished_at = CREATED_AT + timedelta(seconds=1)
+    value = cast(bool | None, override)
+    with pytest.raises(ValueError, match="cloud_context_eligible"):
+        processing.complete(
+            assistant_text="answer",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=value,
+        )
+    with pytest.raises(ValueError, match="cloud_context_eligible"):
+        processing.interrupt(
+            assistant_text=None,
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=value,
+        )
+    with pytest.raises(ValueError, match="cloud_context_eligible"):
+        processing.fail(
+            assistant_text=None,
+            error_category=None,
+            error_message="safe failure",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            cloud_context_eligible=value,
+        )

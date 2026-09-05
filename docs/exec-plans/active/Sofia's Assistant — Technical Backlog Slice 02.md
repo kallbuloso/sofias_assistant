@@ -352,7 +352,9 @@ inference.
 - Preserve `Turn.cloud_context_eligible` as a durable, conservative eligibility
   for historical Turn content to be reused in a cloud-bound ContextProjection.
   It is distinct from `DataLocality`, which remains a per-operation
-  routing/locality requirement.
+  routing/locality requirement. Terminal Turn eligibility may be narrowed,
+  never widened, from the actual context/provenance that contributed to output;
+  B010.1/B008.2 define that aggregate later.
 - Keep Conversation and Turn SQLite-authoritative. Reserve the future,
   deterministic external Memory Session correlation
   `sofias-assistant:conversation:{conversation_uuid}` without persisting a

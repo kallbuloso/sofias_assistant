@@ -59,7 +59,12 @@ class Conversation:
 
 @dataclass(frozen=True, slots=True)
 class Turn:
-    """A durable, ordered unit of text interaction within a Conversation."""
+    """A durable, ordered unit of text interaction within a Conversation.
+
+    During processing, cloud_context_eligible describes the conservative
+    eligibility of content accumulated in that snapshot. Terminal transitions
+    may narrow, but never widen, that eligibility.
+    """
 
     id: UUID
     conversation_id: UUID
@@ -130,6 +135,7 @@ class Turn:
         model_id: str | None = None,
         provider_request_id: str | None = None,
         provider_session_id: str | None = None,
+        cloud_context_eligible: bool | None = None,
     ) -> "Turn":
         """Return a completed snapshot from a processing turn."""
         self._require_processing_transition()
@@ -142,6 +148,9 @@ class Turn:
             model_id=model_id,
             provider_request_id=provider_request_id,
             provider_session_id=provider_session_id,
+            cloud_context_eligible=self._terminal_cloud_context_eligibility(
+                cloud_context_eligible
+            ),
             error_category=None,
             error_message=None,
             updated_at=updated_at,
@@ -159,6 +168,7 @@ class Turn:
         model_id: str | None = None,
         provider_request_id: str | None = None,
         provider_session_id: str | None = None,
+        cloud_context_eligible: bool | None = None,
     ) -> "Turn":
         """Return an interrupted snapshot from a processing turn."""
         self._require_processing_transition()
@@ -171,6 +181,9 @@ class Turn:
             model_id=model_id,
             provider_request_id=provider_request_id,
             provider_session_id=provider_session_id,
+            cloud_context_eligible=self._terminal_cloud_context_eligibility(
+                cloud_context_eligible
+            ),
             error_category=None,
             error_message=None,
             updated_at=updated_at,
@@ -190,6 +203,7 @@ class Turn:
         model_id: str | None = None,
         provider_request_id: str | None = None,
         provider_session_id: str | None = None,
+        cloud_context_eligible: bool | None = None,
     ) -> "Turn":
         """Return a failed snapshot from a processing turn."""
         self._require_processing_transition()
@@ -204,6 +218,9 @@ class Turn:
             model_id=model_id,
             provider_request_id=provider_request_id,
             provider_session_id=provider_session_id,
+            cloud_context_eligible=self._terminal_cloud_context_eligibility(
+                cloud_context_eligible
+            ),
             updated_at=updated_at,
             finished_at=finished_at,
         )
@@ -259,3 +276,14 @@ class Turn:
             raise ValueError(
                 "only a processing turn can transition to a terminal state"
             )
+
+    def _terminal_cloud_context_eligibility(self, override: bool | None) -> bool:
+        if override is None:
+            return self.cloud_context_eligible
+        if not isinstance(override, bool):
+            raise ValueError("cloud_context_eligible must be a bool when provided")
+        if not self.cloud_context_eligible and override:
+            raise ValueError(
+                "cloud_context_eligible cannot transition from False to True"
+            )
+        return override
