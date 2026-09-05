@@ -5,6 +5,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     String,
@@ -111,6 +112,7 @@ class TurnRecord(Base):
         ),
         nullable=False,
     )
+    cloud_context_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
     user_text: Mapped[str] = mapped_column(Text, nullable=False)
     assistant_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_request_id: Mapped[UUID | None] = mapped_column(

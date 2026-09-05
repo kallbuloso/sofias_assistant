@@ -349,6 +349,10 @@ inference.
   event store or speculative attachment system.
 - Permit safe provider request/session correlation metadata only as operational
   information; it never replaces Conversation or Turn identity.
+- Preserve `Turn.cloud_context_eligible` as a durable, conservative eligibility
+  for historical Turn content to be reused in a cloud-bound ContextProjection.
+  It is distinct from `DataLocality`, which remains a per-operation
+  routing/locality requirement.
 - Keep Conversation and Turn SQLite-authoritative. Reserve the future,
   deterministic external Memory Session correlation
   `sofias-assistant:conversation:{conversation_uuid}` without persisting a
@@ -383,7 +387,8 @@ objects.
 - Project current user request, the appropriate current Turn, and a bounded
   set of recent relevant finalized Turns; never default to the entire
   transcript.
-- Include request locality and selected model/provider context constraints as
+- Receive operation `DataLocality`, the selected `ModelDescriptor` (including
+  execution location and context constraint), and eligible persisted Turns as
   inputs while keeping provider-native prompt objects out of the service.
 - Establish small explicit future seams for Working Memory, Task context,
   ToolResults, Long-Term Memory, Recall, optional Memory Session context,
@@ -392,10 +397,12 @@ objects.
   registry, plugin framework, Fake Memory, or Memory client.
 
 **Locality rule:** ContextBuilder is authoritative for which context elements
-are eligible to include. It receives the operation locality requirement and
-filters incompatible material before request construction. Router separately
-enforces that the selected execution target is compatible; neither may
-silently weaken `LOCAL_ONLY`.
+are eligible to include. For a cloud execution target it must exclude every
+persisted Turn whose `cloud_context_eligible` is false; for a local target that
+flag alone does not exclude a Turn. Router is the first protection: it enforces
+that the selected execution target is compatible with operation `DataLocality`.
+ContextBuilder must not silently compensate for invalid routing or weaken
+`LOCAL_ONLY`.
 
 **Acceptance/tests:** recent-finalized-turn selection; excluded failed/
 interrupted/non-eligible material as appropriate; no full-history default;
@@ -414,13 +421,16 @@ contracts in a Core-owned text service.
 2. receive a user text command;
 3. persist a processing Turn in a short transaction;
 4. close that UoW;
-5. build a ContextProjection;
-6. construct AI requirements/request;
-7. route to a compatible adapter/model;
-8. obtain the provider result or normalized events;
-9. persist final result, interruption, or normalized failure in a new short
+5. construct AI request requirements;
+6. Router selects a compatible model/provider;
+7. ContextBuilder builds a ContextProjection using operation locality, the
+   selected ModelDescriptor/execution location/context constraint, and eligible
+   persisted Turns;
+8. construct an AI request from that projection;
+9. invoke the selected provider adapter;
+10. persist final result, interruption, or normalized failure in a new short
    transaction; and
-10. return application-level result/events to a transport adapter.
+11. return application-level result/events to a transport adapter.
 
 Conversation Runtime must not invoke a provider SDK, execute ToolCalls, or
 hold SQLite transaction/session resources across network inference.

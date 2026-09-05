@@ -138,6 +138,7 @@ def _copy_turn_to_record(turn: Turn, record: TurnRecord) -> None:
     record.sequence = turn.sequence
     record.status = turn.status
     record.input_modality = turn.input_modality
+    record.cloud_context_eligible = turn.cloud_context_eligible
     record.user_text = turn.user_text
     record.assistant_text = turn.assistant_text
     record.ai_request_id = turn.ai_request_id
@@ -159,6 +160,7 @@ def _turn_from_record(record: TurnRecord) -> Turn:
         sequence=record.sequence,
         status=record.status,
         input_modality=record.input_modality,
+        cloud_context_eligible=record.cloud_context_eligible,
         user_text=record.user_text,
         assistant_text=record.assistant_text,
         ai_request_id=record.ai_request_id,

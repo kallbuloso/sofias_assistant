@@ -10,7 +10,7 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.persistence.database import SQLITE_BUSY_TIMEOUT_MS
 from sofias_assistant.runtime import bootstrap_runtime
 
-HEAD_REVISION = "0002_conversation_operational_schema"
+HEAD_REVISION = "0003_turn_cloud_context_eligibility"
 EXPECTED_TABLES = {
     "alembic_version",
     "application_settings",

@@ -7,6 +7,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -16,6 +18,7 @@ from sofias_assistant.persistence.database import (
     create_async_engine,
 )
 from sofias_assistant.persistence.migration_runner import (
+    MIGRATIONS_PATH,
     downgrade_to_base,
     upgrade_to_head,
 )
@@ -25,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0002_conversation_operational_schema"
+HEAD_REVISION = "0003_turn_cloud_context_eligibility"
 DOMAIN_TABLES = {
     "application_settings",
     "conversations",
@@ -45,6 +48,13 @@ def table_names(database_url: str) -> set[str]:
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     return {row[0] for row in rows}
+
+
+def upgrade_to_revision(database_url: str, revision: str) -> None:
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATIONS_PATH))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, revision)
 
 
 def test_upgrade_to_head_is_idempotent(tmp_path: Path) -> None:
@@ -70,6 +80,52 @@ def test_downgrade_to_base_then_upgrade_to_head(tmp_path: Path) -> None:
 
     upgrade_to_head(url)
     assert DOMAIN_TABLES <= table_names(url)
+
+
+def test_upgrade_from_0002_backfills_turn_cloud_context_eligibility(
+    tmp_path: Path,
+) -> None:
+    url = database_url(tmp_path)
+    upgrade_to_revision(url, "0002_conversation_operational_schema")
+    path = url.removeprefix("sqlite+aiosqlite:///")
+    conversation_id = uuid4()
+    turn_id = uuid4()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO conversations (id, created_at, updated_at) VALUES (?, ?, ?)",
+            (conversation_id.hex, "2026-09-05 12:00:00", "2026-09-05 12:00:00"),
+        )
+        connection.execute(
+            """
+            INSERT INTO turns (
+                id, conversation_id, sequence, status, input_modality, user_text,
+                assistant_text, created_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                turn_id.hex,
+                conversation_id.hex,
+                1,
+                "PROCESSING",
+                "TEXT",
+                "existing turn",
+                None,
+                "2026-09-05 12:00:00",
+                "2026-09-05 12:00:00",
+                None,
+            ),
+        )
+    upgrade_to_head(url)
+
+    with sqlite3.connect(path) as connection:
+        column_names = {
+            row[1] for row in connection.execute("PRAGMA table_info(turns)")
+        }
+        eligible = connection.execute(
+            "SELECT cloud_context_eligible FROM turns WHERE id = ?", (turn_id.hex,)
+        ).fetchone()[0]
+    assert "cloud_context_eligible" in column_names
+    assert eligible == 0
 
 
 @pytest.mark.asyncio

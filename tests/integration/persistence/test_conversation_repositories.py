@@ -35,13 +35,16 @@ def conversation() -> Conversation:
     return Conversation(CONVERSATION_ID, CREATED_AT, CREATED_AT)
 
 
-def processing_turn(sequence: int, *, turn_id: UUID) -> Turn:
+def processing_turn(
+    sequence: int, *, turn_id: UUID, cloud_context_eligible: bool = False
+) -> Turn:
     return Turn(
         id=turn_id,
         conversation_id=CONVERSATION_ID,
         sequence=sequence,
         status=TurnStatus.PROCESSING,
         input_modality=TurnInputModality.TEXT,
+        cloud_context_eligible=cloud_context_eligible,
         user_text=f"question {sequence}",
         assistant_text=None,
         ai_request_id=None,
@@ -92,7 +95,13 @@ async def test_conversation_and_turn_roundtrip_ordering_and_next_sequence(
             uow.conversations.add(conversation())
             assert await uow.turns.next_sequence(CONVERSATION_ID) == 1
             for sequence in (3, 1, 2):
-                uow.turns.add(processing_turn(sequence, turn_id=turn_ids[sequence]))
+                uow.turns.add(
+                    processing_turn(
+                        sequence,
+                        turn_id=turn_ids[sequence],
+                        cloud_context_eligible=sequence != 2,
+                    )
+                )
             await uow.commit()
 
         async with SqlAlchemyUnitOfWork(factory) as uow:
@@ -102,8 +111,11 @@ async def test_conversation_and_turn_roundtrip_ordering_and_next_sequence(
                 for turn in await uow.turns.list_for_conversation(CONVERSATION_ID)
             ] == [1, 2, 3]
             assert await uow.turns.get_by_id(turn_ids[2]) == processing_turn(
-                2, turn_id=turn_ids[2]
+                2, turn_id=turn_ids[2], cloud_context_eligible=False
             )
+            eligible_turn = await uow.turns.get_by_id(turn_ids[1])
+            assert eligible_turn is not None
+            assert eligible_turn.cloud_context_eligible is True
             assert await uow.turns.next_sequence(CONVERSATION_ID) == 4
     finally:
         await engine.dispose()
@@ -128,6 +140,7 @@ async def test_turn_constraints_and_explicit_commit_boundary(tmp_path: Path) -> 
                     sequence=1,
                     status=TurnStatus.PROCESSING,
                     input_modality=TurnInputModality.TEXT,
+                    cloud_context_eligible=False,
                     user_text="duplicate",
                     assistant_text=None,
                     ai_request_id=None,
@@ -154,6 +167,7 @@ async def test_turn_constraints_and_explicit_commit_boundary(tmp_path: Path) -> 
                     sequence=1,
                     status=TurnStatus.PROCESSING,
                     input_modality=TurnInputModality.TEXT,
+                    cloud_context_eligible=False,
                     user_text="missing parent",
                     assistant_text=None,
                     ai_request_id=None,
@@ -194,7 +208,9 @@ async def test_terminal_save_and_recreated_engine_recover_domain_snapshots(
     try:
         async with SqlAlchemyUnitOfWork(factory) as uow:
             uow.conversations.add(conversation())
-            uow.turns.add(processing_turn(1, turn_id=turn_id))
+            uow.turns.add(
+                processing_turn(1, turn_id=turn_id, cloud_context_eligible=True)
+            )
             await uow.commit()
         async with SqlAlchemyUnitOfWork(factory) as uow:
             loaded = await uow.turns.get_by_id(turn_id)
@@ -225,6 +241,7 @@ async def test_terminal_save_and_recreated_engine_recover_domain_snapshots(
             assert persisted.assistant_text == "final answer"
             assert persisted.finished_at == finished_at
             assert persisted.provider_id == "fake"
+            assert persisted.cloud_context_eligible is True
     finally:
         await recreated_engine.dispose()
 

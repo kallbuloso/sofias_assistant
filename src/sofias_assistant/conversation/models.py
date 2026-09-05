@@ -66,6 +66,7 @@ class Turn:
     sequence: int
     status: TurnStatus
     input_modality: TurnInputModality
+    cloud_context_eligible: bool
     user_text: str
     assistant_text: str | None
     ai_request_id: UUID | None
@@ -90,6 +91,8 @@ class Turn:
             raise ValueError("status must be a TurnStatus")
         if not isinstance(self.input_modality, TurnInputModality):
             raise ValueError("input_modality must be a TurnInputModality")
+        if not isinstance(self.cloud_context_eligible, bool):
+            raise ValueError("cloud_context_eligible must be a bool")
         _require_non_blank(self.user_text, "user_text")
         if self.assistant_text is not None and not isinstance(self.assistant_text, str):
             raise ValueError("assistant_text must be a string or None")

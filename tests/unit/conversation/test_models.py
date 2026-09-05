@@ -26,6 +26,7 @@ def processing_turn(**changes: object) -> Turn:
         "sequence": 1,
         "status": TurnStatus.PROCESSING,
         "input_modality": TurnInputModality.TEXT,
+        "cloud_context_eligible": False,
         "user_text": "  preserve this text  ",
         "assistant_text": None,
         "ai_request_id": None,
@@ -92,6 +93,17 @@ def test_processing_turn_preserves_text_and_requires_no_output_or_error() -> Non
         processing_turn(error_message="failure")
     with pytest.raises(ValueError, match="processing turn"):
         processing_turn(finished_at=CREATED_AT)
+
+
+@pytest.mark.parametrize("eligible", [0, 1, None, "true"])
+def test_turn_rejects_non_bool_cloud_context_eligibility(eligible: object) -> None:
+    with pytest.raises(ValueError, match="cloud_context_eligible"):
+        processing_turn(cloud_context_eligible=eligible)
+
+
+def test_turn_accepts_explicit_cloud_context_eligibility_values() -> None:
+    assert processing_turn(cloud_context_eligible=True).cloud_context_eligible is True
+    assert processing_turn(cloud_context_eligible=False).cloud_context_eligible is False
 
 
 def test_completed_interrupted_and_failed_turn_invariants() -> None:
@@ -276,3 +288,26 @@ def test_terminal_transitions_reuse_provider_correlation_invariants() -> None:
             model_id="model",
             provider_session_id=" ",
         )
+
+
+def test_terminal_transitions_preserve_cloud_context_eligibility() -> None:
+    processing = processing_turn(cloud_context_eligible=True)
+    finished_at = CREATED_AT + timedelta(seconds=1)
+    completed = processing.complete(
+        assistant_text="answer", updated_at=finished_at, finished_at=finished_at
+    )
+    interrupted = processing.interrupt(
+        assistant_text=None, updated_at=finished_at, finished_at=finished_at
+    )
+    failed = processing.fail(
+        assistant_text=None,
+        error_category=None,
+        error_message="safe failure",
+        updated_at=finished_at,
+        finished_at=finished_at,
+    )
+
+    assert completed.cloud_context_eligible is True
+    assert interrupted.cloud_context_eligible is True
+    assert failed.cloud_context_eligible is True
+    assert processing.cloud_context_eligible is True
