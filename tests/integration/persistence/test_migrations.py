@@ -25,8 +25,13 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0001_initial_operational_schema"
-DOMAIN_TABLES = {"runtime_sessions", "application_settings"}
+HEAD_REVISION = "0002_conversation_operational_schema"
+DOMAIN_TABLES = {
+    "application_settings",
+    "conversations",
+    "runtime_sessions",
+    "turns",
+}
 
 
 def database_url(tmp_path: Path) -> str:
