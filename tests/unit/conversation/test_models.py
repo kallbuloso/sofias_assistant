@@ -181,3 +181,98 @@ def test_turn_transitions_return_new_immutable_terminal_snapshots() -> None:
             updated_at=finished_at,
             finished_at=finished_at,
         )
+
+
+def test_interrupt_adds_correlation_without_mutating_source() -> None:
+    processing = processing_turn()
+    finished_at = CREATED_AT + timedelta(seconds=1)
+
+    interrupted = processing.interrupt(
+        assistant_text="partial",
+        updated_at=finished_at,
+        finished_at=finished_at,
+        ai_request_id=REQUEST_ID,
+        provider_id="provider",
+        model_id="model",
+        provider_request_id="provider-request",
+        provider_session_id="provider-session",
+    )
+
+    assert interrupted.status is TurnStatus.INTERRUPTED
+    assert interrupted.ai_request_id == REQUEST_ID
+    assert interrupted.provider_id == "provider"
+    assert interrupted.model_id == "model"
+    assert interrupted.provider_request_id == "provider-request"
+    assert interrupted.provider_session_id == "provider-session"
+    assert processing.status is TurnStatus.PROCESSING
+    assert processing.ai_request_id is None
+    assert processing.provider_id is None
+
+
+def test_fail_transition_adds_provider_correlation_without_mutating_source() -> None:
+    processing = processing_turn()
+    finished_at = CREATED_AT + timedelta(seconds=1)
+
+    failed = processing.fail(
+        assistant_text="partial",
+        error_category="provider_unavailable",
+        error_message="safe provider failure",
+        updated_at=finished_at,
+        finished_at=finished_at,
+        ai_request_id=REQUEST_ID,
+        provider_id="provider",
+        model_id="model",
+        provider_request_id="provider-request",
+        provider_session_id="provider-session",
+    )
+
+    assert failed.status is TurnStatus.FAILED
+    assert failed.error_category == "provider_unavailable"
+    assert failed.error_message == "safe provider failure"
+    assert failed.ai_request_id == REQUEST_ID
+    assert failed.provider_id == "provider"
+    assert failed.model_id == "model"
+    assert failed.provider_request_id == "provider-request"
+    assert failed.provider_session_id == "provider-session"
+    assert processing.status is TurnStatus.PROCESSING
+    assert processing.error_message is None
+    assert processing.provider_id is None
+
+
+def test_terminal_transitions_reuse_provider_correlation_invariants() -> None:
+    finished_at = CREATED_AT + timedelta(seconds=1)
+    with pytest.raises(ValueError, match="provided together"):
+        processing_turn().interrupt(
+            assistant_text=None,
+            updated_at=finished_at,
+            finished_at=finished_at,
+            provider_id="provider",
+        )
+    with pytest.raises(ValueError, match="require provider_id"):
+        processing_turn().fail(
+            assistant_text=None,
+            error_category=None,
+            error_message="safe failure",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            provider_request_id="request",
+        )
+    with pytest.raises(ValueError, match="provider_id"):
+        processing_turn().interrupt(
+            assistant_text=None,
+            updated_at=finished_at,
+            finished_at=finished_at,
+            provider_id="",
+            model_id="model",
+        )
+    with pytest.raises(ValueError, match="provider_session_id"):
+        processing_turn().fail(
+            assistant_text=None,
+            error_category=None,
+            error_message="safe failure",
+            updated_at=finished_at,
+            finished_at=finished_at,
+            provider_id="provider",
+            model_id="model",
+            provider_session_id=" ",
+        )

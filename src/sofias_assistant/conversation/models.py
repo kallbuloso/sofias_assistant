@@ -151,6 +151,11 @@ class Turn:
         assistant_text: str | None,
         updated_at: datetime,
         finished_at: datetime,
+        ai_request_id: UUID | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        provider_request_id: str | None = None,
+        provider_session_id: str | None = None,
     ) -> "Turn":
         """Return an interrupted snapshot from a processing turn."""
         self._require_processing_transition()
@@ -158,6 +163,11 @@ class Turn:
             self,
             status=TurnStatus.INTERRUPTED,
             assistant_text=assistant_text,
+            ai_request_id=ai_request_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            provider_request_id=provider_request_id,
+            provider_session_id=provider_session_id,
             error_category=None,
             error_message=None,
             updated_at=updated_at,
@@ -172,6 +182,11 @@ class Turn:
         assistant_text: str | None,
         updated_at: datetime,
         finished_at: datetime,
+        ai_request_id: UUID | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+        provider_request_id: str | None = None,
+        provider_session_id: str | None = None,
     ) -> "Turn":
         """Return a failed snapshot from a processing turn."""
         self._require_processing_transition()
@@ -181,6 +196,11 @@ class Turn:
             assistant_text=assistant_text,
             error_category=error_category,
             error_message=error_message,
+            ai_request_id=ai_request_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            provider_request_id=provider_request_id,
+            provider_session_id=provider_session_id,
             updated_at=updated_at,
             finished_at=finished_at,
         )
