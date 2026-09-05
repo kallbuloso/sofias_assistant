@@ -30,7 +30,12 @@ async def test_file_based_engine_does_not_create_a_database_before_connecting(
 
 
 def test_base_metadata_has_no_domain_tables() -> None:
-    assert set(Base.metadata.tables) == {"runtime_sessions", "application_settings"}
+    assert set(Base.metadata.tables) == {
+        "application_settings",
+        "conversations",
+        "runtime_sessions",
+        "turns",
+    }
 
 
 @pytest.mark.asyncio

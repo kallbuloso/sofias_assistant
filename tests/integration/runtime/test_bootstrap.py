@@ -10,8 +10,14 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.persistence.database import SQLITE_BUSY_TIMEOUT_MS
 from sofias_assistant.runtime import bootstrap_runtime
 
-HEAD_REVISION = "0001_initial_operational_schema"
-EXPECTED_TABLES = {"runtime_sessions", "application_settings", "alembic_version"}
+HEAD_REVISION = "0002_conversation_operational_schema"
+EXPECTED_TABLES = {
+    "alembic_version",
+    "application_settings",
+    "conversations",
+    "runtime_sessions",
+    "turns",
+}
 
 
 def runtime_config(tmp_path: Path) -> RuntimeConfig:
