@@ -5,7 +5,7 @@
 **Status:** Proposed execution plan  
 **Source:** Approved Technical Backlog Map  
 **Architecture baseline:** ADR-0001, ADR-0002, ADR-0004, ADR-0005, ADR-0006,
-ADR-0008, Architecture Review Amendment 0001, and completed Slice 01
+ADR-0008, Architecture Review Amendments 0001 and 0002, and completed Slice 01
 
 ---
 
@@ -155,8 +155,9 @@ The following remain outside Slice 02:
 
 - realtime voice, audio input/output, VAD, wake word, and audio barge-in;
 - WebSocket realtime transport;
-- Sofias Memory integration, Memory Orchestrator, Cognitive Memory, recall,
-  MemoryCandidate, or cognitive-memory persistence;
+- Sofias Memory integration, including Memory Session APIs, SessionEntry
+  mirroring, Skills integration, Agent Profile integration, Memory Orchestrator,
+  Cognitive Memory, recall, MemoryCandidate, or cognitive-memory persistence;
 - Policy Engine, Grants, Delegations, and Tool execution;
 - Tasks, Agents, Scheduler, filesystem/shell/web tools;
 - Desktop Client, CORS, remote/LAN API, TLS, and a plugin framework;
@@ -178,7 +179,7 @@ dataclasses and enums), never HTTP/Pydantic or provider SDK shapes.
 
 ## 5.1 AI contracts and identifiers
 
-SA-B007.1 will define the minimum provider-independent vocabulary:
+SA-B007.1 defines the minimum provider-independent vocabulary:
 
 ```text
 Capability
@@ -195,9 +196,11 @@ Normalized ToolCall proposal
 Normalized ProviderError
 ```
 
-`ModelDescriptor` will describe an enabled/available candidate, declared
-capabilities, locality, context constraints, and only the metadata needed by
-baseline routing. Unknown capability is unsupported, never assumed supported.
+`ModelDescriptor` contains only `identity`, `capabilities`,
+`execution_location`, and optional `context_window`. `ModelRegistration`
+contains the descriptor, provider binding, `enabled`, and `availability`.
+`DataLocality` is request policy/requirement; `ExecutionLocation` is a model
+characteristic. Unknown capability is unsupported, never assumed supported.
 The initial interfaces will be specialized—for example a text generation stream
 contract and structured-output capability—rather than a universal
 `AIProvider.chat/embed/realtime/...` interface. Realtime gets only a future
@@ -210,23 +213,21 @@ Conversation Runtime.
 
 ## 5.2 Normalized provider streaming
 
-The baseline will use a small, ordered stream taxonomy, finalized during
-SA-B007.1 against ADR-0004/ADR-0005. It is expected to be semantically
-equivalent to:
+The baseline uses this small, ordered stream taxonomy, frozen in SA-B007.1:
 
 ```text
 TextDelta
 ToolCallProposed
 UsageUpdated
-Completed
-ProviderError
+ProviderCompleted
+ProviderFailed
 ```
 
 `TextDelta` is partial, ordered text and is not a final Turn result.
-`Completed` is the unique successful terminal event. `ProviderError` is the
-unique error terminal event and carries a normalized, internal-safe error
-category rather than an SDK exception. ToolCall proposals and usage may occur
-before completion but never authorize execution.
+`ProviderCompleted` is the unique successful terminal event.
+`ProviderFailed` is the unique failure terminal event and carries a normalized
+`ProviderError`. No event follows either terminal. ToolCall proposals and usage
+may occur before completion but never authorize execution.
 
 Raw SDK events stay inside adapters. Deltas are normally ephemeral delivery
 events. Final output, final Turn status, and safe error/correlation/usage
@@ -348,10 +349,21 @@ inference.
   event store or speculative attachment system.
 - Permit safe provider request/session correlation metadata only as operational
   information; it never replaces Conversation or Turn identity.
+- Keep Conversation and Turn SQLite-authoritative. Reserve the future,
+  deterministic external Memory Session correlation
+  `sofias-assistant:conversation:{conversation_uuid}` without persisting a
+  redundant `memory_session_id` in this slice.
+- Preserve `Turn != SessionEntry`: no automatic Turn-to-Memory mirroring is in
+  scope, and partial streams, failed output, provider/routing events, reasoning,
+  and Tool traces are not implied future SessionEntry content.
+- Keep Core/Turn identities suitable as stable future correlation/idempotency
+  inputs for a post-commit external cognitive operation.
 
 **Transaction rule:** repository/UoW boundaries are explicit and short. The
 later inference network call must not occur in the same transaction that marks
-a Turn processing.
+a Turn processing. No Memory call may occur inside a SQLite UoW; any approved
+future cognitive operation is optional and occurs only after local commit/UoW
+closure.
 
 **Acceptance/tests:** Alembic upgrade on temporary SQLite, persistence round
 trip, Turn invariant/state-transition tests, UTC tests, repository/UoW no
@@ -374,8 +386,10 @@ objects.
 - Include request locality and selected model/provider context constraints as
   inputs while keeping provider-native prompt objects out of the service.
 - Establish small explicit future seams for Working Memory, Task context,
-  ToolResults, and Long-Term Memory. Do not create a generic contributor
-  registry, plugin framework, Fake Memory, recall, or persistence for memory.
+  ToolResults, Long-Term Memory, Recall, optional Memory Session context,
+  selected Skill procedure, and Agent Profile instructions. None of those
+  integrations is implemented in Slice 02. Do not create a generic contributor
+  registry, plugin framework, Fake Memory, or Memory client.
 
 **Locality rule:** ContextBuilder is authoritative for which context elements
 are eligible to include. It receives the operation locality requirement and
@@ -796,16 +810,23 @@ that owns their contract. They do not block approval or the start of Slice 02.
 Each decision must be frozen before implementation proceeds beyond its
 designated subpass and must not reopen the accepted ADRs.
 
+SA-B007.1 already froze the normalized stream taxonomy:
+
+```text
+TextDelta
+ToolCallProposed
+UsageUpdated
+ProviderCompleted
+ProviderFailed
+```
+
 1. **First real provider selection (before SA-B007.4):** choose the adapter and
    SDK only after evaluating the stated contract, SecretService, and smoke-test
    criteria.
-2. **Exact normalized stream names (SA-B007.1):** confirm the compact final
-   names while preserving the partial/terminal semantics defined here and in
-   ADR-0004/ADR-0005.
-3. **Exact minimum Conversation/Turn relational shape (SA-B008.1):** select the
+2. **Exact minimum Conversation/Turn relational shape (SA-B008.1):** select the
    smallest migration-backed schema satisfying the stated text/lifecycle and
    future modality seam, without prebuilding an event store.
-4. **NDJSON wire record names (SA-B008.4):** retain HTTP POST streaming with
+3. **NDJSON wire record names (SA-B008.4):** retain HTTP POST streaming with
    `application/x-ndjson` unless implementation discovers a concrete conflict
    with the approved normalized stream contract; WebSocket and realtime remain
    out of scope regardless.
