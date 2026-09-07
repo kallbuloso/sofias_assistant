@@ -2,7 +2,8 @@
 
 **Scope:** SA-B007, SA-B008 and SA-B010  
 **Target Gate:** I2 — Sofia Can Converse  
-**Status:** Proposed execution plan  
+**Status:** COMPLETED<br>
+**Gate I2:** PASS<br>
 **Source:** Approved Technical Backlog Map  
 **Architecture baseline:** ADR-0001, ADR-0002, ADR-0004, ADR-0005, ADR-0006,
 ADR-0008, Architecture Review Amendments 0001 and 0002, and completed Slice 01
@@ -893,3 +894,25 @@ ProviderFailed
    `application/x-ndjson` unless implementation discovers a concrete conflict
    with the approved normalized stream contract; WebSocket and realtime remain
    out of scope regardless.
+
+---
+
+# Gate I2 Closure Evidence
+
+**Audited baseline:** `ad49bfd201860588a6df135a6966905ea3fd0fbe`
+
+The deterministic default suite passed with `349 passed, 2 skipped` and no
+warnings. The opt-in OpenAI smoke remained skipped in that suite.
+
+The real-loopback Gate harness proves authenticated Boundary-to-Core streaming,
+with Boundary stopped before Core; durable restart/reload through a new Core,
+runtime, registry, and providers; provider/model substitution within one
+Conversation; and bounded history with `max_recent_turns=1`, where Turn 3
+contains only Turn 2 history. It also proves normalized provider failure leaves
+the Conversation valid with a failed Turn.
+
+Existing authentication and locality tests prove missing Bearer/session failure
+and `LOCAL_ONLY` fail-closed behavior. External approved OpenAI live-smoke
+evidence: `1 passed in 7.24s` on Windows / Python 3.13.15, resolving
+`SecretRef("providers/openai/api-key")` through SecretService and
+WindowsCredentialStore without `OPENAI_API_KEY`.
