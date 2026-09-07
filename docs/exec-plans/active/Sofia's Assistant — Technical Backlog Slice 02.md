@@ -444,11 +444,11 @@ No blind retry framework is added. Any later fallback must remain compatible
 with requirements and locality.
 
 **Concurrency baseline:** Slice 01 guarantees a single Core process per
-Operational Store; Slice 02 will implement the smallest explicit protection
-needed against two processors finalizing the same Turn (for example an
-optimistic state transition or conversation-level serialization). It will not
-claim distributed consensus. The chosen boundary and its limitation will be
-tested and documented in the subpass.
+Operational Store. SA-B008.2 uses process-local per-Conversation serialization
+across the non-streaming Turn lifecycle. It protects sequence allocation and
+same-Conversation processing within one runtime/Core instance; it is neither a
+distributed lock nor protection from external writers. Streaming/realtime may
+revisit this granularity in a later subpass.
 
 **Acceptance/tests:** Fake Provider plus real temporary Operational Store:
 create, continue, successful final response, failure preserving Conversation,
