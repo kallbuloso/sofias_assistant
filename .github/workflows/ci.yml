@@ -11,6 +11,9 @@ jobs:
   quality:
     name: Quality
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: core
     steps:
       - name: Check out repository
         uses: actions/checkout@v5

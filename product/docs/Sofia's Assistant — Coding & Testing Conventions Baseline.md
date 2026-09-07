@@ -601,7 +601,7 @@ pytest
 Estrutura:
 
 ```text
-tests/
+core/tests/
 ├── unit/
 ├── integration/
 └── smoke/
