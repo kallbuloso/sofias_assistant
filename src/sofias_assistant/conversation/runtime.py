@@ -1,7 +1,7 @@
-"""Core-owned non-streaming text conversation application runtime."""
+"""Core-owned text conversation application runtime."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -12,14 +12,29 @@ from sofias_assistant.ai.contracts import (
     Capability,
     DataLocality,
     ModelIdentity,
+    ProviderCompleted,
+    ProviderFailed,
     ProviderInvocationError,
+    ProviderResponseMetadata,
+    TextDelta,
     TextResponse,
+    ToolCallProposed,
+    UsageUpdated,
 )
 from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
 from sofias_assistant.context.builder import (
     ContextBudgetExceededError,
     ContextBuilder,
     ContextLocalityError,
+)
+from sofias_assistant.conversation.events import (
+    ConversationStreamEvent,
+    ConversationTextDelta,
+    ConversationToolCallProposed,
+    ConversationTurnCompleted,
+    ConversationTurnFailed,
+    ConversationTurnStarted,
+    ConversationUsageUpdated,
 )
 from sofias_assistant.conversation.models import (
     Conversation,
@@ -125,6 +140,287 @@ class TextConversationRuntime:
         )
         async with lock:
             return await self._send_text_locked(command)
+
+    async def stream_text(
+        self, command: SendTextCommand
+    ) -> AsyncIterator[ConversationStreamEvent]:
+        """Yield Core-owned events while retaining the shared Conversation lock."""
+        if not isinstance(command, SendTextCommand):
+            raise ValueError("command must be a SendTextCommand")
+        lock = self._conversation_locks.setdefault(
+            command.conversation_id, asyncio.Lock()
+        )
+        async with lock:
+            stream = self._stream_text_locked(command)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await stream.aclose()
+
+    async def _stream_text_locked(
+        self, command: SendTextCommand
+    ) -> AsyncGenerator[ConversationStreamEvent]:
+        conversation, processing_turn = await self._persist_processing_turn(command)
+        partial_text: list[str] = []
+        request: AIRequest | None = None
+        model: ModelIdentity | None = None
+        projection_eligibility: bool | None = None
+        trusted_provider_ids: tuple[str | None, str | None] | None = None
+        terminalized = False
+        try:
+            yield ConversationTurnStarted(conversation, processing_turn)
+            requirements = AIRequestRequirements(
+                required_capabilities=frozenset({Capability.TEXT_STREAMING}),
+                preferred_capabilities=frozenset(),
+                locality=command.locality,
+            )
+            try:
+                route = self._router.route(
+                    requirements, model_override=command.model_override
+                )
+            except RoutingError:
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category="routing_error",
+                    error_message="No compatible text model is available",
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+
+            persisted_turn, conversation_turns = await self._load_context_snapshots(
+                conversation_id=conversation.id,
+                turn_id=processing_turn.id,
+            )
+            try:
+                projection = self._context_builder.build(
+                    current_turn=persisted_turn,
+                    conversation_turns=conversation_turns,
+                    locality=command.locality,
+                    model=route.descriptor,
+                )
+            except ContextBudgetExceededError:
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category="context_limit_exceeded",
+                    error_message="Context exceeds the selected model input budget",
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+            except ContextLocalityError:
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category="context_locality_error",
+                    error_message="Context is not eligible for the selected execution target",
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+
+            projection_eligibility = projection.cloud_context_eligible
+            model = route.descriptor.identity
+            request = AIRequest(
+                request_id=self._new_uuid(), messages=projection.messages
+            )
+            provider = route.binding.text_streaming
+            if provider is None:
+                raise RuntimeError("Selected streaming route has no streaming provider")
+            terminal: ProviderCompleted | ProviderFailed | None = None
+            protocol_invalid = False
+            tool_unsupported = False
+            try:
+                async for provider_event in provider.stream_text(
+                    model=model, request=request
+                ):
+                    if not isinstance(
+                        provider_event,
+                        (
+                            TextDelta,
+                            ToolCallProposed,
+                            UsageUpdated,
+                            ProviderCompleted,
+                            ProviderFailed,
+                        ),
+                    ):
+                        protocol_invalid = True
+                        continue
+                    if not self._stream_metadata_matches(
+                        provider_event.metadata, request, model
+                    ):
+                        protocol_invalid = True
+                        continue
+                    provider_ids = (
+                        provider_event.metadata.provider_request_id,
+                        provider_event.metadata.provider_session_id,
+                    )
+                    if trusted_provider_ids is None:
+                        trusted_provider_ids = provider_ids
+                    elif trusted_provider_ids != provider_ids:
+                        protocol_invalid = True
+                        continue
+                    if terminal is not None:
+                        protocol_invalid = True
+                        continue
+                    if isinstance(provider_event, ProviderCompleted | ProviderFailed):
+                        terminal = provider_event
+                    elif isinstance(provider_event, TextDelta):
+                        if not tool_unsupported:
+                            partial_text.append(provider_event.text)
+                            yield ConversationTextDelta(
+                                conversation.id,
+                                processing_turn.id,
+                                request.request_id,
+                                model,
+                                provider_event.text,
+                            )
+                    elif isinstance(provider_event, UsageUpdated):
+                        if not tool_unsupported:
+                            yield ConversationUsageUpdated(
+                                conversation.id,
+                                processing_turn.id,
+                                request.request_id,
+                                model,
+                                provider_event.usage,
+                            )
+                    elif not tool_unsupported:
+                        tool_unsupported = True
+                        yield ConversationToolCallProposed(
+                            conversation.id,
+                            processing_turn.id,
+                            request.request_id,
+                            model,
+                            provider_event.proposal,
+                        )
+            except ProviderInvocationError as error:
+                protocol_failure = protocol_invalid
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category=(
+                        "provider_protocol_error"
+                        if protocol_failure
+                        else "tool_call_unsupported"
+                        if tool_unsupported
+                        else error.error.category.value
+                    ),
+                    error_message=(
+                        "Provider stream violated the normalized stream contract"
+                        if protocol_failure
+                        else "Tool calls are not supported for text conversations"
+                        if tool_unsupported
+                        else error.error.safe_message
+                    ),
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id,
+                    model=model,
+                    provider_request_id=(
+                        None
+                        if protocol_failure
+                        else (trusted_provider_ids or (None, None))[0]
+                    ),
+                    provider_session_id=(
+                        None
+                        if protocol_failure
+                        else (trusted_provider_ids or (None, None))[1]
+                    ),
+                    cloud_context_eligible=projection_eligibility,
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+
+            if protocol_invalid or terminal is None:
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category="provider_protocol_error",
+                    error_message="Provider stream violated the normalized stream contract",
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id,
+                    model=model,
+                    cloud_context_eligible=projection_eligibility,
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+            if tool_unsupported:
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category="tool_call_unsupported",
+                    error_message="Tool calls are not supported for text conversations",
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id,
+                    model=model,
+                    provider_request_id=(trusted_provider_ids or (None, None))[0],
+                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    cloud_context_eligible=projection_eligibility,
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+            if isinstance(terminal, ProviderFailed):
+                result = await self._finalize_failure(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    error_category=terminal.error.category.value,
+                    error_message=terminal.error.safe_message,
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id,
+                    model=model,
+                    provider_request_id=(trusted_provider_ids or (None, None))[0],
+                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    cloud_context_eligible=projection_eligibility,
+                )
+                terminalized = True
+                yield ConversationTurnFailed(result.conversation, result.turn)
+                return
+            response = TextResponse(
+                text="".join(partial_text), metadata=terminal.metadata
+            )
+            result = await self._finalize_success(
+                conversation_id=conversation.id,
+                turn_id=processing_turn.id,
+                response=response,
+                ai_request_id=request.request_id,
+                model=model,
+                cloud_context_eligible=projection_eligibility,
+            )
+            terminalized = True
+            yield ConversationTurnCompleted(
+                result.conversation, result.turn, terminal.usage
+            )
+        except asyncio.CancelledError:
+            if not terminalized:
+                await self._finalize_interruption(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id if request is not None else None,
+                    model=model,
+                    provider_request_id=(trusted_provider_ids or (None, None))[0],
+                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    cloud_context_eligible=projection_eligibility,
+                )
+            raise
+        except GeneratorExit:
+            if not terminalized:
+                await self._finalize_interruption(
+                    conversation_id=conversation.id,
+                    turn_id=processing_turn.id,
+                    assistant_text="".join(partial_text) if partial_text else None,
+                    ai_request_id=request.request_id if request is not None else None,
+                    model=model,
+                    provider_request_id=(trusted_provider_ids or (None, None))[0],
+                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    cloud_context_eligible=projection_eligibility,
+                )
+            raise
 
     async def _send_text_locked(self, command: SendTextCommand) -> TextTurnResult:
         conversation, processing_turn = await self._persist_processing_turn(command)
@@ -343,6 +639,41 @@ class TextConversationRuntime:
             await unit_of_work.commit()
         return TextTurnResult(updated_conversation, failed_turn)
 
+    async def _finalize_interruption(
+        self,
+        *,
+        conversation_id: UUID,
+        turn_id: UUID,
+        assistant_text: str | None,
+        ai_request_id: UUID | None,
+        model: ModelIdentity | None,
+        provider_request_id: str | None,
+        provider_session_id: str | None,
+        cloud_context_eligible: bool | None,
+    ) -> tuple[Conversation, Turn]:
+        """Durably interrupt a processing turn after cancellation or close."""
+        timestamp = self._current_utc_time()
+        async with self._uow_factory() as unit_of_work:
+            turn, conversation = await self._load_processing_for_finalization(
+                unit_of_work, conversation_id, turn_id
+            )
+            interrupted_turn = turn.interrupt(
+                assistant_text=assistant_text,
+                updated_at=timestamp,
+                finished_at=timestamp,
+                ai_request_id=ai_request_id,
+                provider_id=model.provider_id if model is not None else None,
+                model_id=model.model_id if model is not None else None,
+                provider_request_id=provider_request_id,
+                provider_session_id=provider_session_id,
+                cloud_context_eligible=cloud_context_eligible,
+            )
+            updated_conversation = replace(conversation, updated_at=timestamp)
+            await unit_of_work.turns.save(interrupted_turn)
+            await unit_of_work.conversations.save(updated_conversation)
+            await unit_of_work.commit()
+        return updated_conversation, interrupted_turn
+
     async def _load_processing_for_finalization(
         self,
         unit_of_work: SqlAlchemyUnitOfWork,
@@ -371,6 +702,14 @@ class TextConversationRuntime:
             response.metadata.request_id == request.request_id
             and response.metadata.model == model
         )
+
+    @staticmethod
+    def _stream_metadata_matches(
+        metadata: ProviderResponseMetadata,
+        request: AIRequest,
+        model: ModelIdentity,
+    ) -> bool:
+        return metadata.request_id == request.request_id and metadata.model == model
 
     def _current_utc_time(self) -> datetime:
         timestamp = self._clock()

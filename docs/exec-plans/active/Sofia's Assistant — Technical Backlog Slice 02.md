@@ -504,14 +504,19 @@ future transport adapter
 
 - Translate provider events into Conversation-level events carrying stable
   Conversation/Turn/correlation identity.
-- Ensure partial deltas are ordered and delivered as partial; only the terminal
-  success path writes a completed final result.
+- Persist PROCESSING before the first Core stream event. Keep ordered partial
+  output ephemeral, validate the complete normalized provider sequence, and
+  write a terminal result only after its terminal event and iterator end.
 - Define text cancellation/interruption baseline and persistence of the
-  interrupted state without treating `CancelledError` as success.
+  interrupted state without treating `CancelledError` as success; explicit
+  async-generator close follows the same durable interruption rule.
 - Persist final status/output and safe operational metadata after stream end;
-  keep transport delivery mechanics and raw SDK events ephemeral.
+  keep transport delivery mechanics and raw SDK events ephemeral. The
+  process-local per-Conversation lock is shared with non-streaming text work;
+  Tool proposals remain inert and fail closed.
 
-B009 owns audio/realtime sessions, barge-in, and WebSocket behavior.
+No HTTP or realtime/audio behavior is added; B009 owns audio/realtime sessions,
+barge-in, and WebSocket behavior.
 
 **Acceptance/tests:** scripted deltas, completion, normalized provider error,
 interruption/cancellation, no finalization of partial output, and durable final
