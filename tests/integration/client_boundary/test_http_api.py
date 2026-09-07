@@ -1,17 +1,36 @@
 """In-process integration tests for the local HTTP client-boundary contract."""
 
 import hashlib
-from datetime import datetime
+import json
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
+from sofias_assistant.ai.contracts import ModelIdentity, UsageMetadata
 from sofias_assistant.client_boundary import (
     ClientSessionRegistry,
     LocalClientAuthenticator,
 )
 from sofias_assistant.client_boundary.http_api import create_local_http_app
+from sofias_assistant.conversation.events import (
+    ConversationTextDelta,
+    ConversationTurnCompleted,
+    ConversationTurnStarted,
+    ConversationUsageUpdated,
+)
+from sofias_assistant.conversation.models import (
+    Conversation,
+    Turn,
+    TurnInputModality,
+    TurnStatus,
+)
+from sofias_assistant.conversation.runtime import (
+    ConversationNotFoundError,
+    ConversationState,
+    SendTextCommand,
+)
 from sofias_assistant.core import CoreState
 from sofias_assistant.health import ComponentHealth, HealthStatus, RuntimeHealthSnapshot
 from sofias_assistant.secrets.models import SecretValue
@@ -28,6 +47,82 @@ class FakeCoreReadApi:
                 ComponentHealth("operational-store", HealthStatus.HEALTHY),
                 ComponentHealth("secret-store", HealthStatus.UNKNOWN, "configured"),
             )
+        )
+
+
+class FakeConversationHttpApi:
+    """In-memory Core-facing fake that keeps HTTP adapter tests transport-only."""
+
+    def __init__(self) -> None:
+        self._conversation_id = uuid4()
+        self._turn_id = uuid4()
+        self._request_id = uuid4()
+        self._timestamp = datetime(2026, 9, 7, tzinfo=UTC)
+        self._model = ModelIdentity("fake", "stream")
+        self._created = False
+        self.commands: list[SendTextCommand] = []
+
+    async def create_conversation(self) -> Conversation:
+        self._created = True
+        return self._conversation()
+
+    async def get_conversation_state(self, conversation_id: UUID) -> ConversationState:
+        if not self._created or conversation_id != self._conversation_id:
+            raise ConversationNotFoundError("Conversation was not found")
+        return ConversationState(self._conversation(), (self._terminal_turn(),))
+
+    async def stream_text(self, command: SendTextCommand):
+        self.commands.append(command)
+        conversation = self._conversation()
+        processing = self._processing_turn(command.text)
+        yield ConversationTurnStarted(conversation, processing)
+        yield ConversationTextDelta(
+            conversation.id, processing.id, self._request_id, self._model, "answer"
+        )
+        yield ConversationUsageUpdated(
+            conversation.id,
+            processing.id,
+            self._request_id,
+            self._model,
+            UsageMetadata(input_tokens=2, output_tokens=1),
+        )
+        yield ConversationTurnCompleted(conversation, self._terminal_turn())
+
+    def _conversation(self) -> Conversation:
+        return Conversation(self._conversation_id, self._timestamp, self._timestamp)
+
+    def _processing_turn(self, text: str) -> Turn:
+        return Turn(
+            self._turn_id,
+            self._conversation_id,
+            1,
+            TurnStatus.PROCESSING,
+            TurnInputModality.TEXT,
+            True,
+            text,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            self._timestamp,
+            self._timestamp,
+            None,
+        )
+
+    def _terminal_turn(self) -> Turn:
+        return self._processing_turn("hello").complete(
+            assistant_text="answer",
+            ai_request_id=self._request_id,
+            provider_id="fake",
+            model_id="stream",
+            provider_request_id="provider-request-secret",
+            provider_session_id="provider-session-secret",
+            updated_at=self._timestamp,
+            finished_at=self._timestamp,
         )
 
 
@@ -246,3 +341,141 @@ def test_core_route_requires_the_existing_session_authentication() -> None:
     assert response.json()["state"] == "running"
     assert response.json()["runtime_session_id"] is not None
     assert credential.reveal() not in response.text
+
+
+def test_conversation_routes_are_registered_only_with_an_injected_service(
+    boundary: tuple[TestClient, ClientSessionRegistry, str],
+) -> None:
+    client, _, _ = boundary
+
+    assert client.post("/api/v1/conversations").status_code == 404
+
+
+def test_authenticated_conversation_http_contract_is_explicit_and_redacted() -> None:
+    authenticator, credential = LocalClientAuthenticator.create()
+    sessions = ClientSessionRegistry(authenticator)
+    conversation = FakeConversationHttpApi()
+    client = TestClient(
+        create_local_http_app(authenticator, sessions, conversation=conversation)
+    )
+    opened = _open_session(client, credential.reveal())
+    headers = _bearer(credential.reveal()) | {"X-Sofia-Client-Session-ID": opened["id"]}
+
+    assert client.post("/api/v1/conversations").status_code == 401
+    assert (
+        client.post(
+            "/api/v1/conversations", headers=_bearer(credential.reveal())
+        ).status_code
+        == 401
+    )
+
+    created = client.post("/api/v1/conversations", headers=headers)
+    assert created.status_code == 201
+    conversation_id = created.json()["id"]
+
+    stream = client.post(
+        f"/api/v1/conversations/{conversation_id}/turns",
+        headers=headers,
+        json={
+            "text": "hello",
+            "locality": "cloud_allowed",
+            "cloud_context_eligible": True,
+            "model_override": {"provider_id": "fake", "model_id": "stream"},
+        },
+    )
+    assert "application/x-ndjson" in stream.headers["content-type"]
+    records = [json_line for json_line in stream.text.splitlines() if json_line]
+    payloads = [json.loads(record) for record in records]
+    assert [payload["type"] for payload in payloads] == [
+        "turn_started",
+        "text_delta",
+        "usage_updated",
+        "turn_completed",
+    ]
+    assert payloads[1]["text"] == "answer"
+    assert "provider-request-secret" not in stream.text
+    assert "provider-session-secret" not in stream.text
+    assert conversation.commands[-1].model_override == ModelIdentity("fake", "stream")
+
+    retrieved = client.get(f"/api/v1/conversations/{conversation_id}", headers=headers)
+    assert retrieved.status_code == 200
+    assert retrieved.json()["turns"][0]["status"] == "COMPLETED"
+    assert "provider_request_id" not in retrieved.text
+    assert "provider_session_id" not in retrieved.text
+    assert client.get(f"/api/v1/conversations/{uuid4()}", headers=headers).json() == {
+        "detail": "Conversation not found"
+    }
+
+
+def _conversation_request_boundary() -> tuple[
+    TestClient, FakeConversationHttpApi, dict[str, str], str
+]:
+    authenticator, credential = LocalClientAuthenticator.create()
+    sessions = ClientSessionRegistry(authenticator)
+    conversation = FakeConversationHttpApi()
+    client = TestClient(
+        create_local_http_app(authenticator, sessions, conversation=conversation)
+    )
+    opened = _open_session(client, credential.reveal())
+    headers = _bearer(credential.reveal()) | {"X-Sofia-Client-Session-ID": opened["id"]}
+    created = client.post("/api/v1/conversations", headers=headers)
+    assert created.status_code == 201
+    return client, conversation, headers, created.json()["id"]
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_conversation_turn_rejects_blank_text_with_422(text: str) -> None:
+    client, _, headers, conversation_id = _conversation_request_boundary()
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/turns",
+        headers=headers,
+        json={
+            "text": text,
+            "locality": "local_only",
+            "cloud_context_eligible": True,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("field", ["provider_id", "model_id"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_conversation_turn_rejects_blank_model_override_fields_with_422(
+    field: str, value: str
+) -> None:
+    client, _, headers, conversation_id = _conversation_request_boundary()
+    override = {"provider_id": "fake", "model_id": "stream"}
+    override[field] = value
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/turns",
+        headers=headers,
+        json={
+            "text": "valid",
+            "locality": "local_only",
+            "cloud_context_eligible": True,
+            "model_override": override,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_conversation_turn_preserves_significant_text_whitespace() -> None:
+    client, conversation, headers, conversation_id = _conversation_request_boundary()
+    text = "  preserve me  "
+
+    response = client.post(
+        f"/api/v1/conversations/{conversation_id}/turns",
+        headers=headers,
+        json={
+            "text": text,
+            "locality": "local_only",
+            "cloud_context_eligible": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert conversation.commands[-1].text == text

@@ -1,10 +1,32 @@
 """Real loopback integration tests for the local server and its composition."""
 
 import asyncio
+import json
 import socket
+from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from sofias_assistant.ai.contracts import (
+    AIRequest,
+    Capability,
+    ExecutionLocation,
+    ModelDescriptor,
+    ModelIdentity,
+    ProviderCompleted,
+    ProviderResponseMetadata,
+    ProviderStreamEvent,
+    TextDelta,
+)
+from sofias_assistant.ai.providers import TextStreamingProvider
+from sofias_assistant.ai.registry import (
+    ModelRegistration,
+    ModelRegistry,
+    ProviderBinding,
+)
+from sofias_assistant.ai.routing import CapabilityRouter
 from sofias_assistant.client_boundary import (
     ClientSessionRegistry,
     LocalClientAuthenticator,
@@ -20,6 +42,15 @@ from sofias_assistant.client_boundary.server import (
     LocalApiBindError,
     LocalHttpServer,
 )
+from sofias_assistant.context.builder import ContextBuilder
+from sofias_assistant.context.models import CoreSystemContext
+from sofias_assistant.conversation.runtime import TextConversationRuntime
+from sofias_assistant.persistence.database import (
+    create_async_engine,
+    create_session_factory,
+)
+from sofias_assistant.persistence.migration_runner import upgrade_to_head
+from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from sofias_assistant.secrets.models import SecretValue
 
 
@@ -37,6 +68,55 @@ async def _request(port: int, request: str) -> str:
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+async def _streaming_runtime_for(
+    tmp_path: Path, provider: TextStreamingProvider
+) -> tuple[TextConversationRuntime, AsyncEngine]:
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'operational.sqlite').as_posix()}"
+    await asyncio.to_thread(upgrade_to_head, database_url)
+    engine = create_async_engine(database_url)
+    session_factory = create_session_factory(engine)
+
+    def uow_factory() -> SqlAlchemyUnitOfWork:
+        return SqlAlchemyUnitOfWork(session_factory)
+
+    descriptor = ModelDescriptor(
+        identity=ModelIdentity("fake", "stream"),
+        capabilities=frozenset({Capability.TEXT_STREAMING}),
+        execution_location=ExecutionLocation.LOCAL,
+        context_window=4096,
+    )
+    registry = ModelRegistry()
+    registry.register(
+        ModelRegistration(
+            descriptor=descriptor,
+            binding=ProviderBinding(text_streaming=provider),
+        )
+    )
+    return (
+        TextConversationRuntime(
+            uow_factory=uow_factory,
+            router=CapabilityRouter(registry),
+            context_builder=ContextBuilder(
+                system_context=CoreSystemContext("System", True),
+                max_recent_turns=10,
+                max_estimated_input_tokens=10_000,
+            ),
+        ),
+        engine,
+    )
+
+
+class _LoopbackStreamingProvider:
+    """Small local provider fake for a real socket test without network I/O."""
+
+    async def stream_text(
+        self, *, model: ModelIdentity, request: AIRequest
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        metadata = ProviderResponseMetadata(request.request_id, model)
+        yield TextDelta(metadata, "hello")
+        yield ProviderCompleted(metadata)
 
 
 def test_canonical_loopback_defaults() -> None:
@@ -211,3 +291,70 @@ async def test_boundary_port_conflict_does_not_return_access_or_fallback() -> No
             await replacement.stop()
     finally:
         reserved.close()
+
+
+@pytest.mark.asyncio
+async def test_boundary_streams_a_durable_conversation_over_real_loopback(
+    tmp_path: Path,
+) -> None:
+    provider = _LoopbackStreamingProvider()
+    runtime, engine = await _streaming_runtime_for(tmp_path, provider)
+    boundary = LocalClientBoundary(
+        port=0,
+        app_factory=lambda authenticator, sessions: create_local_http_app(
+            authenticator, sessions, conversation=runtime
+        ),
+    )
+    try:
+        access = await boundary.start()
+        opened = await _request(
+            access.port,
+            "POST /api/v1/client-sessions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            f"Authorization: Bearer {access.credential.reveal()}\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        _, _, opened_body = opened.partition("\r\n\r\n")
+        session_id = json.loads(opened_body)["id"]
+        headers = (
+            f"Authorization: Bearer {access.credential.reveal()}\r\n"
+            f"X-Sofia-Client-Session-ID: {session_id}\r\n"
+        )
+        created = await _request(
+            access.port,
+            "POST /api/v1/conversations HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"{headers}Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        _, _, created_body = created.partition("\r\n\r\n")
+        conversation_id = json.loads(created_body)["id"]
+        payload = json.dumps(
+            {
+                "text": "request",
+                "locality": "local_only",
+                "cloud_context_eligible": True,
+            }
+        )
+        streamed = await _request(
+            access.port,
+            "POST /api/v1/conversations/"
+            f"{conversation_id}/turns HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(payload.encode('utf-8'))}\r\n"
+            f"\r\n{payload}",
+        )
+        assert streamed.startswith("HTTP/1.1 200")
+        assert "application/x-ndjson" in streamed
+        assert '"turn_started"' in streamed
+        assert '"text_delta"' in streamed
+        assert '"turn_completed"' in streamed
+
+        retrieved = await _request(
+            access.port,
+            "GET /api/v1/conversations/"
+            f"{conversation_id} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n",
+        )
+        assert retrieved.startswith("HTTP/1.1 200")
+        assert '"assistant_text":"hello"' in retrieved
+    finally:
+        await boundary.stop()
+        await engine.dispose()

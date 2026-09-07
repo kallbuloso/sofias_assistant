@@ -54,6 +54,29 @@ class TurnFinalizationConflictError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationState:
+    """One consistent, Core-owned read snapshot of a Conversation and its Turns."""
+
+    conversation: Conversation
+    turns: tuple[Turn, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.conversation, Conversation):
+            raise ValueError("conversation must be a Conversation")
+        if not isinstance(self.turns, tuple) or not all(
+            isinstance(turn, Turn) for turn in self.turns
+        ):
+            raise ValueError("turns must be a tuple of Turn values")
+        previous_sequence = 0
+        for turn in self.turns:
+            if turn.conversation_id != self.conversation.id:
+                raise ValueError("all turns must belong to the conversation")
+            if turn.sequence <= previous_sequence:
+                raise ValueError("turn sequences must be strictly increasing")
+            previous_sequence = turn.sequence
+
+
+@dataclass(frozen=True, slots=True)
 class SendTextCommand:
     """Core-owned input for one textual operation within a Conversation."""
 
@@ -130,6 +153,20 @@ class TextConversationRuntime:
             unit_of_work.conversations.add(conversation)
             await unit_of_work.commit()
         return conversation
+
+    async def get_conversation_state(self, conversation_id: UUID) -> ConversationState:
+        """Load one Conversation and its ordered durable Turn snapshots."""
+
+        if not isinstance(conversation_id, UUID):
+            raise ValueError("conversation_id must be a UUID")
+        async with self._uow_factory() as unit_of_work:
+            conversation = await unit_of_work.conversations.get_by_id(conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError("Conversation was not found")
+            turns = tuple(
+                await unit_of_work.turns.list_for_conversation(conversation_id)
+            )
+        return ConversationState(conversation=conversation, turns=turns)
 
     async def send_text(self, command: SendTextCommand) -> TextTurnResult:
         """Persist, project, infer, and terminalize one textual Turn."""

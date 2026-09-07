@@ -533,6 +533,9 @@ existing FastAPI/Uvicorn boundary.
 
 - Add only the routes required to create a Conversation, submit a text Turn,
   and retrieve the Conversation/Turn state needed to prove durability.
+  The concrete authenticated routes are `POST /api/v1/conversations`,
+  `POST /api/v1/conversations/{conversation_id}/turns`, and
+  `GET /api/v1/conversations/{conversation_id}`.
 - Reuse the existing `require_session` authentication dependency exactly:
 
   ```text
@@ -549,9 +552,15 @@ existing FastAPI/Uvicorn boundary.
 - Use `StreamingResponse` with `application/x-ndjson` as the baseline for a
   streaming text-turn POST. NDJSON preserves ordered, transport-only records
   over a client POST without prematurely introducing WebSocket or SSE.
-  Expected transport semantics are equivalent to `turn_started`, `text_delta`,
-  `turn_completed`, `turn_failed`, and `turn_interrupted`; final wire names are
-  confirmed with the normalized event contract in SA-B007.1.
+  Expected transport records are `turn_started`, `text_delta`,
+  `usage_updated`, `tool_call_proposed`, `turn_completed`, `turn_failed`, and
+  `turn_interrupted`; final wire names are confirmed with the normalized event
+  contract in SA-B007.1.
+- Inject the Core-owned Conversation service through the existing app factory;
+  reuse Bearer-plus-ClientSession authentication for create, read, and stream
+  routes. Map explicit transport DTOs and never expose provider request/session
+  IDs. Include one real loopback proof with an injected fake-provider runtime;
+  final SofiaCore composition remains deferred.
 
 **Acceptance/tests:** authentication failures for missing Bearer, missing
 session, and session UUID alone; successful create/submit/retrieve flow;
