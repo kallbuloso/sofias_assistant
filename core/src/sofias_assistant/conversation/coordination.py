@@ -11,6 +11,24 @@ class ConversationActivityConflictError(RuntimeError):
     """Raised when an exclusive voice activity conflicts with another activity."""
 
 
+class ConversationActivityLease:
+    """One explicitly released, process-local voice activity lease."""
+
+    def __init__(self, state: "_ConversationActivityState") -> None:
+        self._state = state
+        self._released = False
+
+    async def release(self) -> None:
+        """Release this lease exactly once; repeated release is harmless."""
+
+        if self._released:
+            return
+        async with self._state.gate:
+            if not self._released:
+                self._state.voice_active = False
+                self._released = True
+
+
 @dataclass(slots=True)
 class _ConversationActivityState:
     gate: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -58,6 +76,17 @@ class ConversationActivityCoordinator:
     async def voice_activity(self, conversation_id: UUID) -> AsyncIterator[None]:
         """Acquire one fail-fast exclusive voice activity for a Conversation."""
 
+        lease = await self.acquire_voice_activity(conversation_id)
+        try:
+            yield
+        finally:
+            await lease.release()
+
+    async def acquire_voice_activity(
+        self, conversation_id: UUID
+    ) -> ConversationActivityLease:
+        """Acquire an exclusive lease that may span multiple runtime calls."""
+
         state = self._state_for(conversation_id)
         async with state.gate:
             if state.voice_active or state.text_active or state.pending_text:
@@ -65,11 +94,7 @@ class ConversationActivityCoordinator:
                     "Another activity is already active for this conversation"
                 )
             state.voice_active = True
-        try:
-            yield
-        finally:
-            async with state.gate:
-                state.voice_active = False
+        return ConversationActivityLease(state)
 
     async def context_revision(self, conversation_id: UUID) -> int:
         """Return the current process-local durable-context revision."""

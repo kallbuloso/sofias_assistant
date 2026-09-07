@@ -1,0 +1,771 @@
+"""Provider-neutral realtime conversation runtime; no transport or SDK concerns."""
+
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
+
+from sofias_assistant.ai.contracts import (
+    AIRequestRequirements,
+    AssistantAudioChunk,
+    AssistantTranscriptFinal,
+    AssistantTranscriptPartial,
+    AudioFormat,
+    AudioInputFrame,
+    Capability,
+    DataLocality,
+    ExecutionLocation,
+    ModelIdentity,
+    ProviderInvocationError,
+    RealtimeInteractionId,
+    RealtimeResponseCompleted,
+    RealtimeResponseFailed,
+    RealtimeSessionFailed,
+    RealtimeSessionId,
+    UserTranscriptFinal,
+    UserTranscriptPartial,
+)
+from sofias_assistant.ai.providers import RealtimeProviderSession
+from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
+from sofias_assistant.context.builder import ContextBuilder, ContextLocalityError
+from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
+from sofias_assistant.conversation.events import (
+    ConversationTurnCompleted,
+    ConversationTurnFailed,
+    ConversationTurnInterrupted,
+    ConversationTurnStarted,
+)
+from sofias_assistant.conversation.models import (
+    Conversation,
+    Turn,
+    TurnInputModality,
+    TurnStatus,
+)
+from sofias_assistant.conversation.realtime_events import (
+    ConversationRealtimeSessionFailed,
+    RealtimeAssistantAudioChunk,
+    RealtimeAssistantTranscriptFinal,
+    RealtimeAssistantTranscriptPartial,
+    RealtimeConversationEvent,
+    RealtimeInteractionFailed,
+    RealtimeInteractionStarted,
+    RealtimeSessionClosed,
+    RealtimeSessionOpened,
+    RealtimeUserTranscriptFinal,
+    RealtimeUserTranscriptPartial,
+)
+from sofias_assistant.conversation.realtime_models import (
+    RealtimeInteraction,
+    RealtimeSession,
+    RealtimeSessionState,
+)
+from sofias_assistant.conversation.runtime import ConversationNotFoundError
+from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
+
+
+class RealtimeSessionConflictError(RuntimeError):
+    pass
+
+
+class RealtimeSessionNotFoundError(RuntimeError):
+    pass
+
+
+class InvalidRealtimeStateError(RuntimeError):
+    pass
+
+
+class RealtimeProtocolError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRealtimeSessionCommand:
+    conversation_id: UUID
+    locality: DataLocality
+    cloud_context_eligible: bool
+    input_audio_format: AudioFormat
+    output_audio_format: AudioFormat
+    model_override: ModelIdentity | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.conversation_id, UUID):
+            raise ValueError("conversation_id must be a UUID")
+        if not isinstance(self.locality, DataLocality):
+            raise ValueError("locality must be DataLocality")
+        if not isinstance(self.cloud_context_eligible, bool):
+            raise ValueError("cloud_context_eligible must be bool")
+        if not isinstance(self.input_audio_format, AudioFormat) or not isinstance(
+            self.output_audio_format, AudioFormat
+        ):
+            raise ValueError("audio formats must be AudioFormat")
+        if self.model_override is not None and not isinstance(
+            self.model_override, ModelIdentity
+        ):
+            raise ValueError("model_override must be ModelIdentity")
+
+
+_END = object()
+
+
+class RealtimeConversationRuntime:
+    """Own transient Core sessions while persisting only final voice Turns."""
+
+    def __init__(
+        self,
+        *,
+        uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+        router: CapabilityRouter,
+        context_builder: ContextBuilder,
+        activity_coordinator: ConversationActivityCoordinator,
+        clock: Callable[[], datetime] | None = None,
+        id_factory: Callable[[], UUID] | None = None,
+    ) -> None:
+        self._uow_factory, self._router, self._context_builder = (
+            uow_factory,
+            router,
+            context_builder,
+        )
+        self._coordinator = activity_coordinator
+        self._clock, self._id_factory = (
+            clock or (lambda: datetime.now(UTC)),
+            id_factory or uuid4,
+        )
+        self._sessions: dict[RealtimeSessionId, RealtimeSession] = {}
+        self._conversation_sessions: dict[UUID, RealtimeSessionId] = {}
+        self._sessions_gate = asyncio.Lock()
+
+    async def open_session(
+        self, command: OpenRealtimeSessionCommand
+    ) -> RealtimeSession:
+        if not isinstance(command, OpenRealtimeSessionCommand):
+            raise ValueError("command must be OpenRealtimeSessionCommand")
+        async with self._sessions_gate:
+            if command.conversation_id in self._conversation_sessions:
+                raise RealtimeSessionConflictError(
+                    "A realtime session is already open for this conversation"
+                )
+            session_id = RealtimeSessionId(self._id_factory())
+            lease = await self._coordinator.acquire_voice_activity(
+                command.conversation_id
+            )
+            try:
+                route, turns = await self._route_and_load(command)
+                seed = self._context_builder.build_realtime_seed(
+                    conversation_id=command.conversation_id,
+                    conversation_turns=turns,
+                    locality=command.locality,
+                    model=route.descriptor,
+                )
+                if (
+                    route.descriptor.execution_location is ExecutionLocation.CLOUD
+                    and not command.cloud_context_eligible
+                ):
+                    raise ContextLocalityError(
+                        "Voice input is not eligible for a cloud execution target"
+                    )
+                revision = await self._coordinator.context_revision(
+                    command.conversation_id
+                )
+                provider = route.binding.realtime
+                if provider is None:
+                    raise RuntimeError(
+                        "Selected realtime route has no realtime provider"
+                    )
+                from sofias_assistant.ai.contracts import RealtimeSessionRequest
+
+                provider_session = await provider.open_realtime_session(
+                    model=route.descriptor.identity,
+                    request=RealtimeSessionRequest(
+                        session_id,
+                        command.input_audio_format,
+                        command.output_audio_format,
+                        seed,
+                    ),
+                )
+                session = RealtimeSession(
+                    session_id,
+                    command.conversation_id,
+                    route.descriptor.identity,
+                    command.input_audio_format,
+                    command.output_audio_format,
+                    command.locality,
+                    command.cloud_context_eligible,
+                    revision,
+                    provider_session=provider_session,
+                    event_queue=asyncio.Queue(maxsize=128),
+                )
+                self._sessions[session_id] = session
+                self._conversation_sessions[command.conversation_id] = session_id
+                session.consumer_task = asyncio.create_task(
+                    self._consume_provider_events(session)
+                )
+                await self._emit(
+                    session,
+                    RealtimeSessionOpened(
+                        session.id, session.conversation_id, session.model
+                    ),
+                )
+                return session
+            except ProviderInvocationError as error:
+                raise InvalidRealtimeStateError(
+                    "Realtime provider could not open a session"
+                ) from error
+            finally:
+                await lease.release()
+
+    async def start_interaction(
+        self, realtime_session_id: RealtimeSessionId
+    ) -> RealtimeInteractionId:
+        session = self._session(realtime_session_id)
+        if (
+            session.state is not RealtimeSessionState.IDLE
+            or session.active_interaction is not None
+        ):
+            raise InvalidRealtimeStateError("Realtime session is not idle")
+        lease = await self._coordinator.acquire_voice_activity(session.conversation_id)
+        try:
+            if (
+                session.provider_context_stale
+                or session.synced_context_revision
+                != await self._coordinator.context_revision(session.conversation_id)
+            ):
+                await self._reseed_provider(session)
+            interaction_id = RealtimeInteractionId(self._id_factory())
+            interaction = RealtimeInteraction(
+                interaction_id, lease, session.cloud_context_eligible
+            )
+            provider = self._provider(session)
+            await provider.start_interaction(realtime_interaction_id=interaction_id)
+            session.active_interaction, session.state = (
+                interaction,
+                RealtimeSessionState.ACTIVE,
+            )
+            await self._emit(
+                session, RealtimeInteractionStarted(session.id, interaction_id)
+            )
+            return interaction_id
+        except BaseException:
+            await lease.release()
+            raise
+
+    async def send_audio(
+        self, realtime_session_id: RealtimeSessionId, audio: bytes
+    ) -> None:
+        session, interaction = self._active(realtime_session_id)
+        if not isinstance(audio, bytes) or not audio:
+            raise ValueError("audio must be non-empty bytes")
+        if interaction.input_committed:
+            raise InvalidRealtimeStateError("Realtime interaction input is committed")
+        frame = AudioInputFrame(interaction.next_input_sequence, audio)
+        await self._provider(session).send_audio(frame=frame)
+        interaction.next_input_sequence += 1
+
+    async def commit_interaction(self, realtime_session_id: RealtimeSessionId) -> None:
+        session, interaction = self._active(realtime_session_id)
+        if interaction.input_committed:
+            raise InvalidRealtimeStateError("Realtime interaction input is committed")
+        interaction.input_committed = True
+        await self._provider(session).commit_interaction(
+            realtime_interaction_id=interaction.id
+        )
+
+    async def events(
+        self, realtime_session_id: RealtimeSessionId
+    ) -> AsyncIterator[RealtimeConversationEvent]:
+        session = self._session(realtime_session_id)
+        if session.event_consumer_claimed:
+            raise InvalidRealtimeStateError(
+                "Realtime session event stream already has a consumer"
+            )
+        session.event_consumer_claimed = True
+        queue = session.event_queue
+        assert isinstance(queue, asyncio.Queue)
+        while True:
+            if session.event_stream_closed and queue.empty():
+                return
+            event = await queue.get()
+            if event is _END:
+                return
+            yield event
+
+    async def close_session(self, realtime_session_id: RealtimeSessionId) -> None:
+        session = self._session(realtime_session_id)
+        if session.state in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED):
+            return
+        interaction = session.active_interaction
+        if interaction is not None:
+            if interaction.durable_turn_id is not None:
+                conversation, turn = await self._terminalize_turn(
+                    session,
+                    interaction,
+                    "interrupted",
+                    "Realtime session was closed",
+                    interrupted=True,
+                )
+                await self._emit(
+                    session,
+                    ConversationTurnInterrupted(conversation, turn),
+                    terminal=True,
+                )
+            await self._release_interaction(session)
+        await self._close_provider(session)
+        session.state = RealtimeSessionState.CLOSED
+        await self._emit(session, RealtimeSessionClosed(session.id), terminal=True)
+        await self._end_events(session)
+        async with self._sessions_gate:
+            self._conversation_sessions.pop(session.conversation_id, None)
+
+    async def close_all(self) -> None:
+        for session_id in tuple(self._sessions):
+            await self.close_session(session_id)
+
+    async def _route_and_load(self, command: OpenRealtimeSessionCommand):
+        async with self._uow_factory() as uow:
+            conversation = await uow.conversations.get_by_id(command.conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError("Conversation was not found")
+            turns = await uow.turns.list_for_conversation(command.conversation_id)
+        requirements = AIRequestRequirements(
+            frozenset(
+                {Capability.REALTIME, Capability.AUDIO_INPUT, Capability.AUDIO_OUTPUT}
+            ),
+            frozenset(),
+            command.locality,
+        )
+        try:
+            route = self._router.route(
+                requirements, model_override=command.model_override
+            )
+        except RoutingError as error:
+            raise InvalidRealtimeStateError(
+                "No compatible realtime model is available"
+            ) from error
+        return route, turns
+
+    async def _reseed_provider(self, session: RealtimeSession) -> None:
+        await self._close_provider(session)
+        command = OpenRealtimeSessionCommand(
+            session.conversation_id,
+            session.locality,
+            session.cloud_context_eligible,
+            session.input_audio_format,
+            session.output_audio_format,
+            session.model,
+        )
+        route, turns = await self._route_and_load(command)
+        seed = self._context_builder.build_realtime_seed(
+            conversation_id=session.conversation_id,
+            conversation_turns=turns,
+            locality=session.locality,
+            model=route.descriptor,
+        )
+        provider = route.binding.realtime
+        if provider is None:
+            raise RuntimeError("Selected realtime route has no realtime provider")
+        from sofias_assistant.ai.contracts import RealtimeSessionRequest
+
+        session.provider_session = await provider.open_realtime_session(
+            model=session.model,
+            request=RealtimeSessionRequest(
+                session.id,
+                session.input_audio_format,
+                session.output_audio_format,
+                seed,
+            ),
+        )
+        session.synced_context_revision = await self._coordinator.context_revision(
+            session.conversation_id
+        )
+        session.provider_context_stale = False
+        session.consumer_task = asyncio.create_task(
+            self._consume_provider_events(session)
+        )
+
+    async def _consume_provider_events(self, session: RealtimeSession) -> None:
+        try:
+            async for event in self._provider(session).events():
+                await self._handle_provider_event(session, event)
+            if session.state not in (
+                RealtimeSessionState.CLOSED,
+                RealtimeSessionState.FAILED,
+            ):
+                await self._protocol_failure(
+                    session, "Provider event stream ended unexpectedly"
+                )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if session.state not in (
+                RealtimeSessionState.CLOSED,
+                RealtimeSessionState.FAILED,
+            ):
+                await self._protocol_failure(session, "Provider event stream failed")
+
+    async def _handle_provider_event(
+        self, session: RealtimeSession, event: object
+    ) -> None:
+        if not isinstance(
+            event,
+            (
+                UserTranscriptPartial,
+                UserTranscriptFinal,
+                AssistantAudioChunk,
+                AssistantTranscriptPartial,
+                AssistantTranscriptFinal,
+                RealtimeResponseCompleted,
+                RealtimeResponseFailed,
+                RealtimeSessionFailed,
+            ),
+        ):
+            await self._protocol_failure(
+                session, "Provider emitted an unsupported event"
+            )
+            return
+        if isinstance(event, RealtimeSessionFailed):
+            if event.realtime_session_id != session.id:
+                return await self._protocol_failure(
+                    session, "Provider session correlation failed"
+                )
+            await self._fail_session(session, event.error.safe_message)
+            return
+        interaction = session.active_interaction
+        if interaction is None or not hasattr(event, "realtime_interaction_id"):
+            return await self._protocol_failure(
+                session, "Provider emitted an event outside an active interaction"
+            )
+        if (
+            event.realtime_session_id != session.id
+            or event.realtime_interaction_id != interaction.id
+            or event.sequence <= interaction.last_provider_sequence
+        ):
+            return await self._protocol_failure(
+                session, "Provider event ordering or correlation failed"
+            )
+        interaction.last_provider_sequence = event.sequence
+        if isinstance(event, UserTranscriptPartial):
+            await self._emit(
+                session,
+                RealtimeUserTranscriptPartial(
+                    session.id, interaction.id, event.sequence, event.text
+                ),
+            )
+            return
+        if isinstance(event, UserTranscriptFinal):
+            if interaction.user_transcript_final is not None or not event.text.strip():
+                return await self._protocol_failure(
+                    session, "Provider user transcript was invalid"
+                )
+            interaction.user_transcript_final = event.text
+            conversation, turn = await self._persist_voice_turn(
+                session, interaction, event.text
+            )
+            await self._emit(
+                session,
+                RealtimeUserTranscriptFinal(
+                    session.id, interaction.id, event.sequence, event.text
+                ),
+            )
+            await self._emit(session, ConversationTurnStarted(conversation, turn))
+            return
+        if isinstance(event, AssistantAudioChunk):
+            await self._emit(
+                session,
+                RealtimeAssistantAudioChunk(
+                    session.id,
+                    interaction.id,
+                    event.sequence,
+                    event.audio,
+                    event.audio_format,
+                ),
+            )
+            return
+        if isinstance(event, AssistantTranscriptPartial):
+            interaction.assistant_transcript += event.text
+            await self._emit(
+                session,
+                RealtimeAssistantTranscriptPartial(
+                    session.id, interaction.id, event.sequence, event.text
+                ),
+            )
+            return
+        if isinstance(event, AssistantTranscriptFinal):
+            interaction.assistant_transcript_final = event.text
+            await self._emit(
+                session,
+                RealtimeAssistantTranscriptFinal(
+                    session.id, interaction.id, event.sequence, event.text
+                ),
+            )
+            return
+        if isinstance(event, RealtimeResponseFailed):
+            await self._fail_interaction(
+                session,
+                interaction,
+                event.error.category.value,
+                event.error.safe_message,
+            )
+            return
+        if isinstance(event, RealtimeResponseCompleted):
+            if (
+                interaction.user_transcript_final is None
+                or interaction.durable_turn_id is None
+                or interaction.assistant_transcript_final is None
+            ):
+                return await self._protocol_failure(
+                    session, "Provider completed before required transcripts"
+                )
+            conversation, turn = await self._complete_turn(session, interaction)
+            await self._emit(
+                session, ConversationTurnCompleted(conversation, turn), terminal=True
+            )
+            session.synced_context_revision = (
+                await self._coordinator.mark_context_changed(session.conversation_id)
+            )
+            await self._release_interaction(session)
+            return
+        await self._protocol_failure(session, "Provider emitted an unsupported event")
+
+    async def _persist_voice_turn(
+        self, session: RealtimeSession, interaction: RealtimeInteraction, text: str
+    ) -> tuple[Conversation, Turn]:
+        timestamp = self._time()
+        async with self._uow_factory() as uow:
+            conversation = await uow.conversations.get_by_id(session.conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError("Conversation was not found")
+            turn = Turn(
+                self._id_factory(),
+                conversation.id,
+                await uow.turns.next_sequence(conversation.id),
+                TurnStatus.PROCESSING,
+                TurnInputModality.VOICE,
+                session.cloud_context_eligible
+                and interaction.input_cloud_context_eligible,
+                text,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                timestamp,
+                timestamp,
+                None,
+            )
+            conversation = replace(conversation, updated_at=timestamp)
+            uow.turns.add(turn)
+            await uow.conversations.save(conversation)
+            await uow.commit()
+        interaction.durable_turn_id = turn.id
+        return conversation, turn
+
+    async def _complete_turn(
+        self, session: RealtimeSession, interaction: RealtimeInteraction
+    ) -> tuple[Conversation, Turn]:
+        timestamp = self._time()
+        async with self._uow_factory() as uow:
+            if interaction.durable_turn_id is None:
+                raise RealtimeProtocolError("Processing voice turn is unavailable")
+            turn = await uow.turns.get_by_id(interaction.durable_turn_id)
+            conversation = await uow.conversations.get_by_id(session.conversation_id)
+            if turn is None or conversation is None:
+                raise RealtimeProtocolError("Processing voice turn is unavailable")
+            turn = turn.complete(
+                assistant_text=interaction.assistant_transcript_final or "",
+                updated_at=timestamp,
+                finished_at=timestamp,
+                provider_id=session.model.provider_id,
+                model_id=session.model.model_id,
+            )
+            conversation = replace(conversation, updated_at=timestamp)
+            await uow.turns.save(turn)
+            await uow.conversations.save(conversation)
+            await uow.commit()
+        return conversation, turn
+
+    async def _terminalize_turn(
+        self,
+        session: RealtimeSession,
+        interaction: RealtimeInteraction,
+        category: str,
+        message: str,
+        *,
+        interrupted: bool = False,
+    ) -> tuple[Conversation, Turn]:
+        timestamp = self._time()
+        text = interaction.assistant_transcript or None
+        async with self._uow_factory() as uow:
+            if interaction.durable_turn_id is None:
+                raise RealtimeProtocolError("Processing voice turn is unavailable")
+            turn = await uow.turns.get_by_id(interaction.durable_turn_id)
+            conversation = await uow.conversations.get_by_id(session.conversation_id)
+            if turn is None or conversation is None:
+                raise RealtimeProtocolError("Processing voice turn is unavailable")
+            turn = (
+                turn.interrupt(
+                    assistant_text=text,
+                    updated_at=timestamp,
+                    finished_at=timestamp,
+                    provider_id=session.model.provider_id,
+                    model_id=session.model.model_id,
+                )
+                if interrupted
+                else turn.fail(
+                    error_message=message,
+                    error_category=category,
+                    assistant_text=text,
+                    updated_at=timestamp,
+                    finished_at=timestamp,
+                    provider_id=session.model.provider_id,
+                    model_id=session.model.model_id,
+                )
+            )
+            conversation = replace(conversation, updated_at=timestamp)
+            await uow.turns.save(turn)
+            await uow.conversations.save(conversation)
+            await uow.commit()
+        return conversation, turn
+
+    async def _fail_interaction(
+        self,
+        session: RealtimeSession,
+        interaction: RealtimeInteraction,
+        category: str,
+        message: str,
+    ) -> None:
+        if interaction.durable_turn_id is None:
+            await self._emit(
+                session,
+                RealtimeInteractionFailed(session.id, interaction.id, message),
+                terminal=True,
+            )
+        else:
+            conversation, turn = await self._terminalize_turn(
+                session, interaction, category, message
+            )
+            await self._emit(
+                session, ConversationTurnFailed(conversation, turn), terminal=True
+            )
+        session.provider_context_stale = True
+        await self._release_interaction(session)
+
+    async def _protocol_failure(self, session: RealtimeSession, message: str) -> None:
+        interaction = session.active_interaction
+        if interaction is not None:
+            await self._fail_interaction(
+                session, interaction, "provider_protocol_error", message
+            )
+        await self._fail_session(session, message)
+
+    async def _fail_session(self, session: RealtimeSession, message: str) -> None:
+        if session.state is RealtimeSessionState.FAILED:
+            return
+        interaction = session.active_interaction
+        if interaction is not None:
+            if interaction.durable_turn_id is not None:
+                conversation, turn = await self._terminalize_turn(
+                    session, interaction, "provider_session_failed", message
+                )
+                await self._emit(
+                    session, ConversationTurnFailed(conversation, turn), terminal=True
+                )
+            await self._release_interaction(session)
+        await self._close_provider(session)
+        session.state = RealtimeSessionState.FAILED
+        await self._emit(
+            session,
+            ConversationRealtimeSessionFailed(session.id, message),
+            terminal=True,
+        )
+        await self._end_events(session)
+        async with self._sessions_gate:
+            self._conversation_sessions.pop(session.conversation_id, None)
+
+    async def _release_interaction(self, session: RealtimeSession) -> None:
+        interaction = session.active_interaction
+        if interaction is not None:
+            await interaction.lease.release()
+        session.active_interaction = None
+        if session.state is RealtimeSessionState.ACTIVE:
+            session.state = RealtimeSessionState.IDLE
+
+    async def _close_provider(self, session: RealtimeSession) -> None:
+        task = session.consumer_task
+        if (
+            isinstance(task, asyncio.Task)
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        provider = session.provider_session
+        if provider is not None:
+            await self._provider(session).close()
+        session.provider_session = None
+        session.consumer_task = None
+
+    async def _emit(
+        self,
+        session: RealtimeSession,
+        event: RealtimeConversationEvent,
+        *,
+        terminal: bool = False,
+    ) -> None:
+        queue = session.event_queue
+        assert isinstance(queue, asyncio.Queue)
+        if terminal:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                return
+            return
+        await queue.put(event)
+
+    async def _end_events(self, session: RealtimeSession) -> None:
+        queue = session.event_queue
+        assert isinstance(queue, asyncio.Queue)
+        session.event_stream_closed = True
+        try:
+            queue.put_nowait(_END)
+        except asyncio.QueueFull:
+            pass
+
+    def _provider(self, session: RealtimeSession) -> RealtimeProviderSession:
+        provider = session.provider_session
+        if provider is None:
+            raise InvalidRealtimeStateError("Realtime provider session is unavailable")
+        return provider  # type: ignore[return-value]
+
+    def _session(self, session_id: RealtimeSessionId) -> RealtimeSession:
+        if not isinstance(session_id, UUID):
+            raise ValueError("realtime_session_id must be a UUID")
+        try:
+            return self._sessions[session_id]
+        except KeyError as error:
+            raise RealtimeSessionNotFoundError(
+                "Realtime session was not found"
+            ) from error
+
+    def _active(
+        self, session_id: RealtimeSessionId
+    ) -> tuple[RealtimeSession, RealtimeInteraction]:
+        session = self._session(session_id)
+        interaction = session.active_interaction
+        if session.state is not RealtimeSessionState.ACTIVE or interaction is None:
+            raise InvalidRealtimeStateError(
+                "Realtime session has no active interaction"
+            )
+        return session, interaction
+
+    def _time(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None:
+            raise ValueError("clock must return timezone-aware datetime")
+        return value.astimezone(UTC)

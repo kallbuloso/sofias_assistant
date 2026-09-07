@@ -362,7 +362,7 @@ AI. **Commit:** `feat(ai): add realtime contracts and routing`.
 
 ### SA-B009.2 — Shared Conversation Coordination, Voice Persistence & Context Seed
 
-**Status:** ACTIVE
+**Status:** DONE — REMOTE VERIFIED (`b1756bdc5d790c521db3ec8a3f66573ad47d0625`)
 
 **Goal:** estabelecer autoridade comum de texto/voz antes de streaming.
 **Scope:** `ConversationActivityCoordinator`, `VOICE`, migration, seed/rebuild e
@@ -376,6 +376,8 @@ seed bounded/locality-safe. **Likely files:** `conversation/`, `context/`,
 B009.1.
 
 ### SA-B009.3 — Fake Realtime Provider & RealtimeConversationRuntime
+
+**Status:** ACTIVE
 
 **Goal:** materializar orchestration de domínio antes do transporte.
 **Scope:** `ScriptedFakeRealtimeProvider`, `RealtimeConversationRuntime`,

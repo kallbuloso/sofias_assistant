@@ -3,6 +3,7 @@
 from sofias_assistant.conversation.coordination import (
     ConversationActivityConflictError,
     ConversationActivityCoordinator,
+    ConversationActivityLease,
 )
 from sofias_assistant.conversation.models import (
     Conversation,
@@ -15,6 +16,7 @@ __all__ = [
     "Conversation",
     "ConversationActivityConflictError",
     "ConversationActivityCoordinator",
+    "ConversationActivityLease",
     "Turn",
     "TurnInputModality",
     "TurnStatus",

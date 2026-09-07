@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sofias_assistant.config.models import RuntimeConfig
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
+from sofias_assistant.conversation.realtime_runtime import RealtimeConversationRuntime
 from sofias_assistant.conversation.runtime import TextConversationRuntime
 from sofias_assistant.core.composition import (
     ConversationDependenciesFactory,
@@ -74,6 +75,7 @@ class SofiaCore:
         self._instance_ownership: InstanceOwnership | None = None
         self._instance_ownership_acquired = False
         self._conversation_runtime: TextConversationRuntime | None = None
+        self._realtime_conversation_runtime: RealtimeConversationRuntime | None = None
         self._conversation_activity_coordinator: (
             ConversationActivityCoordinator | None
         ) = None
@@ -120,6 +122,18 @@ class SofiaCore:
         if self._conversation_runtime is None:
             raise RuntimeError("Conversation Runtime is not configured")
         return self._conversation_runtime
+
+    @property
+    def realtime_conversation_runtime(self) -> RealtimeConversationRuntime:
+        """Return the composed realtime runtime only while SofiaCore is running."""
+
+        if self._state is not CoreState.RUNNING:
+            raise RuntimeError(
+                "Realtime Conversation Runtime is only available while SofiaCore is running"
+            )
+        if self._realtime_conversation_runtime is None:
+            raise RuntimeError("Realtime Conversation Runtime is not configured")
+        return self._realtime_conversation_runtime
 
     async def start(self) -> None:
         """Compose foundation resources and persist the current runtime session."""
@@ -174,6 +188,12 @@ class SofiaCore:
 
         self._state = CoreState.STOPPING
         primary_error: BaseException | None = None
+        realtime_runtime = self._realtime_conversation_runtime
+        if realtime_runtime is not None:
+            try:
+                await realtime_runtime.close_all()
+            except BaseException as error:
+                primary_error = error
         try:
             await lifecycle.stop()
         except BaseException as error:
@@ -230,6 +250,7 @@ class SofiaCore:
 
     def _clear_owned_references(self) -> None:
         self._conversation_runtime = None
+        self._realtime_conversation_runtime = None
         self._conversation_activity_coordinator = None
         self._resources = None
         self._session_lifecycle = None
@@ -256,6 +277,12 @@ class SofiaCore:
 
         self._conversation_activity_coordinator = ConversationActivityCoordinator()
         self._conversation_runtime = TextConversationRuntime(
+            uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
+            router=dependencies.router,
+            context_builder=dependencies.context_builder,
+            activity_coordinator=self._conversation_activity_coordinator,
+        )
+        self._realtime_conversation_runtime = RealtimeConversationRuntime(
             uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
             router=dependencies.router,
             context_builder=dependencies.context_builder,
