@@ -5,12 +5,46 @@ from typing import Protocol
 
 from sofias_assistant.ai.contracts import (
     AIRequest,
+    AudioInputFrame,
     ModelIdentity,
     ProviderStreamEvent,
+    RealtimeInteractionId,
+    RealtimeProviderEvent,
+    RealtimeSessionRequest,
     StructuredOutputResult,
     StructuredOutputSpec,
     TextResponse,
 )
+
+
+class RealtimeProviderSession(Protocol):
+    """Provider-bound realtime session using only normalized Core contracts."""
+
+    async def start_interaction(
+        self, *, realtime_interaction_id: RealtimeInteractionId
+    ) -> None: ...
+
+    async def send_audio(self, *, frame: AudioInputFrame) -> None: ...
+
+    async def commit_interaction(
+        self, *, realtime_interaction_id: RealtimeInteractionId
+    ) -> None: ...
+
+    async def interrupt(
+        self, *, realtime_interaction_id: RealtimeInteractionId
+    ) -> None: ...
+
+    def events(self) -> AsyncIterator[RealtimeProviderEvent]: ...
+
+    async def close(self) -> None: ...
+
+
+class RealtimeProvider(Protocol):
+    """Opens a provider-specific session from a Core-owned realtime request."""
+
+    async def open_realtime_session(
+        self, *, model: ModelIdentity, request: RealtimeSessionRequest
+    ) -> RealtimeProviderSession: ...
 
 
 class TextGenerationProvider(Protocol):

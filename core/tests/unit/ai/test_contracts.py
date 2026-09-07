@@ -1,6 +1,6 @@
 """Unit tests for provider-independent AI contracts."""
 
-from dataclasses import fields
+from dataclasses import FrozenInstanceError, fields
 from uuid import uuid4
 
 import pytest
@@ -10,6 +10,12 @@ from sofias_assistant.ai import (
     AIMessageRole,
     AIRequest,
     AIRequestRequirements,
+    AssistantAudioChunk,
+    AssistantTranscriptFinal,
+    AssistantTranscriptPartial,
+    AudioEncoding,
+    AudioFormat,
+    AudioInputFrame,
     Capability,
     DataLocality,
     ExecutionLocation,
@@ -21,6 +27,13 @@ from sofias_assistant.ai import (
     ProviderFailed,
     ProviderInvocationError,
     ProviderResponseMetadata,
+    RealtimeContextSeed,
+    RealtimeInteractionId,
+    RealtimeResponseCompleted,
+    RealtimeResponseFailed,
+    RealtimeSessionFailed,
+    RealtimeSessionId,
+    RealtimeSessionRequest,
     StructuredOutputResult,
     StructuredOutputSpec,
     TextDelta,
@@ -29,6 +42,9 @@ from sofias_assistant.ai import (
     ToolCallProposed,
     UsageMetadata,
     UsageUpdated,
+    UserTranscriptFinal,
+    UserTranscriptPartial,
+    is_terminal_realtime_event,
     is_terminal_stream_event,
 )
 
@@ -43,12 +59,15 @@ def metadata(model: ModelIdentity) -> ProviderResponseMetadata:
     return ProviderResponseMetadata(request_id=uuid4(), model=model)
 
 
-def test_capability_baseline_contains_only_gate_i2_capabilities() -> None:
+def test_capability_baseline_contains_text_and_realtime_capabilities() -> None:
     assert set(Capability) == {
         Capability.TEXT_GENERATION,
         Capability.TEXT_STREAMING,
         Capability.STRUCTURED_OUTPUT,
         Capability.TOOL_CALLING,
+        Capability.REALTIME,
+        Capability.AUDIO_INPUT,
+        Capability.AUDIO_OUTPUT,
     }
 
 
@@ -286,3 +305,119 @@ def test_stream_taxonomy_and_terminal_semantics(
     assert not is_terminal_stream_event(events[2])
     assert is_terminal_stream_event(events[3])
     assert is_terminal_stream_event(events[4])
+
+
+def _realtime_session_id() -> RealtimeSessionId:
+    return RealtimeSessionId(uuid4())
+
+
+def _realtime_interaction_id() -> RealtimeInteractionId:
+    return RealtimeInteractionId(uuid4())
+
+
+def test_audio_format_is_explicit_and_provider_neutral() -> None:
+    audio_format = AudioFormat(AudioEncoding.PCM16, 24_000, 1)
+
+    assert audio_format.encoding is AudioEncoding.PCM16
+    assert audio_format.sample_rate_hz == 24_000
+    assert audio_format.channels == 1
+
+
+@pytest.mark.parametrize(
+    ("encoding", "sample_rate_hz", "channels", "message"),
+    [
+        ("pcm16", 24_000, 1, "AudioEncoding"),
+        (AudioEncoding.PCM16, 0, 1, "sample_rate_hz"),
+        (AudioEncoding.PCM16, 24_000, 0, "channels"),
+        (AudioEncoding.PCM16, True, 1, "sample_rate_hz"),
+    ],
+)
+def test_audio_format_rejects_invalid_values(
+    encoding: object, sample_rate_hz: int, channels: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        AudioFormat(encoding, sample_rate_hz, channels)  # type: ignore[arg-type]
+
+
+def test_realtime_request_and_context_seed_are_core_owned_values() -> None:
+    seed = RealtimeContextSeed((AIMessage(AIMessageRole.SYSTEM, "Sofia"),))
+    request = RealtimeSessionRequest(
+        realtime_session_id=_realtime_session_id(),
+        input_audio_format=AudioFormat(AudioEncoding.PCM16, 24_000, 1),
+        output_audio_format=AudioFormat(AudioEncoding.PCM16, 24_000, 1),
+        context_seed=seed,
+    )
+
+    assert request.context_seed is seed
+    with pytest.raises(FrozenInstanceError):
+        request.context_seed = seed  # type: ignore[misc]
+    with pytest.raises(ValueError, match="tuple of AIMessage"):
+        RealtimeContextSeed(("not-a-message",))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="RealtimeSessionId"):
+        RealtimeSessionRequest(
+            realtime_session_id="not-a-uuid",  # type: ignore[arg-type]
+            input_audio_format=request.input_audio_format,
+            output_audio_format=request.output_audio_format,
+            context_seed=seed,
+        )
+
+
+def test_audio_input_frame_requires_ordered_non_empty_immutable_bytes() -> None:
+    frame = AudioInputFrame(sequence=0, audio=b"audio")
+
+    assert frame.sequence == 0
+    assert frame.audio == b"audio"
+    with pytest.raises(ValueError, match="non-empty"):
+        AudioInputFrame(sequence=1, audio=b"")
+    with pytest.raises(ValueError, match="sequence"):
+        AudioInputFrame(sequence=-1, audio=b"audio")
+    with pytest.raises(ValueError, match="sequence"):
+        AudioInputFrame(sequence=True, audio=b"audio")
+
+
+def test_realtime_events_have_explicit_identity_sequence_and_terminal_semantics() -> (
+    None
+):
+    session_id = _realtime_session_id()
+    interaction_id = _realtime_interaction_id()
+    audio_format = AudioFormat(AudioEncoding.PCM16, 24_000, 1)
+    error = ProviderError(
+        ProviderErrorCategory.PROVIDER_UNAVAILABLE, "Provider unavailable", True
+    )
+    events = (
+        UserTranscriptPartial(session_id, interaction_id, 0, "hel"),
+        UserTranscriptFinal(session_id, interaction_id, 1, ""),
+        AssistantAudioChunk(session_id, interaction_id, 2, b"audio", audio_format),
+        AssistantTranscriptPartial(session_id, interaction_id, 3, "hi"),
+        AssistantTranscriptFinal(session_id, interaction_id, 4, "hello"),
+        RealtimeResponseCompleted(session_id, interaction_id, 5),
+        RealtimeResponseFailed(session_id, interaction_id, 6, error),
+        RealtimeSessionFailed(session_id, 7, error),
+    )
+
+    assert all(not is_terminal_realtime_event(event) for event in events[:5])
+    assert all(is_terminal_realtime_event(event) for event in events[5:])
+    with pytest.raises(ValueError, match="non-empty"):
+        AssistantAudioChunk(session_id, interaction_id, 8, b"", audio_format)
+    with pytest.raises(ValueError, match="ProviderError"):
+        RealtimeResponseFailed(session_id, interaction_id, 8, "failure")  # type: ignore[arg-type]
+
+
+def test_realtime_event_ids_require_uuid_values_at_runtime() -> None:
+    session_id = _realtime_session_id()
+    interaction_id = _realtime_interaction_id()
+
+    with pytest.raises(ValueError, match="RealtimeSessionId"):
+        UserTranscriptPartial(
+            "not-a-uuid",  # type: ignore[arg-type]
+            interaction_id,
+            0,
+            "partial",
+        )
+    with pytest.raises(ValueError, match="RealtimeInteractionId"):
+        UserTranscriptPartial(
+            session_id,
+            "not-a-uuid",  # type: ignore[arg-type]
+            0,
+            "partial",
+        )

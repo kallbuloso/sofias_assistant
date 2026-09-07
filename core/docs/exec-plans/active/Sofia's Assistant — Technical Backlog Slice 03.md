@@ -2,7 +2,7 @@
 
 **Slice:** SA-B009 — Realtime Voice / Gate I3
 
-**Status:** PLANNING ONLY — aguardando revisão e aprovação
+**Status:** ACTIVE — APPROVED
 
 **Baseline auditado:** `9fa1a5168ac70ff5af738eba476679afe4496f01`
 **Idioma:** pt-BR; nomes técnicos e contratos em inglês

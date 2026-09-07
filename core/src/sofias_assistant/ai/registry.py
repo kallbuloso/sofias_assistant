@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from sofias_assistant.ai.contracts import Capability, ModelDescriptor, ModelIdentity
 from sofias_assistant.ai.providers import (
+    RealtimeProvider,
     StructuredOutputProvider,
     TextGenerationProvider,
     TextStreamingProvider,
@@ -37,6 +38,7 @@ class ProviderBinding:
     text_generation: TextGenerationProvider | None = field(default=None, repr=False)
     text_streaming: TextStreamingProvider | None = field(default=None, repr=False)
     structured_output: StructuredOutputProvider | None = field(default=None, repr=False)
+    realtime: RealtimeProvider | None = field(default=None, repr=False)
 
 
 def _identity_label(identity: ModelIdentity) -> str:
@@ -58,6 +60,8 @@ def _validate_binding(descriptor: ModelDescriptor, binding: ProviderBinding) -> 
         binding.text_generation is None and binding.text_streaming is None
     ):
         raise ValueError("TOOL_CALLING requires a text generation or streaming binding")
+    if Capability.REALTIME in capabilities and binding.realtime is None:
+        raise ValueError("REALTIME requires a realtime binding")
 
 
 @dataclass(frozen=True, slots=True)

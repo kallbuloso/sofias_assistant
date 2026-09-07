@@ -21,6 +21,8 @@ from sofias_assistant.ai import (
     ModelRegistry,
     NoCompatibleModelError,
     ProviderBinding,
+    RealtimeProviderSession,
+    RealtimeSessionRequest,
 )
 from sofias_assistant.ai.contracts import (
     AIRequest,
@@ -58,6 +60,16 @@ class FailingProvider:
 class SentinelProvider(FailingProvider):
     def __repr__(self) -> str:
         return "provider-adapter-super-secret-sentinel"
+
+
+class FailingRealtimeProvider:
+    """Structural stub that makes accidental realtime invocation visible."""
+
+    async def open_realtime_session(
+        self, *, model: ModelIdentity, request: RealtimeSessionRequest
+    ) -> RealtimeProviderSession:
+        del model, request
+        raise AssertionError("Router must not invoke a provider binding")
 
 
 def _identity(provider_id: str, model_id: str) -> ModelIdentity:
@@ -140,6 +152,7 @@ def test_static_model_descriptor_does_not_include_runtime_registration_state() -
         (Capability.TEXT_STREAMING, ProviderBinding(), "text_streaming"),
         (Capability.STRUCTURED_OUTPUT, ProviderBinding(), "structured_output"),
         (Capability.TOOL_CALLING, ProviderBinding(), "text generation or streaming"),
+        (Capability.REALTIME, ProviderBinding(), "realtime"),
     ],
 )
 def test_registration_requires_binding_for_declared_capabilities(
@@ -159,6 +172,24 @@ def test_registration_accepts_coherent_tool_calling_text_binding() -> None:
     )
 
     assert registration.binding.text_generation is not None
+
+
+def test_realtime_only_registration_requires_only_realtime_binding() -> None:
+    registration = _registration(
+        "realtime-provider",
+        "realtime-model",
+        capabilities=frozenset(
+            {
+                Capability.REALTIME,
+                Capability.AUDIO_INPUT,
+                Capability.AUDIO_OUTPUT,
+            }
+        ),
+        binding=ProviderBinding(realtime=FailingRealtimeProvider()),
+    )
+
+    assert registration.binding.realtime is not None
+    assert registration.binding.text_generation is None
 
 
 def test_disabled_and_unavailable_models_are_excluded_then_reenabled() -> None:
@@ -238,6 +269,72 @@ def test_local_only_selects_local_and_rejects_cloud_only() -> None:
     with pytest.raises(NoCompatibleModelError):
         CapabilityRouter(cloud_only).route(
             _requirements(locality=DataLocality.LOCAL_ONLY)
+        )
+
+
+def test_realtime_routing_matches_capabilities_and_fails_closed_for_locality() -> None:
+    capabilities = frozenset(
+        {
+            Capability.REALTIME,
+            Capability.AUDIO_INPUT,
+            Capability.AUDIO_OUTPUT,
+        }
+    )
+    binding = ProviderBinding(realtime=FailingRealtimeProvider())
+    cloud = _registration(
+        "cloud", "realtime", capabilities=capabilities, binding=binding
+    )
+    local = _registration(
+        "local",
+        "realtime",
+        capabilities=capabilities,
+        location=ExecutionLocation.LOCAL,
+        binding=binding,
+    )
+    requirements = _requirements(required=capabilities)
+    registry = ModelRegistry()
+    registry.register(cloud)
+
+    assert (
+        CapabilityRouter(registry).route(requirements).descriptor.identity
+        == cloud.descriptor.identity
+    )
+    with pytest.raises(NoCompatibleModelError):
+        CapabilityRouter(registry).route(
+            _requirements(required=capabilities, locality=DataLocality.LOCAL_ONLY)
+        )
+
+    registry.register(local)
+    assert (
+        CapabilityRouter(registry)
+        .route(_requirements(required=capabilities, locality=DataLocality.LOCAL_ONLY))
+        .descriptor.identity
+        == local.descriptor.identity
+    )
+
+
+def test_realtime_override_requires_every_required_audio_capability() -> None:
+    incomplete = _registration(
+        "provider",
+        "incomplete-realtime",
+        capabilities=frozenset({Capability.REALTIME, Capability.AUDIO_INPUT}),
+        binding=ProviderBinding(realtime=FailingRealtimeProvider()),
+    )
+    registry = ModelRegistry()
+    registry.register(incomplete)
+
+    with pytest.raises(IncompatibleModelOverrideError, match="incompatible"):
+        CapabilityRouter(registry).route(
+            _requirements(
+                required=frozenset(
+                    {
+                        Capability.REALTIME,
+                        Capability.AUDIO_INPUT,
+                        Capability.AUDIO_OUTPUT,
+                    }
+                )
+            ),
+            model_override=incomplete.descriptor.identity,
         )
 
 

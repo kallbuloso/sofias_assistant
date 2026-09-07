@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
+from typing import NewType
 from uuid import UUID
 
 
@@ -13,6 +14,9 @@ class Capability(StrEnum):
     TEXT_STREAMING = "text_streaming"
     STRUCTURED_OUTPUT = "structured_output"
     TOOL_CALLING = "tool_calling"
+    REALTIME = "realtime"
+    AUDIO_INPUT = "audio_input"
+    AUDIO_OUTPUT = "audio_output"
 
 
 class DataLocality(StrEnum):
@@ -179,6 +183,99 @@ class AIRequest:
             isinstance(message, AIMessage) for message in self.messages
         ):
             raise ValueError("messages must be a tuple of AIMessage values")
+
+
+class AudioEncoding(StrEnum):
+    """Provider-neutral audio encoding identifiers.
+
+    ``PCM16`` is the Slice 03 internal profile name. The exact external wire
+    representation remains an adapter concern.
+    """
+
+    PCM16 = "pcm16"
+
+
+@dataclass(frozen=True, slots=True)
+class AudioFormat:
+    """Explicit, provider-neutral description of one uncontainerized audio stream."""
+
+    encoding: AudioEncoding
+    sample_rate_hz: int
+    channels: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.encoding, AudioEncoding):
+            raise ValueError("encoding must be an AudioEncoding")
+        for value, field_name in (
+            (self.sample_rate_hz, "sample_rate_hz"),
+            (self.channels, "channels"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{field_name} must be greater than zero")
+
+
+RealtimeSessionId = NewType("RealtimeSessionId", UUID)
+RealtimeInteractionId = NewType("RealtimeInteractionId", UUID)
+
+
+def _require_realtime_session_id(value: RealtimeSessionId) -> None:
+    if not isinstance(value, UUID):
+        raise ValueError("realtime_session_id must be a RealtimeSessionId")
+
+
+def _require_realtime_interaction_id(value: RealtimeInteractionId) -> None:
+    if not isinstance(value, UUID):
+        raise ValueError("realtime_interaction_id must be a RealtimeInteractionId")
+
+
+def _require_realtime_sequence(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("sequence must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeContextSeed:
+    """Core-owned normalized context supplied when opening a realtime session."""
+
+    messages: tuple[AIMessage, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.messages, tuple) or not all(
+            isinstance(message, AIMessage) for message in self.messages
+        ):
+            raise ValueError("messages must be a tuple of AIMessage values")
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSessionRequest:
+    """Provider-neutral values needed to open a Core-owned realtime session."""
+
+    realtime_session_id: RealtimeSessionId
+    input_audio_format: AudioFormat
+    output_audio_format: AudioFormat
+    context_seed: RealtimeContextSeed
+
+    def __post_init__(self) -> None:
+        _require_realtime_session_id(self.realtime_session_id)
+        if not isinstance(self.input_audio_format, AudioFormat):
+            raise ValueError("input_audio_format must be an AudioFormat")
+        if not isinstance(self.output_audio_format, AudioFormat):
+            raise ValueError("output_audio_format must be an AudioFormat")
+        if not isinstance(self.context_seed, RealtimeContextSeed):
+            raise ValueError("context_seed must be a RealtimeContextSeed")
+
+
+@dataclass(frozen=True, slots=True)
+class AudioInputFrame:
+    """One ordered input frame within the active provider-session interaction."""
+
+    sequence: int
+    audio: bytes
+
+    def __post_init__(self) -> None:
+        _require_realtime_sequence(self.sequence)
+        if not isinstance(self.audio, bytes) or not self.audio:
+            raise ValueError("audio must be non-empty immutable bytes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,8 +472,178 @@ class ProviderFailed:
             raise ValueError("error must be a ProviderError")
 
 
+def _validate_realtime_interaction_event(
+    *,
+    realtime_session_id: RealtimeSessionId,
+    realtime_interaction_id: RealtimeInteractionId,
+    sequence: int,
+) -> None:
+    _require_realtime_session_id(realtime_session_id)
+    _require_realtime_interaction_id(realtime_interaction_id)
+    _require_realtime_sequence(sequence)
+
+
+@dataclass(frozen=True, slots=True)
+class UserTranscriptPartial:
+    """Non-terminal user transcript fragment for one Core-owned interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    text: str
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class UserTranscriptFinal:
+    """Final provider transcript; runtime later enforces Turn eligibility."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    text: str
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantAudioChunk:
+    """Non-terminal audio output for one Core-owned interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    audio: bytes
+    audio_format: AudioFormat
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.audio, bytes) or not self.audio:
+            raise ValueError("audio must be non-empty immutable bytes")
+        if not isinstance(self.audio_format, AudioFormat):
+            raise ValueError("audio_format must be an AudioFormat")
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTranscriptPartial:
+    """Non-terminal assistant transcript fragment for one interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    text: str
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantTranscriptFinal:
+    """Final assistant transcript for one interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    text: str
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeResponseCompleted:
+    """Successful terminal response event for one interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeResponseFailed:
+    """Normalized terminal failure for one interaction."""
+
+    realtime_session_id: RealtimeSessionId
+    realtime_interaction_id: RealtimeInteractionId
+    sequence: int
+    error: ProviderError
+
+    def __post_init__(self) -> None:
+        _validate_realtime_interaction_event(
+            realtime_session_id=self.realtime_session_id,
+            realtime_interaction_id=self.realtime_interaction_id,
+            sequence=self.sequence,
+        )
+        if not isinstance(self.error, ProviderError):
+            raise ValueError("error must be a ProviderError")
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeSessionFailed:
+    """Normalized session-loss failure, distinct from an interaction response."""
+
+    realtime_session_id: RealtimeSessionId
+    sequence: int
+    error: ProviderError
+
+    def __post_init__(self) -> None:
+        _require_realtime_session_id(self.realtime_session_id)
+        _require_realtime_sequence(self.sequence)
+        if not isinstance(self.error, ProviderError):
+            raise ValueError("error must be a ProviderError")
+
+
 type ProviderStreamEvent = (
     TextDelta | ToolCallProposed | UsageUpdated | ProviderCompleted | ProviderFailed
+)
+
+type RealtimeProviderEvent = (
+    UserTranscriptPartial
+    | UserTranscriptFinal
+    | AssistantAudioChunk
+    | AssistantTranscriptPartial
+    | AssistantTranscriptFinal
+    | RealtimeResponseCompleted
+    | RealtimeResponseFailed
+    | RealtimeSessionFailed
 )
 
 
@@ -390,3 +657,12 @@ def is_terminal_stream_event(event: ProviderStreamEvent) -> bool:
     """
 
     return isinstance(event, (ProviderCompleted, ProviderFailed))
+
+
+def is_terminal_realtime_event(event: RealtimeProviderEvent) -> bool:
+    """Return whether an event terminalizes an interaction or its session."""
+
+    return isinstance(
+        event,
+        (RealtimeResponseCompleted, RealtimeResponseFailed, RealtimeSessionFailed),
+    )
