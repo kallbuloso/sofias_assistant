@@ -1,6 +1,7 @@
 """Deterministic Core-owned context projection without inference or I/O."""
 
 from collections.abc import Sequence
+from uuid import UUID
 
 from sofias_assistant.ai.contracts import (
     AIMessage,
@@ -8,6 +9,7 @@ from sofias_assistant.ai.contracts import (
     DataLocality,
     ExecutionLocation,
     ModelDescriptor,
+    RealtimeContextSeed,
 )
 from sofias_assistant.context.models import ContextProjection, CoreSystemContext
 from sofias_assistant.conversation.models import Turn, TurnStatus
@@ -107,6 +109,67 @@ class ContextBuilder:
             cloud_context_eligible=all(source_eligibility),
         )
 
+    def build_realtime_seed(
+        self,
+        *,
+        conversation_id: UUID,
+        conversation_turns: Sequence[Turn],
+        locality: DataLocality,
+        model: ModelDescriptor,
+    ) -> RealtimeContextSeed:
+        """Build bounded historical context before a realtime user transcript exists."""
+
+        self._validate_realtime_inputs(
+            conversation_id, conversation_turns, locality, model
+        )
+        cloud_target = model.execution_location is ExecutionLocation.CLOUD
+        if cloud_target and not self._system_context.cloud_context_eligible:
+            raise ContextLocalityError(
+                "system context is not eligible for a cloud execution target"
+            )
+        mandatory_messages = (
+            AIMessage(role=AIMessageRole.SYSTEM, text=self._system_context.text),
+        )
+        effective_budget = self._effective_budget(model)
+        mandatory_estimate = self._estimate_messages(mandatory_messages)
+        if mandatory_estimate > effective_budget:
+            raise ContextBudgetExceededError(
+                "Mandatory context exceeds the selected model input budget"
+            )
+        eligible = [
+            turn
+            for turn in conversation_turns
+            if turn.status is TurnStatus.COMPLETED
+            and (not cloud_target or turn.cloud_context_eligible)
+        ]
+        eligible.sort(key=lambda turn: turn.sequence)
+        candidates = (
+            tuple(eligible[-self._max_recent_turns :]) if self._max_recent_turns else ()
+        )
+        historical_turns = self._select_budgeted_historical_turns(
+            candidates,
+            remaining_budget=effective_budget - mandatory_estimate,
+        )
+        messages = list(mandatory_messages)
+        for turn in historical_turns:
+            if turn.assistant_text is None:
+                raise ValueError("a completed historical turn requires assistant_text")
+            messages.extend(
+                (
+                    AIMessage(role=AIMessageRole.USER, text=turn.user_text),
+                    AIMessage(role=AIMessageRole.ASSISTANT, text=turn.assistant_text),
+                )
+            )
+        return RealtimeContextSeed(
+            messages=tuple(messages),
+            cloud_context_eligible=all(
+                (
+                    self._system_context.cloud_context_eligible,
+                    *(turn.cloud_context_eligible for turn in historical_turns),
+                )
+            ),
+        )
+
     def _effective_budget(self, model: ModelDescriptor) -> int:
         if model.context_window is None:
             return self._max_estimated_input_tokens
@@ -153,6 +216,31 @@ class ContextBuilder:
                 raise ValueError(
                     "conversation_turns must belong to current_turn conversation"
                 )
+
+    def _validate_realtime_inputs(
+        self,
+        conversation_id: UUID,
+        conversation_turns: Sequence[Turn],
+        locality: DataLocality,
+        model: ModelDescriptor,
+    ) -> None:
+        if not isinstance(conversation_id, UUID):
+            raise ValueError("conversation_id must be a UUID")
+        if not isinstance(locality, DataLocality):
+            raise ValueError("locality must be a DataLocality")
+        if not isinstance(model, ModelDescriptor):
+            raise ValueError("model must be a ModelDescriptor")
+        if locality is DataLocality.LOCAL_ONLY and (
+            model.execution_location is ExecutionLocation.CLOUD
+        ):
+            raise ContextLocalityError(
+                "LOCAL_ONLY is incompatible with a cloud execution target"
+            )
+        for turn in conversation_turns:
+            if not isinstance(turn, Turn):
+                raise ValueError("conversation_turns must contain Turn values")
+            if turn.conversation_id != conversation_id:
+                raise ValueError("conversation_turns must belong to conversation_id")
 
     def _validate_mandatory_cloud_sources(
         self, current_turn: Turn, cloud_target: bool

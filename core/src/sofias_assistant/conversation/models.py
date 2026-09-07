@@ -19,6 +19,7 @@ class TurnInputModality(StrEnum):
     """Input modalities supported by the durable turn contract."""
 
     TEXT = "TEXT"
+    VOICE = "VOICE"
 
 
 def _normalize_utc(value: datetime, field_name: str) -> datetime:
@@ -59,7 +60,7 @@ class Conversation:
 
 @dataclass(frozen=True, slots=True)
 class Turn:
-    """A durable, ordered unit of text interaction within a Conversation.
+    """A durable, ordered unit of interaction within a Conversation.
 
     During processing, cloud_context_eligible describes the conservative
     eligibility of content accumulated in that snapshot. Terminal transitions

@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from sofias_assistant.config.models import RuntimeConfig
+from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
 from sofias_assistant.conversation.runtime import TextConversationRuntime
 from sofias_assistant.core.composition import (
     ConversationDependenciesFactory,
@@ -73,6 +74,9 @@ class SofiaCore:
         self._instance_ownership: InstanceOwnership | None = None
         self._instance_ownership_acquired = False
         self._conversation_runtime: TextConversationRuntime | None = None
+        self._conversation_activity_coordinator: (
+            ConversationActivityCoordinator | None
+        ) = None
         self._health = RuntimeHealthSnapshot(())
 
     @property
@@ -226,6 +230,7 @@ class SofiaCore:
 
     def _clear_owned_references(self) -> None:
         self._conversation_runtime = None
+        self._conversation_activity_coordinator = None
         self._resources = None
         self._session_lifecycle = None
         self._secret_service = None
@@ -249,8 +254,10 @@ class SofiaCore:
                 "ConversationRuntimeDependencies"
             )
 
+        self._conversation_activity_coordinator = ConversationActivityCoordinator()
         self._conversation_runtime = TextConversationRuntime(
             uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
             router=dependencies.router,
             context_builder=dependencies.context_builder,
+            activity_coordinator=self._conversation_activity_coordinator,
         )

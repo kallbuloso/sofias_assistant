@@ -340,7 +340,7 @@ def test_audio_format_rejects_invalid_values(
 
 
 def test_realtime_request_and_context_seed_are_core_owned_values() -> None:
-    seed = RealtimeContextSeed((AIMessage(AIMessageRole.SYSTEM, "Sofia"),))
+    seed = RealtimeContextSeed((AIMessage(AIMessageRole.SYSTEM, "Sofia"),), True)
     request = RealtimeSessionRequest(
         realtime_session_id=_realtime_session_id(),
         input_audio_format=AudioFormat(AudioEncoding.PCM16, 24_000, 1),
@@ -352,7 +352,7 @@ def test_realtime_request_and_context_seed_are_core_owned_values() -> None:
     with pytest.raises(FrozenInstanceError):
         request.context_seed = seed  # type: ignore[misc]
     with pytest.raises(ValueError, match="tuple of AIMessage"):
-        RealtimeContextSeed(("not-a-message",))  # type: ignore[arg-type]
+        RealtimeContextSeed(("not-a-message",), True)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="RealtimeSessionId"):
         RealtimeSessionRequest(
             realtime_session_id="not-a-uuid",  # type: ignore[arg-type]

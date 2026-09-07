@@ -238,12 +238,17 @@ class RealtimeContextSeed:
     """Core-owned normalized context supplied when opening a realtime session."""
 
     messages: tuple[AIMessage, ...]
+    cloud_context_eligible: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.messages, tuple) or not all(
             isinstance(message, AIMessage) for message in self.messages
         ):
             raise ValueError("messages must be a tuple of AIMessage values")
+        if not self.messages:
+            raise ValueError("messages must not be empty")
+        if not isinstance(self.cloud_context_eligible, bool):
+            raise ValueError("cloud_context_eligible must be a bool")
 
 
 @dataclass(frozen=True, slots=True)

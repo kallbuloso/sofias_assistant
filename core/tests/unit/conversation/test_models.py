@@ -69,7 +69,10 @@ def test_turn_status_and_input_modality_are_exactly_the_text_baseline() -> None:
         TurnStatus.INTERRUPTED,
         TurnStatus.FAILED,
     }
-    assert set(TurnInputModality) == {TurnInputModality.TEXT}
+    assert set(TurnInputModality) == {
+        TurnInputModality.TEXT,
+        TurnInputModality.VOICE,
+    }
 
 
 @pytest.mark.parametrize("sequence", [0, -1, True])

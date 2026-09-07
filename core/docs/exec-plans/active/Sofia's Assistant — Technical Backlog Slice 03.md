@@ -349,6 +349,8 @@ evidência externa.
 
 ### SA-B009.1 — Realtime Contracts, Audio & Routing
 
+**Status:** DONE — REMOTE VERIFIED (`1fc4045828a865851d224d27e2ca64809a637683`)
+
 **Goal:** contracts especializados, `AudioFormat` e routing mínimo. **Scope:**
 seção 5/6, perfil `PCM16/24000/1` no boundary e binding `RealtimeProvider`.
 **Non-goals:** fake, persistence, runtime, transport e SDK. **Invariants:**
@@ -359,6 +361,8 @@ AI. **Commit:** `feat(ai): add realtime contracts and routing`.
 **Dependency:** nenhuma.
 
 ### SA-B009.2 — Shared Conversation Coordination, Voice Persistence & Context Seed
+
+**Status:** ACTIVE
 
 **Goal:** estabelecer autoridade comum de texto/voz antes de streaming.
 **Scope:** `ConversationActivityCoordinator`, `VOICE`, migration, seed/rebuild e

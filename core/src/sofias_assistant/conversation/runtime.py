@@ -27,6 +27,7 @@ from sofias_assistant.context.builder import (
     ContextBuilder,
     ContextLocalityError,
 )
+from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
 from sofias_assistant.conversation.events import (
     ConversationStreamEvent,
     ConversationTextDelta,
@@ -120,11 +121,9 @@ class TextTurnResult:
 class TextConversationRuntime:
     """Coordinate durable text turns without holding a UoW across inference.
 
-    Per-Conversation asyncio locks serialize non-streaming and streaming text
-    processing in this runtime/Core process. The boundary relies on Slice 01's single-Core
-    Operational Store ownership; it is neither distributed locking nor
-    protection from external writers. Streaming/realtime may revisit this
-    granularity in a later subpass.
+    A shared Core-owned coordinator serializes text work in this runtime/Core
+    process and will coordinate future voice work. It is neither distributed
+    locking nor protection from external writers.
     """
 
     def __init__(
@@ -133,6 +132,7 @@ class TextConversationRuntime:
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
         router: CapabilityRouter,
         context_builder: ContextBuilder,
+        activity_coordinator: ConversationActivityCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
     ) -> None:
@@ -141,7 +141,9 @@ class TextConversationRuntime:
         self._context_builder = context_builder
         self._clock = clock or _utc_now
         self._id_factory = id_factory or uuid4
-        self._conversation_locks: dict[UUID, asyncio.Lock] = {}
+        self._activity_coordinator = (
+            activity_coordinator or ConversationActivityCoordinator()
+        )
 
     async def create_conversation(self) -> Conversation:
         """Create and durably persist one Core-owned Conversation."""
@@ -172,10 +174,7 @@ class TextConversationRuntime:
         """Persist, project, infer, and terminalize one textual Turn."""
         if not isinstance(command, SendTextCommand):
             raise ValueError("command must be a SendTextCommand")
-        lock = self._conversation_locks.setdefault(
-            command.conversation_id, asyncio.Lock()
-        )
-        async with lock:
+        async with self._activity_coordinator.text_activity(command.conversation_id):
             return await self._send_text_locked(command)
 
     async def stream_text(
@@ -184,10 +183,7 @@ class TextConversationRuntime:
         """Yield Core-owned events while retaining the shared Conversation lock."""
         if not isinstance(command, SendTextCommand):
             raise ValueError("command must be a SendTextCommand")
-        lock = self._conversation_locks.setdefault(
-            command.conversation_id, asyncio.Lock()
-        )
-        async with lock:
+        async with self._activity_coordinator.text_activity(command.conversation_id):
             stream = self._stream_text_locked(command)
             try:
                 async for event in stream:
@@ -654,6 +650,7 @@ class TextConversationRuntime:
             await unit_of_work.turns.save(completed_turn)
             await unit_of_work.conversations.save(updated_conversation)
             await unit_of_work.commit()
+        await self._activity_coordinator.mark_context_changed(conversation_id)
         return TextTurnResult(updated_conversation, completed_turn)
 
     async def _finalize_failure(

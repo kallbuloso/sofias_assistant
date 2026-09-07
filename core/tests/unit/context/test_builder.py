@@ -111,6 +111,54 @@ def make_context_builder(
     )
 
 
+def test_realtime_seed_uses_only_bounded_completed_history() -> None:
+    builder = make_context_builder(max_recent_turns=1)
+    seed = builder.build_realtime_seed(
+        conversation_id=CONVERSATION_ID,
+        conversation_turns=(
+            turn(1, status=TurnStatus.COMPLETED),
+            turn(2, status=TurnStatus.COMPLETED),
+            turn(3, status=TurnStatus.FAILED),
+            turn(4, status=TurnStatus.INTERRUPTED),
+        ),
+        locality=DataLocality.CLOUD_ALLOWED,
+        model=model(ExecutionLocation.CLOUD),
+    )
+
+    assert [(message.role, message.text) for message in seed.messages] == [
+        (AIMessageRole.SYSTEM, "System principles"),
+        (AIMessageRole.USER, "user 2"),
+        (AIMessageRole.ASSISTANT, "assistant 2"),
+    ]
+    assert seed.cloud_context_eligible is True
+
+
+def test_realtime_seed_applies_locality_and_aggregate_eligibility() -> None:
+    builder = make_context_builder(max_recent_turns=2)
+    local_only_turn = turn(1, status=TurnStatus.COMPLETED, eligible=False)
+    local_seed = builder.build_realtime_seed(
+        conversation_id=CONVERSATION_ID,
+        conversation_turns=(local_only_turn,),
+        locality=DataLocality.CLOUD_ALLOWED,
+        model=model(ExecutionLocation.LOCAL),
+    )
+    assert local_seed.cloud_context_eligible is False
+    cloud_seed = builder.build_realtime_seed(
+        conversation_id=CONVERSATION_ID,
+        conversation_turns=(local_only_turn,),
+        locality=DataLocality.CLOUD_ALLOWED,
+        model=model(ExecutionLocation.CLOUD),
+    )
+    assert len(cloud_seed.messages) == 1
+    with pytest.raises(ContextLocalityError):
+        builder.build_realtime_seed(
+            conversation_id=CONVERSATION_ID,
+            conversation_turns=(),
+            locality=DataLocality.LOCAL_ONLY,
+            model=model(ExecutionLocation.CLOUD),
+        )
+
+
 def test_core_system_context_validates_and_preserves_exact_text() -> None:
     context = system_context(text="  exact system text  ")
     assert context.text == "  exact system text  "
