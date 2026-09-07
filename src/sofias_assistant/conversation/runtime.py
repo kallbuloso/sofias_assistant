@@ -97,8 +97,8 @@ class TextTurnResult:
 class TextConversationRuntime:
     """Coordinate durable text turns without holding a UoW across inference.
 
-    Per-Conversation asyncio locks serialize non-streaming processing only in
-    this runtime/Core process. The boundary relies on Slice 01's single-Core
+    Per-Conversation asyncio locks serialize non-streaming and streaming text
+    processing in this runtime/Core process. The boundary relies on Slice 01's single-Core
     Operational Store ownership; it is neither distributed locking nor
     protection from external writers. Streaming/realtime may revisit this
     granularity in a later subpass.
@@ -168,6 +168,7 @@ class TextConversationRuntime:
         projection_eligibility: bool | None = None
         trusted_provider_ids: tuple[str | None, str | None] | None = None
         terminalized = False
+        protocol_invalid = False
         try:
             yield ConversationTurnStarted(conversation, processing_turn)
             requirements = AIRequestRequirements(
@@ -231,12 +232,13 @@ class TextConversationRuntime:
             if provider is None:
                 raise RuntimeError("Selected streaming route has no streaming provider")
             terminal: ProviderCompleted | ProviderFailed | None = None
-            protocol_invalid = False
             tool_unsupported = False
             try:
                 async for provider_event in provider.stream_text(
                     model=model, request=request
                 ):
+                    if protocol_invalid:
+                        continue
                     if not isinstance(
                         provider_event,
                         (
@@ -403,8 +405,16 @@ class TextConversationRuntime:
                     assistant_text="".join(partial_text) if partial_text else None,
                     ai_request_id=request.request_id if request is not None else None,
                     model=model,
-                    provider_request_id=(trusted_provider_ids or (None, None))[0],
-                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    provider_request_id=(
+                        None
+                        if protocol_invalid
+                        else (trusted_provider_ids or (None, None))[0]
+                    ),
+                    provider_session_id=(
+                        None
+                        if protocol_invalid
+                        else (trusted_provider_ids or (None, None))[1]
+                    ),
                     cloud_context_eligible=projection_eligibility,
                 )
             raise
@@ -416,8 +426,16 @@ class TextConversationRuntime:
                     assistant_text="".join(partial_text) if partial_text else None,
                     ai_request_id=request.request_id if request is not None else None,
                     model=model,
-                    provider_request_id=(trusted_provider_ids or (None, None))[0],
-                    provider_session_id=(trusted_provider_ids or (None, None))[1],
+                    provider_request_id=(
+                        None
+                        if protocol_invalid
+                        else (trusted_provider_ids or (None, None))[0]
+                    ),
+                    provider_session_id=(
+                        None
+                        if protocol_invalid
+                        else (trusted_provider_ids or (None, None))[1]
+                    ),
                     cloud_context_eligible=projection_eligibility,
                 )
             raise

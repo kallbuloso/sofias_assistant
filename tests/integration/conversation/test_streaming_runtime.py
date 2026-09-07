@@ -302,10 +302,16 @@ async def test_tool_proposal_is_inert_and_later_text_is_not_persisted(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["metadata_mismatch", "correlation_change", "no_terminal", "after_terminal"]
+    ("mode", "expected_deltas"),
+    [
+        ("metadata_mismatch", ["before"]),
+        ("correlation_change", ["before"]),
+        ("no_terminal", ["partial"]),
+        ("after_terminal", []),
+    ],
 )
 async def test_protocol_violations_discard_untrusted_provider_correlation(
-    tmp_path: Path, mode: str
+    tmp_path: Path, mode: str, expected_deltas: list[str]
 ) -> None:
     provider = MalformedStreamProvider(mode=mode)
     runtime, _, engine = await runtime_for(tmp_path, provider)
@@ -321,6 +327,10 @@ async def test_protocol_violations_discard_untrusted_provider_correlation(
         failed = events[-1]
         assert isinstance(failed, ConversationTurnFailed)
         assert failed.turn.error_category == "provider_protocol_error"
+        assert [
+            event.text for event in events if isinstance(event, ConversationTextDelta)
+        ] == expected_deltas
+        assert failed.turn.assistant_text == ("".join(expected_deltas) or None)
         assert failed.turn.provider_request_id is None
         assert failed.turn.provider_session_id is None
     finally:
@@ -375,6 +385,44 @@ async def test_task_cancellation_persists_interruption_and_reraises(
         turns = await load_turns(factory, conversation.id)
         assert turns[0].status is TurnStatus.INTERRUPTED
         assert turns[0].assistant_text == "partial"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_protocol_violation_discards_provider_ids(
+    tmp_path: Path,
+) -> None:
+    provider = ProtocolBlockingProvider()
+    runtime, factory, engine = await runtime_for(tmp_path, provider)
+    try:
+        conversation = await runtime.create_conversation()
+        task = asyncio.create_task(
+            collect(
+                runtime.stream_text(
+                    SendTextCommand(
+                        conversation.id, "request", DataLocality.LOCAL_ONLY, True
+                    )
+                )
+            )
+        )
+        await provider.blocked.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        turns = await load_turns(factory, conversation.id)
+        assert turns[0].status is TurnStatus.INTERRUPTED
+        assert turns[0].assistant_text == "before"
+        assert turns[0].provider_id == "fake"
+        assert turns[0].model_id == "stream"
+        assert turns[0].provider_request_id is None
+        assert turns[0].provider_session_id is None
+
+        follow_up = runtime.stream_text(
+            SendTextCommand(conversation.id, "follow-up", DataLocality.LOCAL_ONLY, True)
+        )
+        assert isinstance(await anext(follow_up), ConversationTurnStarted)
+        await cast(AsyncGenerator[object], follow_up).aclose()
     finally:
         await engine.dispose()
 
@@ -490,19 +538,29 @@ class MalformedStreamProvider:
         self, *, model: ModelIdentity, request: AIRequest
     ) -> AsyncIterator[ProviderStreamEvent]:
         if self._mode == "metadata_mismatch":
+            valid = ProviderResponseMetadata(
+                request.request_id, model, "trusted", "session"
+            )
+            yield TextDelta(valid, "before")
             yield TextDelta(
                 ProviderResponseMetadata(uuid4(), model, "untrusted", "session"), "bad"
             )
-            yield ProviderCompleted(ProviderResponseMetadata(request.request_id, model))
+            yield TextDelta(valid, "after")
+            yield ProviderCompleted(valid)
             return
         if self._mode == "correlation_change":
+            metadata = ProviderResponseMetadata(
+                request.request_id, model, "first", None
+            )
             yield TextDelta(
-                ProviderResponseMetadata(request.request_id, model, "first", None),
-                "partial",
+                metadata,
+                "before",
             )
             yield ProviderCompleted(
                 ProviderResponseMetadata(request.request_id, model, "second", None)
             )
+            yield TextDelta(metadata, "after")
+            yield ProviderCompleted(metadata)
             return
         if self._mode == "no_terminal":
             yield TextDelta(
@@ -526,6 +584,29 @@ class RaisingStreamProvider:
         raise ProviderInvocationError(
             ProviderError(ProviderErrorCategory.TIMEOUT, "provider timed out", False)
         )
+
+
+class ProtocolBlockingProvider:
+    def __init__(self) -> None:
+        self.blocked = asyncio.Event()
+        self._calls = 0
+
+    async def stream_text(
+        self, *, model: ModelIdentity, request: AIRequest
+    ) -> AsyncIterator[ProviderStreamEvent]:
+        self._calls += 1
+        metadata = ProviderResponseMetadata(
+            request.request_id, model, "trusted", "session"
+        )
+        if self._calls > 1:
+            yield ProviderCompleted(metadata)
+            return
+        yield TextDelta(metadata, "before")
+        yield TextDelta(
+            ProviderResponseMetadata(uuid4(), model, "bad", "session"), "bad"
+        )
+        self.blocked.set()
+        await asyncio.Event().wait()
 
 
 class DualBlockingProvider:
