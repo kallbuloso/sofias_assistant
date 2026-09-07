@@ -574,6 +574,20 @@ injection; and no global FastAPI app or new CORS behavior.
 **Goal:** prove the generic boundary can host one external provider without
 letting an SDK dictate the architecture.
 
+**Implementation decision:** OpenAI is the initial adapter, using official
+`openai>=3.8,<4`, `AsyncOpenAI`, and the Responses API. Credentials are read
+only through `SecretService`/`SecretRef`; clients use `max_retries=0`.
+Requests are stateless (`store=False`, `truncation="disabled"`) with no
+provider conversation or `previous_response_id`. The adapter normalizes text,
+streaming, and JSON-schema structured output; failed/incomplete responses and
+SDK exceptions become safe normalized provider failures, and invalid structured
+output never becomes a successful result. It does not yet declare or implement
+Tool Calling. Deterministic tests use no network. The Windows Credential
+Manager smoke is explicit opt-in through
+`SOFIAS_ASSISTANT_RUN_OPENAI_PROVIDER_TESTS=1`, reads
+`SecretRef("providers/openai/api-key")`, and uses `gpt-5.6-luna` only as its
+overrideable default smoke model.
+
 **Precondition:** this subpass begins only after a separate implementation
 review chooses the first provider and approves its SDK/dependency. Candidates
 may include OpenAI, an OpenAI-compatible provider, Gemini, or another approved
