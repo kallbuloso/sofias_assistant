@@ -17,6 +17,10 @@ class ContextLocalityError(ValueError):
     """Raised when mandatory context cannot safely reach the selected target."""
 
 
+class ContextBudgetExceededError(ValueError):
+    """Raised when mandatory context exceeds the selected input budget."""
+
+
 class ContextBuilder:
     """Build system, selected historical, and current messages in memory."""
 
@@ -25,6 +29,7 @@ class ContextBuilder:
         *,
         system_context: CoreSystemContext,
         max_recent_turns: int,
+        max_estimated_input_tokens: int,
     ) -> None:
         if not isinstance(system_context, CoreSystemContext):
             raise ValueError("system_context must be a CoreSystemContext")
@@ -36,8 +41,17 @@ class ContextBuilder:
             raise ValueError(
                 "max_recent_turns must be an integer greater than or equal to zero"
             )
+        if (
+            isinstance(max_estimated_input_tokens, bool)
+            or not isinstance(max_estimated_input_tokens, int)
+            or max_estimated_input_tokens <= 0
+        ):
+            raise ValueError(
+                "max_estimated_input_tokens must be an integer greater than zero"
+            )
         self._system_context = system_context
         self._max_recent_turns = max_recent_turns
+        self._max_estimated_input_tokens = max_estimated_input_tokens
 
     def build(
         self,
@@ -51,15 +65,27 @@ class ContextBuilder:
         self._validate_inputs(current_turn, conversation_turns, locality, model)
         cloud_target = model.execution_location is ExecutionLocation.CLOUD
         self._validate_mandatory_cloud_sources(current_turn, cloud_target)
-        historical_turns = self._select_historical_turns(
+        mandatory_messages = (
+            AIMessage(role=AIMessageRole.SYSTEM, text=self._system_context.text),
+            AIMessage(role=AIMessageRole.USER, text=current_turn.user_text),
+        )
+        effective_budget = self._effective_budget(model)
+        mandatory_estimate = self._estimate_messages(mandatory_messages)
+        if mandatory_estimate > effective_budget:
+            raise ContextBudgetExceededError(
+                "Mandatory context exceeds the selected model input budget"
+            )
+        historical_candidates = self._select_historical_turns(
             current_turn=current_turn,
             conversation_turns=conversation_turns,
             cloud_target=cloud_target,
         )
+        historical_turns = self._select_budgeted_historical_turns(
+            historical_candidates,
+            remaining_budget=effective_budget - mandatory_estimate,
+        )
 
-        messages = [
-            AIMessage(role=AIMessageRole.SYSTEM, text=self._system_context.text)
-        ]
+        messages = [mandatory_messages[0]]
         for turn in historical_turns:
             if turn.assistant_text is None:
                 raise ValueError("a completed historical turn requires assistant_text")
@@ -69,7 +95,7 @@ class ContextBuilder:
                     AIMessage(role=AIMessageRole.ASSISTANT, text=turn.assistant_text),
                 )
             )
-        messages.append(AIMessage(role=AIMessageRole.USER, text=current_turn.user_text))
+        messages.append(mandatory_messages[1])
 
         source_eligibility = (
             self._system_context.cloud_context_eligible,
@@ -80,6 +106,24 @@ class ContextBuilder:
             messages=tuple(messages),
             cloud_context_eligible=all(source_eligibility),
         )
+
+    def _effective_budget(self, model: ModelDescriptor) -> int:
+        if model.context_window is None:
+            return self._max_estimated_input_tokens
+        return min(self._max_estimated_input_tokens, model.context_window)
+
+    @staticmethod
+    def _estimate_message_tokens(message: AIMessage) -> int:
+        """Return a deterministic UTF-8 framing heuristic, not provider tokens."""
+        return (
+            len(message.role.value.encode("utf-8"))
+            + len(message.text.encode("utf-8"))
+            + 1
+        )
+
+    @classmethod
+    def _estimate_messages(cls, messages: Sequence[AIMessage]) -> int:
+        return sum(cls._estimate_message_tokens(message) for message in messages)
 
     def _validate_inputs(
         self,
@@ -142,3 +186,24 @@ class ContextBuilder:
         if self._max_recent_turns == 0:
             return ()
         return tuple(eligible[-self._max_recent_turns :])
+
+    def _select_budgeted_historical_turns(
+        self,
+        candidates: Sequence[Turn],
+        *,
+        remaining_budget: int,
+    ) -> tuple[Turn, ...]:
+        selected_newest_first: list[Turn] = []
+        for turn in reversed(candidates):
+            if turn.assistant_text is None:
+                raise ValueError("a completed historical turn requires assistant_text")
+            turn_messages = (
+                AIMessage(role=AIMessageRole.USER, text=turn.user_text),
+                AIMessage(role=AIMessageRole.ASSISTANT, text=turn.assistant_text),
+            )
+            estimate = self._estimate_messages(turn_messages)
+            if estimate > remaining_budget:
+                break
+            selected_newest_first.append(turn)
+            remaining_budget -= estimate
+        return tuple(reversed(selected_newest_first))

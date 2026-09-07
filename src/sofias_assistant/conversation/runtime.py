@@ -16,7 +16,11 @@ from sofias_assistant.ai.contracts import (
     TextResponse,
 )
 from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
-from sofias_assistant.context.builder import ContextBuilder, ContextLocalityError
+from sofias_assistant.context.builder import (
+    ContextBudgetExceededError,
+    ContextBuilder,
+    ContextLocalityError,
+)
 from sofias_assistant.conversation.models import (
     Conversation,
     Turn,
@@ -151,6 +155,13 @@ class TextConversationRuntime:
                 conversation_turns=conversation_turns,
                 locality=command.locality,
                 model=route.descriptor,
+            )
+        except ContextBudgetExceededError:
+            return await self._finalize_failure(
+                conversation_id=conversation.id,
+                turn_id=processing_turn.id,
+                error_category="context_limit_exceeded",
+                error_message="Context exceeds the selected model input budget",
             )
         except ContextLocalityError:
             return await self._finalize_failure(

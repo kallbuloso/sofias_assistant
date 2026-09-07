@@ -83,6 +83,7 @@ async def create_runtime(
     *,
     system_cloud_eligible: bool = True,
     max_recent_turns: int = 10,
+    max_estimated_input_tokens: int = 10_000,
     uow_factory: Callable[[], SqlAlchemyUnitOfWork] | None = None,
 ) -> tuple[
     TextConversationRuntime,
@@ -115,6 +116,7 @@ async def create_runtime(
             cloud_context_eligible=system_cloud_eligible,
         ),
         max_recent_turns=max_recent_turns,
+        max_estimated_input_tokens=max_estimated_input_tokens,
     )
     runtime = TextConversationRuntime(
         uow_factory=uow_factory or raw_uow_factory,
@@ -347,6 +349,114 @@ async def test_routing_and_context_locality_failures_do_not_invoke_provider(
     finally:
         await no_provider_engine.dispose()
         await locality_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_budget_failure_is_terminal_and_a_later_smaller_turn_can_succeed(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedFakeProvider(text_scripts=[FakeTextSuccess("recovered")])
+    runtime, _, engine, _, _ = await create_runtime(
+        tmp_path,
+        [(descriptor("local", ExecutionLocation.LOCAL), provider)],
+        max_estimated_input_tokens=30,
+    )
+    try:
+        conversation = await runtime.create_conversation()
+        failed = await runtime.send_text(
+            SendTextCommand(conversation.id, "x" * 100, DataLocality.LOCAL_ONLY, True)
+        )
+        completed = await runtime.send_text(
+            SendTextCommand(conversation.id, "x", DataLocality.LOCAL_ONLY, True)
+        )
+        assert failed.turn.status is TurnStatus.FAILED
+        assert failed.turn.error_category == "context_limit_exceeded"
+        assert failed.turn.ai_request_id is None
+        assert completed.turn.status is TurnStatus.COMPLETED
+        assert len(provider.invocations()) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_context_limit_and_local_only_cloud_route_fail_closed(
+    tmp_path: Path,
+) -> None:
+    provider_failure = ScriptedFakeProvider(
+        text_scripts=[
+            FakeProviderFailure(
+                ProviderError(
+                    ProviderErrorCategory.CONTEXT_LIMIT_EXCEEDED,
+                    "provider input limit reached",
+                    retryable=False,
+                )
+            )
+        ]
+    )
+    cloud_provider = ScriptedFakeProvider()
+    provider_runtime, _, provider_engine, _, _ = await create_runtime(
+        tmp_path,
+        [(descriptor("local", ExecutionLocation.LOCAL), provider_failure)],
+    )
+    cloud_runtime, _, cloud_engine, _, _ = await create_runtime(
+        tmp_path / "cloud",
+        [(descriptor("cloud", ExecutionLocation.CLOUD), cloud_provider)],
+    )
+    try:
+        provider_conversation = await provider_runtime.create_conversation()
+        provider_result = await provider_runtime.send_text(
+            SendTextCommand(
+                provider_conversation.id, "request", DataLocality.LOCAL_ONLY, True
+            )
+        )
+        assert provider_result.turn.error_category == "context_limit_exceeded"
+        assert provider_result.turn.ai_request_id is not None
+        assert provider_result.turn.provider_id == "fake"
+
+        cloud_conversation = await cloud_runtime.create_conversation()
+        cloud_result = await cloud_runtime.send_text(
+            SendTextCommand(
+                cloud_conversation.id, "request", DataLocality.LOCAL_ONLY, True
+            )
+        )
+        assert cloud_result.turn.error_category == "routing_error"
+        assert cloud_provider.invocations() == ()
+    finally:
+        await provider_engine.dispose()
+        await cloud_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_request_contains_only_budget_selected_history(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedFakeProvider(
+        text_scripts=[FakeTextSuccess("answer"), FakeTextSuccess("next")]
+    )
+    runtime, _, engine, _, _ = await create_runtime(
+        tmp_path,
+        [(descriptor("local", ExecutionLocation.LOCAL), provider)],
+        max_estimated_input_tokens=60,
+    )
+    try:
+        conversation = await runtime.create_conversation()
+        await runtime.send_text(
+            SendTextCommand(conversation.id, "one", DataLocality.LOCAL_ONLY, True)
+        )
+        await runtime.send_text(
+            SendTextCommand(conversation.id, "current", DataLocality.LOCAL_ONLY, True)
+        )
+        assert [
+            (message.role.value, message.text)
+            for message in provider.invocations()[1].request.messages
+        ] == [
+            ("system", "System principles"),
+            ("user", "one"),
+            ("assistant", "answer"),
+            ("user", "current"),
+        ]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

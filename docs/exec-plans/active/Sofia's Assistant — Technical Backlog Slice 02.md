@@ -464,13 +464,18 @@ first runtime path exists.
 **Implementation scope:**
 
 - Define a provider-independent baseline context budget and deterministic
-  selection/omission policy, favoring current request and recent eligible final
-  Turns.
-- Do not rely on a provider-specific tokenizer in Core. Exact adapter token
-  accounting may be exposed as optional descriptor metadata, but it cannot be
-  required for baseline correctness.
-- Reject or reduce an over-budget projection explicitly; never send everything
-  and let a provider silently truncate it.
+  selection/omission policy. Estimate each message as UTF-8 byte length of its
+  role plus text plus one framing separator; this conservative Core heuristic
+  is not exact provider token accounting.
+- Require an explicit Core `max_estimated_input_tokens`; a selected model's
+  `context_window`, when known, is an additional ceiling.
+- Preserve mandatory system/current content or fail explicitly. Select only a
+  contiguous recent suffix of eligible historical Turns; do not summarize or
+  truncate individual text.
+- Apply locality filtering before the structural and budget bounds. Reject or
+  reduce an over-budget projection explicitly; never send everything and let a
+  provider silently truncate it. A provider may still return normalized
+  `CONTEXT_LIMIT_EXCEEDED`.
 - Strengthen locality tests from ContextBuilder through Router selection.
 
 Advanced summarization/compression remains deferred; this subpass does not
