@@ -6,11 +6,17 @@ from pathlib import Path
 from uuid import UUID
 
 from sofias_assistant.config.models import RuntimeConfig
+from sofias_assistant.conversation.runtime import TextConversationRuntime
+from sofias_assistant.core.composition import (
+    ConversationDependenciesFactory,
+    ConversationRuntimeDependencies,
+)
 from sofias_assistant.health.models import (
     ComponentHealth,
     HealthStatus,
     RuntimeHealthSnapshot,
 )
+from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from sofias_assistant.runtime.bootstrap import RuntimeResources, bootstrap_runtime
 from sofias_assistant.runtime.instance_ownership import (
     CoreInstanceOwnership,
@@ -45,20 +51,28 @@ class SofiaCore:
         instance_ownership_factory: Callable[
             [Path], InstanceOwnership
         ] = CoreInstanceOwnership,
+        conversation_dependencies_factory: ConversationDependenciesFactory
+        | None = None,
     ) -> None:
         if not application_version.strip():
             raise ValueError("Application version must not be blank")
+        if conversation_dependencies_factory is not None and not callable(
+            conversation_dependencies_factory
+        ):
+            raise ValueError("conversation_dependencies_factory must be callable")
 
         self._config = config
         self._application_version = application_version
         self._secret_store_factory = secret_store_factory
         self._instance_ownership_factory = instance_ownership_factory
+        self._conversation_dependencies_factory = conversation_dependencies_factory
         self._state = CoreState.CREATED
         self._resources: RuntimeResources | None = None
         self._session_lifecycle: RuntimeSessionLifecycle | None = None
         self._secret_service: SecretService | None = None
         self._instance_ownership: InstanceOwnership | None = None
         self._instance_ownership_acquired = False
+        self._conversation_runtime: TextConversationRuntime | None = None
         self._health = RuntimeHealthSnapshot(())
 
     @property
@@ -91,6 +105,18 @@ class SofiaCore:
             )
         return self._secret_service
 
+    @property
+    def conversation_runtime(self) -> TextConversationRuntime:
+        """Return the Core-owned conversation runtime while it is configured and running."""
+
+        if self._state is not CoreState.RUNNING:
+            raise RuntimeError(
+                "Conversation Runtime is only available while SofiaCore is running"
+            )
+        if self._conversation_runtime is None:
+            raise RuntimeError("Conversation Runtime is not configured")
+        return self._conversation_runtime
+
     async def start(self) -> None:
         """Compose foundation resources and persist the current runtime session."""
 
@@ -111,6 +137,7 @@ class SofiaCore:
                 application_version=self._application_version,
             )
             await self._session_lifecycle.start()
+            self._compose_conversation_runtime()
             self._health = RuntimeHealthSnapshot(
                 (
                     ComponentHealth("operational-store", HealthStatus.HEALTHY),
@@ -198,9 +225,32 @@ class SofiaCore:
             pass
 
     def _clear_owned_references(self) -> None:
+        self._conversation_runtime = None
         self._resources = None
         self._session_lifecycle = None
         self._secret_service = None
         self._instance_ownership = None
         self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())
+
+    def _compose_conversation_runtime(self) -> None:
+        factory = self._conversation_dependencies_factory
+        if factory is None:
+            return
+
+        secret_service = self._secret_service
+        resources = self._resources
+        if secret_service is None or resources is None:
+            raise RuntimeError("SofiaCore is missing composition resources")
+        dependencies = factory(secret_service)
+        if not isinstance(dependencies, ConversationRuntimeDependencies):
+            raise ValueError(
+                "conversation_dependencies_factory must return "
+                "ConversationRuntimeDependencies"
+            )
+
+        self._conversation_runtime = TextConversationRuntime(
+            uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
+            router=dependencies.router,
+            context_builder=dependencies.context_builder,
+        )

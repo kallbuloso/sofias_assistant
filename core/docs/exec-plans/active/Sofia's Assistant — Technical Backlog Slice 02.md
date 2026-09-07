@@ -612,6 +612,24 @@ I2 correctness.
 
 ## Integration Hardening and Gate I2 Audit/Smoke
 
+The Core conversation composition checkpoint materializes the following
+decision without issuing the final Gate I2 verdict:
+
+- `SofiaCore` owns `TextConversationRuntime` for its RUNNING lifecycle;
+- its UoW factory is derived from `RuntimeResources.session_factory`;
+- a small Core-owned dependencies factory injects only `CapabilityRouter` and
+  `ContextBuilder`, receiving `SecretService` for future provider composition;
+- Core remains transport- and provider-agnostic, with no default provider or
+  model invented by this checkpoint;
+- the deterministic Gate harness uses the Fake Provider, while
+  `LocalClientBoundary` keeps its separate lifecycle and stops before Core;
+- the full Gate I2 verdict and opt-in real-provider smoke remain the next
+  checkpoint.
+
+The checkpoint proves cross-boundary persistence, authenticated real-loopback
+HTTP, provider/model substitution, context ownership, normalized provider
+failure, and restart/reload through deterministic tests.
+
 After the implementation commits are approved, run cross-boundary persistence,
 HTTP, real loopback, redaction, and restart/reload tests. Perform the opt-in
 real-provider smoke only with approved credentials and explicitly record its

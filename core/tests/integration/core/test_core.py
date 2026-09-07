@@ -2,13 +2,42 @@
 
 from datetime import UTC
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select
 
+from sofias_assistant.ai.contracts import (
+    Capability,
+    DataLocality,
+    ExecutionLocation,
+    ModelDescriptor,
+    ModelIdentity,
+)
+from sofias_assistant.ai.registry import (
+    ModelRegistration,
+    ModelRegistry,
+    ProviderBinding,
+)
+from sofias_assistant.ai.routing import CapabilityRouter
 from sofias_assistant.config.models import AppPaths, RuntimeConfig
-from sofias_assistant.core import CoreState, SofiaCore
+from sofias_assistant.context.builder import ContextBuilder
+from sofias_assistant.context.models import CoreSystemContext
+from sofias_assistant.conversation.events import (
+    ConversationTextDelta,
+    ConversationTurnCompleted,
+    ConversationTurnStarted,
+)
+from sofias_assistant.conversation.runtime import (
+    SendTextCommand,
+    TextConversationRuntime,
+)
+from sofias_assistant.core import (
+    ConversationRuntimeDependencies,
+    CoreState,
+    SofiaCore,
+)
 from sofias_assistant.health import HealthStatus
 from sofias_assistant.persistence.database import (
     create_async_engine,
@@ -18,6 +47,12 @@ from sofias_assistant.persistence.models import RuntimeSession, RuntimeSessionSt
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from sofias_assistant.runtime import CoreAlreadyRunningError, operational_database_url
 from sofias_assistant.secrets.models import SecretRef, SecretValue
+from tests.support.ai import (
+    FakeStreamCompleted,
+    FakeStreamScript,
+    FakeTextDelta,
+    ScriptedFakeProvider,
+)
 
 
 class FakeOwnership:
@@ -106,6 +141,31 @@ async def persisted_sessions(database_path: Path) -> dict[UUID, RuntimeSession]:
         await engine.dispose()
 
 
+def conversation_dependencies(
+    provider: ScriptedFakeProvider,
+) -> ConversationRuntimeDependencies:
+    registry = ModelRegistry()
+    registry.register(
+        ModelRegistration(
+            descriptor=ModelDescriptor(
+                identity=ModelIdentity("fake", "core-stream"),
+                capabilities=frozenset({Capability.TEXT_STREAMING}),
+                execution_location=ExecutionLocation.LOCAL,
+                context_window=4096,
+            ),
+            binding=ProviderBinding(text_streaming=provider),
+        )
+    )
+    return ConversationRuntimeDependencies(
+        router=CapabilityRouter(registry),
+        context_builder=ContextBuilder(
+            system_context=CoreSystemContext("Core system context", True),
+            max_recent_turns=1,
+            max_estimated_input_tokens=10_000,
+        ),
+    )
+
+
 def test_construction_is_side_effect_free(tmp_path: Path) -> None:
     config = runtime_config(tmp_path)
     factory = RecordingSecretStoreFactory()
@@ -127,6 +187,22 @@ def test_construction_is_side_effect_free(tmp_path: Path) -> None:
     assert ownership_factory.calls == 0
     with pytest.raises(RuntimeError, match="only available"):
         _ = core.secret_service
+    with pytest.raises(RuntimeError, match="Conversation Runtime"):
+        _ = core.conversation_runtime
+
+
+def test_conversation_runtime_dependencies_validate_internal_contracts() -> None:
+    with pytest.raises(ValueError, match="router must be a CapabilityRouter"):
+        ConversationRuntimeDependencies(
+            router=cast(CapabilityRouter, None),
+            context_builder=cast(ContextBuilder, None),
+        )
+
+    with pytest.raises(ValueError, match="context_builder must be a ContextBuilder"):
+        ConversationRuntimeDependencies(
+            router=CapabilityRouter(ModelRegistry()),
+            context_builder=cast(ContextBuilder, None),
+        )
 
 
 @pytest.mark.asyncio
@@ -154,6 +230,132 @@ async def test_successful_start_composes_foundation_resources(tmp_path: Path) ->
     finally:
         if core.state is CoreState.RUNNING:
             await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_core_without_conversation_configuration_preserves_foundation_compatibility(
+    tmp_path: Path,
+) -> None:
+    core = SofiaCore(
+        runtime_config(tmp_path),
+        application_version="0.1.0.dev0",
+        secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
+    )
+
+    await core.start()
+    try:
+        assert core.state is CoreState.RUNNING
+        assert core.runtime_session_id is not None
+        assert core.secret_service is not None
+        with pytest.raises(RuntimeError, match="not configured"):
+            _ = core.conversation_runtime
+    finally:
+        await core.stop()
+
+    with pytest.raises(RuntimeError, match="Conversation Runtime"):
+        _ = core.conversation_runtime
+
+
+@pytest.mark.asyncio
+async def test_core_composes_conversation_runtime_with_its_operational_store(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedFakeProvider(
+        stream_scripts=[
+            FakeStreamScript(
+                items=(
+                    FakeTextDelta("Core-owned "),
+                    FakeTextDelta("answer"),
+                    FakeStreamCompleted(),
+                )
+            )
+        ]
+    )
+    received_secret_services: list[object] = []
+
+    def dependencies_factory(secret_service: object) -> ConversationRuntimeDependencies:
+        received_secret_services.append(secret_service)
+        return conversation_dependencies(provider)
+
+    core = SofiaCore(
+        runtime_config(tmp_path),
+        application_version="0.1.0.dev0",
+        secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
+        conversation_dependencies_factory=dependencies_factory,
+    )
+    with pytest.raises(RuntimeError, match="Conversation Runtime"):
+        _ = core.conversation_runtime
+
+    await core.start()
+    try:
+        runtime = core.conversation_runtime
+        assert isinstance(runtime, TextConversationRuntime)
+        assert received_secret_services == [core.secret_service]
+
+        conversation = await runtime.create_conversation()
+        events = [
+            event
+            async for event in runtime.stream_text(
+                SendTextCommand(
+                    conversation_id=conversation.id,
+                    text="Hello Core",
+                    locality=DataLocality.LOCAL_ONLY,
+                    cloud_context_eligible=True,
+                )
+            )
+        ]
+        state = await runtime.get_conversation_state(conversation.id)
+
+        assert [type(event) for event in events] == [
+            ConversationTurnStarted,
+            ConversationTextDelta,
+            ConversationTextDelta,
+            ConversationTurnCompleted,
+        ]
+        assert state.conversation.id == conversation.id
+        assert state.turns[0].assistant_text == "Core-owned answer"
+        assert state.turns[0].status.value == "COMPLETED"
+    finally:
+        await core.stop()
+
+    with pytest.raises(RuntimeError, match="Conversation Runtime"):
+        _ = core.conversation_runtime
+
+
+@pytest.mark.asyncio
+async def test_composition_failure_cleans_up_runtime_resources(tmp_path: Path) -> None:
+    config = runtime_config(tmp_path)
+    ownership_factory = RecordingOwnershipFactory()
+    expected_error = RuntimeError("conversation composition failed")
+
+    def failing_dependencies_factory(_: object) -> ConversationRuntimeDependencies:
+        raise expected_error
+
+    core = SofiaCore(
+        config,
+        application_version="0.1.0.dev0",
+        secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=ownership_factory,
+        conversation_dependencies_factory=failing_dependencies_factory,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await core.start()
+
+    sessions = await persisted_sessions(config.paths.operational_database)
+    assert raised.value is expected_error
+    assert core.state is CoreState.FAILED
+    assert core.runtime_session_id is None
+    assert ownership_factory.ownership.release_calls == 1
+    assert tuple(session.status for session in sessions.values()) == (
+        RuntimeSessionStatus.STOPPED,
+    )
+    with pytest.raises(RuntimeError, match="only available"):
+        _ = core.secret_service
+    with pytest.raises(RuntimeError, match="Conversation Runtime"):
+        _ = core.conversation_runtime
 
 
 @pytest.mark.asyncio
