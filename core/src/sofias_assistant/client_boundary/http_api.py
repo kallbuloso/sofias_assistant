@@ -11,6 +11,10 @@ from pydantic import BaseModel, field_validator
 
 from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
+from sofias_assistant.client_boundary.realtime_ws import (
+    RealtimeConversationApi,
+    register_realtime_websocket,
+)
 from sofias_assistant.client_boundary.sessions import (
     ClientSession,
     ClientSessionRegistry,
@@ -363,10 +367,19 @@ def create_local_http_app(
     *,
     core: CoreReadApi | None = None,
     conversation: ConversationHttpApi | None = None,
+    realtime: RealtimeConversationApi | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    if realtime is not None:
+        register_realtime_websocket(
+            app,
+            authenticator=authenticator,
+            sessions=sessions,
+            realtime=realtime,
+        )
 
     async def require_bearer(
         authorization: Annotated[str | None, Header()] = None,
