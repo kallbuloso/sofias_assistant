@@ -392,7 +392,7 @@ unit/integration tests. **Commit:** `feat(conversation): add realtime runtime`.
 
 ### SA-B009.4 — Authenticated Local WebSocket Boundary
 
-**Status:** DONE / LOCAL VERIFIED
+**Status:** DONE — REMOTE VERIFIED (`624024444441790bf0d790fef51d4011edab1e40`)
 
 **Goal:** bridge loopback real, sem lógica de domínio. **Scope:** primeiro frame
 `authenticate`, JSON/binary, `input_started`/`input_committed`, DTOs/redaction e
@@ -407,11 +407,16 @@ adversarial, frames inválidos e happy path loopback. **Likely files:**
 authentication/protocol/security matrix, Core-terminal and disconnect cleanup,
 explicit outbound event/audio framing, real SofiaCore + SQLite + Uvicorn
 vertical with durable VOICE Turn, and HTTP/NDJSON coexistence all pass locally.
-Evidence: Gate I3 `1 passed`; HTTP/client-boundary targeted regression `96
+Evidence: Gate I3 `2 passed`; HTTP/client-boundary targeted regression `96
 passed`; realtime runtime targeted regression `6 passed`; full suite `428
 passed, 2 skipped`; Ruff, format, mypy, `uv lock --check`, and `git diff
---check` pass. No commit, push, CI, or remote verification was performed;
-SA-B009.5 and later slices remain subsequent work.
+--check` pass.
+
+**Remote verification:** Commit `624024444441790bf0d790fef51d4011edab1e40`.
+GitHub Actions CI run `34305314695` concluded `success`; `main` points to the
+commit above, and remote CI passed lint, format, mypy/type check, and tests.
+Gate I3 remains OPEN; SA-B009.5 is the next step and SA-B009.6 remains
+subsequent work.
 
 ### SA-B009.5 — Barge-in, Session Loss & Backpressure Hardening
 
