@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
+from uuid import uuid4
 
 from sofias_assistant.ai.contracts import (
     AssistantAudioChunk,
@@ -80,6 +81,22 @@ class FakeRealtimePause:
     release: asyncio.Event
 
 
+@dataclass(frozen=True, slots=True)
+class FakeRealtimeBarrier:
+    entered: asyncio.Event
+    release: asyncio.Event
+
+
+@dataclass(frozen=True, slots=True)
+class FakeUnknownInteractionEvent:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class FakeWrongSessionEvent:
+    text: str
+
+
 type FakeRealtimeItem = (
     FakeUserTranscriptPartial
     | FakeUserTranscriptFinal
@@ -91,12 +108,17 @@ type FakeRealtimeItem = (
     | FakeRealtimeFailed
     | FakeRealtimeSessionFailed
     | FakeRealtimePause
+    | FakeRealtimeBarrier
+    | FakeUnknownInteractionEvent
+    | FakeWrongSessionEvent
 )
 
 
 @dataclass(frozen=True, slots=True)
 class FakeRealtimeScript:
     items: tuple[FakeRealtimeItem, ...]
+    start_barrier: FakeRealtimeBarrier | None = None
+    start_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +163,7 @@ class ScriptedFakeRealtimeProviderSession:
         self._started: list[RealtimeInteractionId] = []
         self._frames: list[AudioInputFrame] = []
         self._commits: list[RealtimeInteractionId] = []
+        self._interrupts: list[RealtimeInteractionId] = []
         self._close_calls = 0
         self._events_consumers = 0
         self._closed = False
@@ -153,6 +176,9 @@ class ScriptedFakeRealtimeProviderSession:
 
     def commits(self) -> tuple[RealtimeInteractionId, ...]:
         return tuple(self._commits)
+
+    def interrupts(self) -> tuple[RealtimeInteractionId, ...]:
+        return tuple(self._interrupts)
 
     @property
     def close_calls(self) -> int:
@@ -169,8 +195,14 @@ class ScriptedFakeRealtimeProviderSession:
             raise RuntimeError("fake session is closed")
         if not self._scripts:
             raise AssertionError("No realtime script is available")
+        script = self._scripts.popleft()
+        if script.start_barrier is not None:
+            script.start_barrier.entered.set()
+            await script.start_barrier.release.wait()
+        if script.start_error is not None:
+            raise RuntimeError(script.start_error)
         self._started.append(realtime_interaction_id)
-        await self._events.put((realtime_interaction_id, self._scripts.popleft()))
+        await self._events.put((realtime_interaction_id, script))
 
     async def send_audio(self, *, frame: AudioInputFrame) -> None:
         self._frames.append(frame)
@@ -183,7 +215,7 @@ class ScriptedFakeRealtimeProviderSession:
     async def interrupt(
         self, *, realtime_interaction_id: RealtimeInteractionId
     ) -> None:
-        return None
+        self._interrupts.append(realtime_interaction_id)
 
     async def close(self) -> None:
         self._close_calls += 1
@@ -202,6 +234,10 @@ class ScriptedFakeRealtimeProviderSession:
             interaction_id, script = item
             for scripted in script.items:
                 if isinstance(scripted, FakeRealtimePause):
+                    await scripted.release.wait()
+                    continue
+                if isinstance(scripted, FakeRealtimeBarrier):
+                    scripted.entered.set()
                     await scripted.release.wait()
                     continue
                 if isinstance(scripted, FakeSignaledAssistantAudioChunk):
@@ -240,4 +276,12 @@ def _event(
         return RealtimeResponseFailed(session_id, interaction_id, sequence, item.error)
     if isinstance(item, FakeRealtimeSessionFailed):
         return RealtimeSessionFailed(session_id, sequence, item.error)
+    if isinstance(item, FakeUnknownInteractionEvent):
+        return UserTranscriptPartial(
+            session_id, RealtimeInteractionId(uuid4()), sequence, item.text
+        )
+    if isinstance(item, FakeWrongSessionEvent):
+        return UserTranscriptPartial(
+            RealtimeSessionId(uuid4()), interaction_id, sequence, item.text
+        )
     raise AssertionError("Pause is not an event")

@@ -33,6 +33,7 @@ class ConversationActivityLease:
 class _ConversationActivityState:
     gate: asyncio.Lock = field(default_factory=asyncio.Lock)
     text_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    voice_transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_text: int = 0
     text_active: bool = False
     voice_active: bool = False
@@ -95,6 +96,19 @@ class ConversationActivityCoordinator:
                 )
             state.voice_active = True
         return ConversationActivityLease(state)
+
+    @asynccontextmanager
+    async def voice_transition(self, conversation_id: UUID) -> AsyncIterator[None]:
+        """Serialize one voice lifecycle transition for a Conversation.
+
+        This lock is deliberately independent from the activity-state gate:
+        transitions may run while an existing voice lease is held, and their
+        body may call context-revision or lease operations safely.
+        """
+
+        state = self._state_for(conversation_id)
+        async with state.voice_transition_lock:
+            yield
 
     async def context_revision(self, conversation_id: UUID) -> int:
         """Return the current process-local durable-context revision."""

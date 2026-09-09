@@ -29,7 +29,10 @@ from sofias_assistant.ai.contracts import (
 from sofias_assistant.ai.providers import RealtimeProviderSession
 from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
 from sofias_assistant.context.builder import ContextBuilder, ContextLocalityError
-from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
+from sofias_assistant.conversation.coordination import (
+    ConversationActivityCoordinator,
+    ConversationActivityLease,
+)
 from sofias_assistant.conversation.events import (
     ConversationTurnCompleted,
     ConversationTurnFailed,
@@ -56,6 +59,7 @@ from sofias_assistant.conversation.realtime_events import (
     RealtimeUserTranscriptPartial,
 )
 from sofias_assistant.conversation.realtime_models import (
+    InteractionGeneration,
     RealtimeInteraction,
     RealtimeSession,
     RealtimeSessionState,
@@ -107,6 +111,16 @@ class OpenRealtimeSessionCommand:
 
 
 _END = object()
+
+type _InteractionProviderEvent = (
+    UserTranscriptPartial
+    | UserTranscriptFinal
+    | AssistantAudioChunk
+    | AssistantTranscriptPartial
+    | AssistantTranscriptFinal
+    | RealtimeResponseCompleted
+    | RealtimeResponseFailed
+)
 
 
 class RealtimeConversationRuntime:
@@ -219,36 +233,58 @@ class RealtimeConversationRuntime:
         self, realtime_session_id: RealtimeSessionId
     ) -> RealtimeInteractionId:
         session = self._session(realtime_session_id)
-        if (
-            session.state is not RealtimeSessionState.IDLE
-            or session.active_interaction is not None
-        ):
-            raise InvalidRealtimeStateError("Realtime session is not idle")
-        lease = await self._coordinator.acquire_voice_activity(session.conversation_id)
-        try:
-            if (
-                session.provider_context_stale
-                or session.synced_context_revision
-                != await self._coordinator.context_revision(session.conversation_id)
-            ):
-                await self._reseed_provider(session)
-            interaction_id = RealtimeInteractionId(self._id_factory())
-            interaction = RealtimeInteraction(
-                interaction_id, lease, session.cloud_context_eligible
-            )
-            provider = self._provider(session)
-            await provider.start_interaction(realtime_interaction_id=interaction_id)
-            session.active_interaction, session.state = (
-                interaction,
-                RealtimeSessionState.ACTIVE,
-            )
-            await self._emit(
-                session, RealtimeInteractionStarted(session.id, interaction_id)
-            )
-            return interaction_id
-        except BaseException:
-            await lease.release()
-            raise
+        async with self._coordinator.voice_transition(session.conversation_id):
+            active = session.active_interaction
+            lease: ConversationActivityLease | None = None
+            if session.state is RealtimeSessionState.IDLE and active is None:
+                lease = await self._coordinator.acquire_voice_activity(
+                    session.conversation_id
+                )
+            elif session.state is RealtimeSessionState.ACTIVE and active is not None:
+                if not active.input_committed:
+                    raise InvalidRealtimeStateError(
+                        "Realtime input must be committed before barge-in"
+                    )
+                lease = active.lease
+                await self._retire_active_interaction(
+                    session, active, cancel=False, release_lease=False
+                )
+            else:
+                raise InvalidRealtimeStateError("Realtime session is not idle")
+
+            assert lease is not None
+            try:
+                if (
+                    session.provider_context_stale
+                    or session.synced_context_revision
+                    != await self._coordinator.context_revision(session.conversation_id)
+                ):
+                    await self._reseed_provider(session)
+                interaction_id = RealtimeInteractionId(self._id_factory())
+                response_epoch = session.next_response_epoch()
+                interaction = RealtimeInteraction(
+                    interaction_id,
+                    lease,
+                    session.cloud_context_eligible,
+                    response_epoch,
+                )
+                provider = self._provider(session)
+                await provider.start_interaction(realtime_interaction_id=interaction_id)
+                session.active_interaction, session.state = (
+                    interaction,
+                    RealtimeSessionState.ACTIVE,
+                )
+                await self._emit(
+                    session, RealtimeInteractionStarted(session.id, interaction_id)
+                )
+                return interaction_id
+            except BaseException:
+                await self._close_provider(session)
+                session.active_interaction = None
+                session.state = RealtimeSessionState.IDLE
+                session.provider_context_stale = True
+                await lease.release()
+                raise
 
     async def send_audio(
         self, realtime_session_id: RealtimeSessionId, audio: bytes
@@ -271,6 +307,32 @@ class RealtimeConversationRuntime:
             realtime_interaction_id=interaction.id
         )
 
+    async def interrupt_interaction(
+        self,
+        realtime_session_id: RealtimeSessionId,
+        realtime_interaction_id: RealtimeInteractionId,
+    ) -> None:
+        """Stop a committed response and retire its active interaction."""
+
+        await self._retire_interaction(
+            realtime_session_id,
+            realtime_interaction_id,
+            cancel=False,
+        )
+
+    async def cancel_interaction(
+        self,
+        realtime_session_id: RealtimeSessionId,
+        realtime_interaction_id: RealtimeInteractionId,
+    ) -> None:
+        """Cancel an uncommitted input interaction without creating a Turn."""
+
+        await self._retire_interaction(
+            realtime_session_id,
+            realtime_interaction_id,
+            cancel=True,
+        )
+
     async def events(
         self, realtime_session_id: RealtimeSessionId
     ) -> AsyncIterator[RealtimeConversationEvent]:
@@ -289,6 +351,62 @@ class RealtimeConversationRuntime:
             if event is _END:
                 return
             yield event
+
+    async def _retire_interaction(
+        self,
+        realtime_session_id: RealtimeSessionId,
+        realtime_interaction_id: RealtimeInteractionId,
+        *,
+        cancel: bool,
+    ) -> None:
+        session = self._session(realtime_session_id)
+        async with self._coordinator.voice_transition(session.conversation_id):
+            active = session.active_interaction
+            if active is None or active.id != realtime_interaction_id:
+                raise InvalidRealtimeStateError(
+                    "Realtime interaction is not the active interaction"
+                )
+            await self._retire_active_interaction(
+                session, active, cancel=cancel, release_lease=True
+            )
+
+    async def _retire_active_interaction(
+        self,
+        session: RealtimeSession,
+        active: RealtimeInteraction,
+        *,
+        cancel: bool,
+        release_lease: bool,
+    ) -> None:
+        if cancel and active.input_committed:
+            raise InvalidRealtimeStateError(
+                "Committed realtime input cannot be cancelled"
+            )
+        if not cancel and not active.input_committed:
+            raise InvalidRealtimeStateError(
+                "Realtime input must be committed before interruption"
+            )
+
+        await self._provider(session).interrupt(realtime_interaction_id=active.id)
+        if active.durable_turn_id is not None:
+            conversation, turn = await self._terminalize_turn(
+                session,
+                active,
+                "interrupted",
+                "Realtime interaction was interrupted",
+                interrupted=True,
+            )
+            await self._emit(
+                session,
+                ConversationTurnInterrupted(conversation, turn),
+                terminal=True,
+            )
+        session.provider_context_stale = session.provider_context_stale or not cancel
+        session.retire_interaction(active)
+        session.active_interaction = None
+        session.state = RealtimeSessionState.IDLE
+        if release_lease:
+            await active.lease.release()
 
     async def close_session(self, realtime_session_id: RealtimeSessionId) -> None:
         session = self._session(realtime_session_id)
@@ -430,19 +548,32 @@ class RealtimeConversationRuntime:
                 )
             await self._fail_session(session, event.error.safe_message)
             return
-        interaction = session.active_interaction
-        if interaction is None or not hasattr(event, "realtime_interaction_id"):
-            return await self._protocol_failure(
+        async with self._coordinator.voice_transition(session.conversation_id):
+            await self._handle_interaction_event(session, event)
+
+    async def _handle_interaction_event(
+        self, session: RealtimeSession, event: _InteractionProviderEvent
+    ) -> None:
+        if not hasattr(event, "realtime_interaction_id"):
+            await self._protocol_failure(
                 session, "Provider emitted an event outside an active interaction"
             )
-        if (
-            event.realtime_session_id != session.id
-            or event.realtime_interaction_id != interaction.id
-            or event.sequence <= interaction.last_provider_sequence
-        ):
-            return await self._protocol_failure(
+            return
+        if event.realtime_session_id != session.id:
+            await self._protocol_failure(session, "Provider session correlation failed")
+            return
+        generation = session.classify_interaction(event.realtime_interaction_id)
+        if generation is InteractionGeneration.RETIRED_KNOWN:
+            return
+        if generation is InteractionGeneration.UNKNOWN:
+            await self._protocol_failure(session, "Provider event correlation failed")
+            return
+        interaction = session.active_interaction
+        if interaction is None or event.sequence <= interaction.last_provider_sequence:
+            await self._protocol_failure(
                 session, "Provider event ordering or correlation failed"
             )
+            return
         interaction.last_provider_sequence = event.sequence
         if isinstance(event, UserTranscriptPartial):
             await self._emit(
