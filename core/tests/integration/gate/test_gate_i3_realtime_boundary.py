@@ -42,6 +42,8 @@ from ...support.ai import (
 from ...support.realtime import (
     FakeAssistantAudioChunk,
     FakeAssistantTranscriptFinal,
+    FakeAssistantTranscriptPartial,
+    FakeRealtimeBarrier,
     FakeRealtimeCompleted,
     FakeRealtimePause,
     FakeRealtimeScript,
@@ -486,6 +488,660 @@ async def test_gate_i3_http_ndjson_coexists_with_realtime_route(tmp_path: Path) 
             f"/api/v1/conversations/{conversation_id}",
         )
         assert missing_auth_status == 401
+    finally:
+        if boundary is not None:
+            await boundary.stop()
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_gate_i3_real_input_cancelled_and_reuse(tmp_path: Path) -> None:
+    provider = ScriptedFakeRealtimeProvider(
+        (FakeRealtimeScript(()), FakeRealtimeScript(()))
+    )
+    core = _core(tmp_path / "core-data", provider)
+    boundary: LocalClientBoundary | None = None
+    try:
+        await core.start()
+        boundary = LocalClientBoundary(
+            port=0,
+            app_factory=lambda authenticator, sessions: create_local_http_app(
+                authenticator,
+                sessions,
+                core=core,
+                conversation=core.conversation_runtime,
+                realtime=core.realtime_conversation_runtime,
+            ),
+        )
+        access = await boundary.start()
+        credential = access.credential.reveal()
+        status, body, _ = await _request(
+            access.port,
+            "POST",
+            "/api/v1/client-sessions",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert status == 201
+        client_session_id = json.loads(body)["id"]
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "X-Sofia-Client-Session-ID": client_session_id,
+        }
+        status, body, _ = await _request(
+            access.port, "POST", "/api/v1/conversations", headers=headers
+        )
+        assert status == 201
+        conversation_id = UUID(json.loads(body)["id"])
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "output_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "model_override": None,
+                    }
+                )
+            )
+            opened = await _control(socket)
+            session_id = str(opened["realtime_session_id"])
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            started = await _control(socket)
+            interaction_id = str(started["realtime_interaction_id"])
+            await socket.send(b"cancelled-audio")
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_cancelled",
+                        "sequence": 3,
+                        "realtime_session_id": session_id,
+                        "realtime_interaction_id": interaction_id,
+                    }
+                )
+            )
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 4,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            replacement = await _control(socket)
+            assert replacement["type"] == "interaction.started"
+            assert replacement["realtime_interaction_id"] != interaction_id
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.close",
+                        "sequence": 5,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+        provider_session = provider.sessions()[0]
+        assert provider_session.interrupts() == (UUID(interaction_id),)
+        state = await core.conversation_runtime.get_conversation_state(conversation_id)
+        assert state.turns == ()
+    finally:
+        if boundary is not None:
+            await boundary.stop()
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_gate_i3_real_response_interrupt_pre_transcript_and_reuse(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    provider = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript((FakeRealtimeBarrier(entered, release),)),
+            FakeRealtimeScript(()),
+        )
+    )
+    core = _core(tmp_path / "core-data", provider)
+    boundary: LocalClientBoundary | None = None
+    try:
+        await core.start()
+        boundary = LocalClientBoundary(
+            port=0,
+            app_factory=lambda authenticator, sessions: create_local_http_app(
+                authenticator,
+                sessions,
+                core=core,
+                conversation=core.conversation_runtime,
+                realtime=core.realtime_conversation_runtime,
+            ),
+        )
+        access = await boundary.start()
+        credential = access.credential.reveal()
+        status, body, _ = await _request(
+            access.port,
+            "POST",
+            "/api/v1/client-sessions",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert status == 201
+        client_session_id = json.loads(body)["id"]
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "X-Sofia-Client-Session-ID": client_session_id,
+        }
+        status, body, _ = await _request(
+            access.port, "POST", "/api/v1/conversations", headers=headers
+        )
+        assert status == 201
+        conversation_id = UUID(json.loads(body)["id"])
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "output_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "model_override": None,
+                    }
+                )
+            )
+            opened = await _control(socket)
+            session_id = str(opened["realtime_session_id"])
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            started = await _control(socket)
+            interaction_id = str(started["realtime_interaction_id"])
+            await entered.wait()
+            await socket.send(b"interrupt-audio")
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": session_id,
+                        "realtime_interaction_id": interaction_id,
+                    }
+                )
+            )
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "response.interrupt",
+                        "sequence": 4,
+                        "realtime_session_id": session_id,
+                        "realtime_interaction_id": interaction_id,
+                    }
+                )
+            )
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 5,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            replacement = await _control(socket)
+            assert replacement["type"] == "interaction.started"
+            release.set()
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.close",
+                        "sequence": 6,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+        provider_session = provider.sessions()[0]
+        assert provider_session.interrupts() == (UUID(interaction_id),)
+        state = await core.conversation_runtime.get_conversation_state(conversation_id)
+        assert state.turns == ()
+    finally:
+        if boundary is not None:
+            await boundary.stop()
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_gate_i3_real_automatic_barge_in_old_terminal_and_new_completion(
+    tmp_path: Path,
+) -> None:
+    old_entered = asyncio.Event()
+    old_release = asyncio.Event()
+    new_entered = asyncio.Event()
+    new_release = asyncio.Event()
+    old_audio = b"OLD-AUDIO"
+    new_audio = b"NEW-AUDIO-EXACT"
+    old_input = b"OLD-INPUT"
+    new_input = b"NEW-INPUT"
+    provider = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("mensagem antiga"),
+                    FakeAssistantAudioChunk(old_audio, _format()),
+                    FakeAssistantTranscriptPartial("parcial antigo"),
+                    FakeRealtimeBarrier(old_entered, old_release),
+                    FakeAssistantAudioChunk(b"OLD-LATE-AUDIO", _format()),
+                    FakeAssistantTranscriptPartial(" late old"),
+                    FakeAssistantTranscriptFinal("late old final"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+            FakeRealtimeScript(
+                (
+                    FakeRealtimeBarrier(new_entered, new_release),
+                    FakeUserTranscriptFinal("mensagem nova"),
+                    FakeAssistantAudioChunk(new_audio, _format()),
+                    FakeAssistantTranscriptFinal("resposta nova"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("terceira mensagem"),
+                    FakeAssistantTranscriptFinal("terceira resposta"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+        )
+    )
+    core = _core(tmp_path / "core-data", provider)
+    boundary: LocalClientBoundary | None = None
+    try:
+        await core.start()
+        boundary = LocalClientBoundary(
+            port=0,
+            app_factory=lambda authenticator, sessions: create_local_http_app(
+                authenticator,
+                sessions,
+                core=core,
+                conversation=core.conversation_runtime,
+                realtime=core.realtime_conversation_runtime,
+            ),
+        )
+        access = await boundary.start()
+        credential = access.credential.reveal()
+        status, body, _ = await _request(
+            access.port,
+            "POST",
+            "/api/v1/client-sessions",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert status == 201
+        client_session_id = json.loads(body)["id"]
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "X-Sofia-Client-Session-ID": client_session_id,
+        }
+        status, body, _ = await _request(
+            access.port, "POST", "/api/v1/conversations", headers=headers
+        )
+        assert status == 201
+        conversation_id = UUID(json.loads(body)["id"])
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            wire_controls: list[dict[str, object]] = []
+            wire_items: list[dict[str, object] | bytes] = []
+
+            def record(value: dict[str, object] | bytes) -> None:
+                wire_items.append(value)
+                if isinstance(value, dict):
+                    wire_controls.append(value)
+
+            record(await _control(socket))
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "output_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "model_override": None,
+                    }
+                )
+            )
+            opened = await _control(socket)
+            record(opened)
+            session_id = str(opened["realtime_session_id"])
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            started_old = await _control(socket)
+            record(started_old)
+            old_id = str(started_old["realtime_interaction_id"])
+            await socket.send(old_input)
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": session_id,
+                        "realtime_interaction_id": old_id,
+                    }
+                )
+            )
+            old_audio_seen = False
+            seen_old_processing = False
+            while not (old_entered.is_set() and seen_old_processing and old_audio_seen):
+                item = await socket.recv()
+                if isinstance(item, bytes):
+                    record(item)
+                    old_audio_seen = item == old_audio
+                    continue
+                payload = json.loads(item)
+                assert isinstance(payload, dict)
+                record(payload)
+                if payload["type"] == "turn.started":
+                    turn = payload["turn"]
+                    assert isinstance(turn, dict)
+                    assert turn["status"] == "PROCESSING"
+                    seen_old_processing = True
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 4,
+                        "realtime_session_id": session_id,
+                    }
+                )
+            )
+            seen_new = False
+            seen_old_interrupted = False
+            while not (seen_new and seen_old_interrupted):
+                item = await socket.recv()
+                if isinstance(item, bytes):
+                    record(item)
+                    continue
+                payload = json.loads(item)
+                assert isinstance(payload, dict)
+                record(payload)
+                seen_new |= payload["type"] == "interaction.started"
+                seen_old_interrupted |= payload["type"] == "turn.interrupted"
+            new_id = str(
+                next(
+                    item["realtime_interaction_id"]
+                    for item in wire_controls
+                    if item["type"] == "interaction.started"
+                    and item["realtime_interaction_id"] != old_id
+                )
+            )
+            assert new_id != old_id
+            await new_entered.wait()
+            await socket.send(new_input)
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 5,
+                        "realtime_session_id": session_id,
+                        "realtime_interaction_id": new_id,
+                    }
+                )
+            )
+            old_release.set()
+            new_release.set()
+            while True:
+                item = await socket.recv()
+                if isinstance(item, bytes):
+                    record(item)
+                    continue
+                payload = json.loads(item)
+                assert isinstance(payload, dict)
+                record(payload)
+                if payload["type"] == "turn.completed":
+                    break
+        assert provider.sessions()[0].interrupts() == (UUID(old_id),)
+        assert provider.sessions()[0].frames()[0].audio == old_input
+        assert provider.sessions()[1].frames()[0].audio == new_input
+        assert provider.sessions()[1].commits() == (UUID(new_id),)
+        assert not any(
+            item == b"OLD-LATE-AUDIO"
+            or (isinstance(item, dict) and "late old" in json.dumps(item))
+            for item in wire_items
+            if isinstance(item, (bytes, dict))
+        )
+        new_audio_positions = [
+            index
+            for index, item in enumerate(wire_items)
+            if isinstance(item, bytes) and item == new_audio
+        ]
+        assert len(new_audio_positions) == 1
+        new_started_positions = [
+            index
+            for index, item in enumerate(wire_items)
+            if isinstance(item, dict)
+            and item["type"] == "assistant_output.started"
+            and item["realtime_interaction_id"] == new_id
+        ]
+        assert len(new_started_positions) == 1
+        assert new_started_positions[0] < new_audio_positions[0]
+        assert [
+            item["type"] for item in wire_controls if item["type"] == "turn.completed"
+        ] == ["turn.completed"]
+        assert [item["sequence"] for item in wire_controls] == list(
+            range(len(wire_controls))
+        )
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as followup:
+            await followup.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(followup))["type"] == "authenticated"
+            await followup.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "output_audio_format": {
+                            "encoding": "pcm16",
+                            "sample_rate_hz": 24000,
+                            "channels": 1,
+                        },
+                        "model_override": None,
+                    }
+                )
+            )
+            followup_opened = await _control(followup)
+            followup_session_id = str(followup_opened["realtime_session_id"])
+            await followup.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": followup_session_id,
+                    }
+                )
+            )
+            third_started = await _control(followup)
+            third_id = str(third_started["realtime_interaction_id"])
+            await followup.send(b"THIRD-INPUT")
+            await followup.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": followup_session_id,
+                        "realtime_interaction_id": third_id,
+                    }
+                )
+            )
+            while True:
+                item = await followup.recv()
+                if isinstance(item, bytes):
+                    continue
+                payload = json.loads(item)
+                assert isinstance(payload, dict)
+                if payload["type"] == "turn.completed":
+                    break
+            await followup.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.close",
+                        "sequence": 4,
+                        "realtime_session_id": followup_session_id,
+                    }
+                )
+            )
+        state = await core.conversation_runtime.get_conversation_state(conversation_id)
+        assert len(state.turns) == 3
+        old_turn, new_turn, third_turn = state.turns
+        assert old_turn.status is TurnStatus.INTERRUPTED
+        assert old_turn.user_text == "mensagem antiga"
+        assert old_turn.assistant_text == "parcial antigo"
+        assert new_turn.status is TurnStatus.COMPLETED
+        assert new_turn.user_text == "mensagem nova"
+        assert new_turn.assistant_text == "resposta nova"
+        assert state.turns[2].user_text == "terceira mensagem"
+        assert state.turns[2].assistant_text == "terceira resposta"
+        assert third_turn.status is TurnStatus.COMPLETED
+        assert old_turn.conversation_id == new_turn.conversation_id == conversation_id
+        assert old_turn.sequence == 1
+        assert new_turn.sequence == 2
+        assert third_turn.sequence == 3
+        assert not hasattr(old_turn, "input_audio")
+        assert not hasattr(new_turn, "assistant_audio")
+        assert "OLD-AUDIO" not in repr(old_turn)
+        assert "NEW-AUDIO" not in repr(new_turn)
     finally:
         if boundary is not None:
             await boundary.stop()

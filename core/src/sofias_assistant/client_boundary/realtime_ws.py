@@ -13,6 +13,7 @@ from sofias_assistant.ai.contracts import (
     AudioFormat,
     DataLocality,
     ModelIdentity,
+    RealtimeInteractionId,
     RealtimeSessionId,
 )
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
@@ -37,7 +38,10 @@ from sofias_assistant.conversation.realtime_events import (
     RealtimeUserTranscriptFinal,
     RealtimeUserTranscriptPartial,
 )
-from sofias_assistant.conversation.realtime_runtime import OpenRealtimeSessionCommand
+from sofias_assistant.conversation.realtime_runtime import (
+    InvalidRealtimeStateError,
+    OpenRealtimeSessionCommand,
+)
 from sofias_assistant.secrets.models import SecretValue
 
 PROTOCOL_VERSION = "realtime.v1"
@@ -77,6 +81,24 @@ _CONTROL_FIELDS: dict[str, frozenset[str]] = {
             "realtime_interaction_id",
         }
     ),
+    "input_cancelled": frozenset(
+        {
+            "protocol_version",
+            "type",
+            "sequence",
+            "realtime_session_id",
+            "realtime_interaction_id",
+        }
+    ),
+    "response.interrupt": frozenset(
+        {
+            "protocol_version",
+            "type",
+            "sequence",
+            "realtime_session_id",
+            "realtime_interaction_id",
+        }
+    ),
     "session.close": frozenset(
         {
             "protocol_version",
@@ -96,6 +118,16 @@ class RealtimeConversationApi(Protocol):
     ) -> None: ...
     async def commit_interaction(
         self, realtime_session_id: RealtimeSessionId
+    ) -> None: ...
+    async def interrupt_interaction(
+        self,
+        realtime_session_id: RealtimeSessionId,
+        realtime_interaction_id: RealtimeInteractionId,
+    ) -> None: ...
+    async def cancel_interaction(
+        self,
+        realtime_session_id: RealtimeSessionId,
+        realtime_interaction_id: RealtimeInteractionId,
     ) -> None: ...
     def events(
         self, realtime_session_id: RealtimeSessionId
@@ -145,9 +177,11 @@ class _Connection:
         self._realtime = realtime
         self._client_session_id: UUID | None = None
         self._realtime_session_id: RealtimeSessionId | None = None
-        self._interaction_id: UUID | None = None
+        self._interaction_id: RealtimeInteractionId | None = None
         self._input_committed = False
-        self._assistant_output_interaction_id: UUID | None = None
+        self._assistant_output_interaction_id: RealtimeInteractionId | None = None
+        self._pending_turn_interaction_id: RealtimeInteractionId | None = None
+        self._turn_interactions: dict[UUID, RealtimeInteractionId] = {}
         self._client_sequence = -1
         self._server_sequence = 0
         self._sender: asyncio.Task[None] | None = None
@@ -247,6 +281,10 @@ class _Connection:
             await self._start(value)
         elif kind == "input_committed":
             await self._commit(value)
+        elif kind == "input_cancelled":
+            await self._cancel(value)
+        elif kind == "response.interrupt":
+            await self._interrupt(value)
         elif kind == "session.close":
             await self._client_close(value)
 
@@ -272,11 +310,37 @@ class _Connection:
 
     async def _start(self, value: dict[str, object]) -> None:
         session_id = self._require_session(value)
-        if self._interaction_id is not None:
+        if self._interaction_id is not None and not self._input_committed:
             raise _ProtocolViolation("interaction already active")
-        interaction_id = await self._realtime.start_interaction(session_id)
+        try:
+            interaction_id = await self._realtime.start_interaction(session_id)
+        except InvalidRealtimeStateError as error:
+            raise _ProtocolViolation("invalid interaction state") from error
         self._interaction_id = interaction_id
         self._input_committed = False
+        self._assistant_output_interaction_id = None
+
+    async def _cancel(self, value: dict[str, object]) -> None:
+        session_id = self._require_session(value)
+        interaction_id = self._require_interaction(value, committed=False)
+        try:
+            await self._realtime.cancel_interaction(session_id, interaction_id)
+        except InvalidRealtimeStateError as error:
+            raise _ProtocolViolation("invalid interaction state") from error
+        self._interaction_id = None
+        self._input_committed = False
+        self._assistant_output_interaction_id = None
+
+    async def _interrupt(self, value: dict[str, object]) -> None:
+        session_id = self._require_session(value)
+        interaction_id = self._require_interaction(value, committed=True)
+        try:
+            await self._realtime.interrupt_interaction(session_id, interaction_id)
+        except InvalidRealtimeStateError as error:
+            raise _ProtocolViolation("invalid interaction state") from error
+        self._interaction_id = None
+        self._input_committed = False
+        self._assistant_output_interaction_id = None
 
     async def _audio(self, audio: bytes) -> None:
         if len(audio) > AUDIO_MAX_BYTES:
@@ -293,11 +357,31 @@ class _Connection:
 
     async def _commit(self, value: dict[str, object]) -> None:
         session_id = self._require_session(value)
-        interaction_id = UUID(_string(value, "realtime_interaction_id"))
+        try:
+            interaction_id = RealtimeInteractionId(
+                UUID(_string(value, "realtime_interaction_id"))
+            )
+        except (TypeError, ValueError) as error:
+            raise _ProtocolViolation("invalid interaction correlation") from error
         if interaction_id != self._interaction_id or self._input_committed:
             raise _ProtocolViolation("invalid interaction correlation")
         await self._realtime.commit_interaction(session_id)
         self._input_committed = True
+
+    def _require_interaction(
+        self, value: dict[str, object], *, committed: bool
+    ) -> RealtimeInteractionId:
+        if self._interaction_id is None or self._input_committed is not committed:
+            raise _ProtocolViolation("invalid interaction state")
+        try:
+            interaction_id = RealtimeInteractionId(
+                UUID(_string(value, "realtime_interaction_id"))
+            )
+        except (TypeError, ValueError) as error:
+            raise _ProtocolViolation("invalid interaction correlation") from error
+        if interaction_id != self._interaction_id:
+            raise _ProtocolViolation("invalid interaction correlation")
+        return interaction_id
 
     async def _client_close(self, value: dict[str, object]) -> None:
         session_id = self._require_session(value)
@@ -347,7 +431,14 @@ class _Connection:
         payload = _event_wire(event)
         kind = payload.pop("type")
         assert isinstance(kind, str)
+        if isinstance(event, RealtimeUserTranscriptFinal):
+            self._pending_turn_interaction_id = event.realtime_interaction_id
         await self._send_control(kind, **payload)
+        if isinstance(event, ConversationTurnStarted):
+            interaction_id = self._pending_turn_interaction_id
+            if interaction_id is not None:
+                self._turn_interactions[event.turn.id] = interaction_id
+                self._pending_turn_interaction_id = None
         if isinstance(
             event,
             (
@@ -357,8 +448,19 @@ class _Connection:
                 RealtimeInteractionFailed,
             ),
         ):
-            self._interaction_id = None
-            self._assistant_output_interaction_id = None
+            terminal_interaction_id: RealtimeInteractionId | None
+            if isinstance(event, RealtimeInteractionFailed):
+                terminal_interaction_id = event.realtime_interaction_id
+            else:
+                terminal_interaction_id = (
+                    self._turn_interactions.pop(event.turn.id)
+                    if event.turn.id in self._turn_interactions
+                    else None
+                )
+            if terminal_interaction_id == self._interaction_id:
+                self._interaction_id = None
+                self._input_committed = False
+                self._assistant_output_interaction_id = None
 
     async def _require_live_session(self) -> None:
         if (
