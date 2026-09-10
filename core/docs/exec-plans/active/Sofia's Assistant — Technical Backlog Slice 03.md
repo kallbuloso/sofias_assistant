@@ -7,6 +7,101 @@
 **Baseline auditado:** `9fa1a5168ac70ff5af738eba476679afe4496f01`
 **Idioma:** pt-BR; nomes técnicos e contratos em inglês
 
+## Execution Ledger
+
+Este ledger é a fonte versionada do estado operacional da Slice 03. Prompts e
+reports de chat não são source of truth. As decisões arquiteturais continuam
+pertencendo aos ADRs e às seções arquiteturais deste exec-plan; o ledger
+registra execução, checkpoints, commits, CI e o próximo passo.
+
+**Slice:** SA-B009 — Realtime Voice / Gate I3
+**Slice status:** ACTIVE
+**Gate I3:** OPEN
+**Current implementation HEAD:** `48b635d0decf0489657070cafe8718f082d91ebc`
+**Current active block:** SA-B009.5b — Provider Session Loss & Failure Lifecycle
+**Current next micro-step:** SA-B009.5b.1 — Provider-generation ownership
+
+### Checkpoints concluídos
+
+| Checkpoint | Status | Commit / evidência |
+| --- | --- | --- |
+| SA-B009.1 — Realtime Contracts, Audio & Routing | DONE — REMOTE VERIFIED | `1fc4045828a865851d224d27e2ca64809a637683` |
+| SA-B009.2 — Shared Conversation Coordination, Voice Persistence & Context Seed | DONE — REMOTE VERIFIED | `b1756bdc5d790c521db3ec8a3f66573ad47d0625` |
+| SA-B009.3 — Fake Realtime Provider & RealtimeConversationRuntime | DONE — REMOTE VERIFIED | `c2b7cb2c961293a348006623e6567d3b41d42279` |
+| SA-B009.4 — Authenticated Local WebSocket Boundary | DONE — REMOTE VERIFIED | Feature `624024444441790bf0d790fef51d4011edab1e40`; docs closeout `80ad7fd53c23f682d509be7e43d4dd427022a471` |
+| SA-B009.5a — Interruption / Barge-in / Wire Controls | DONE — REMOTE VERIFIED | Core checkpoint `3fb137f41e22bad731cb2c15ea66afde84f48aab`; WebSocket/vertical checkpoint `48b635d0decf0489657070cafe8718f082d91ebc`; GitHub Actions run `34434466878` SUCCESS |
+
+### SA-B009.5a — ledger de micro-steps
+
+| Micro-step | Status | Result |
+| --- | --- | --- |
+| SA-B009.5a.1 | DONE | Coordinator Voice Transition Primitive |
+| SA-B009.5a.2 | DONE | Runtime Interrupt & Cancel Primitive |
+| SA-B009.5a.3a | DONE | Interaction Epoch & Bounded Retirement |
+| SA-B009.5a.3b | DONE | Provider Event Gate & Terminal Linearization |
+| SA-B009.5a.4 | DONE | Automatic Barge-in & Replacement Lifecycle |
+| SA-B009.5a.5a | DONE | WebSocket Controls & Interaction Ownership |
+| SA-B009.5a.5b | DONE | Real WebSocket Barge-in Vertical |
+
+Decisões congeladas em SA-B009.5a:
+
+- `voice_transition` serializa decisões de lifecycle por Conversation.
+- `response_epoch` de interaction é efêmero e Core-internal; retired interaction IDs são bounded.
+- Eventos tardios `RETIRED_KNOWN` são descartados; `UNKNOWN` continua fail-closed.
+- Completion versus interrupt é decidido pela ordem de `voice_transition`, nunca por timestamps.
+- Automatic barge-in reutiliza/transfere o mesmo `ConversationActivityLease`, sem release/reacquire gap.
+- `input_started` com resposta committed delega o replacement atômico ao Core.
+- `input_cancelled` e `response.interrupt` usam as primitives Core.
+- Evento terminal OLD não pode limpar a ownership de NEW.
+- Nenhum epoch ou provider-native ID entra no wire ou na persistence.
+
+### SA-B009.5b — preflight
+
+**SA-B009.5b.0 — Provider Session Loss & Failure Lifecycle Preflight**
+**Status:** DONE — REVIEWED
+**Code changes:** none
+
+Conclusões arquiteturais congeladas:
+
+- `RealtimeResponseFailed` permanece interaction-scoped.
+- `RealtimeSessionFailed` é session-scoped e terminal para aquela Core `RealtimeSession`.
+- Provider session loss leva Turn `PROCESSING` a `FAILED` quando materializado, leva a Core realtime session a `FAILED` e preserva a Conversation.
+- Explicit close/client disconnect leva Turn `PROCESSING` a `INTERRUPTED` e a Core realtime session a `CLOSED`.
+- Session loss não é interruption.
+- Completion/session-loss e interrupt/session-loss devem ser linearizados pelo mesmo `voice_transition`.
+- Normal-end/exception do provider stream representa session/transport loss; malformed/correlation/ordering continua protocol failure.
+- Não haverá retry, fallback ou reconnect transparente nesta slice.
+
+Decisão de provider generation:
+
+`provider_generation` será um contador process-local, monotônico, efêmero, não
+persistido, não exposto no wire e não exposto em AI contracts. Cada provider
+consumer capturará `provider_session_instance` e `provider_generation`; um
+consumer de geração antiga não poderá falhar nem fechar a provider session da
+geração nova. `provider_generation` não reutiliza `response_epoch`, pois as
+responsabilidades de interaction generation e provider-session generation são
+distintas.
+
+### Plano operacional SA-B009.5b
+
+| Micro-step | Status | Objective |
+| --- | --- | --- |
+| SA-B009.5b.0 | DONE — REVIEWED | Session-loss preflight |
+| SA-B009.5b.1 | NEXT | Provider-generation ownership |
+| SA-B009.5b.2 | PLANNED | Session-failure terminal semantics |
+| SA-B009.5b.3 | PLANNED | Completion/interrupt/session-loss race matrix |
+| SA-B009.5b.4 | PLANNED | Boundary/session-loss acceptance |
+| SA-B009.5b.5 | PLANNED | Regression and remote checkpoint |
+
+Depois seguem, sem detalhamento adicional neste ledger: `SA-B009.5c` —
+Backpressure & Resource Bounds; `SA-B009.5d` — Final Hardening / Gate Evidence;
+`SA-B009.6` — OpenAI Realtime Adapter.
+
+Regra do ledger: em cada checkpoint remoto relevante, atualizar o status do
+micro-step, registrar commit SHA, registrar CI quando aplicável, registrar nova
+decisão congelada relevante e atualizar `NEXT`. Não registrar comandos
+individuais, logs completos de pytest, prompts ou reports brutos.
+
 ## 1. Objetivo e Gate I3
 
 Entregar a primeira vertical slice de voz realtime preservando uma única
@@ -43,10 +138,10 @@ declara expressamente que streaming/realtime revisitará sua granularidade.
 | FROZEN | O HTTP NDJSON de texto existente permanece compatível e inalterado. |
 | FROZEN | O primeiro realtime provider da Slice 03 é OpenAI; modelo realtime, transporte SDK/API e acesso/custo atual são pré-condições a validar antes do adapter. |
 | FROZEN | O perfil canônico MVP é `PCM16`, 24 kHz, mono; `AudioFormat` permanece explícito e provider-neutral. |
-| PROPOSED | Realtime usa WebSocket local autenticado, separado do HTTP, com controles JSON e frames binários. |
-| PROPOSED | `RealtimeProvider` é contrato especializado; `TextGenerationProvider` não é ampliado para áudio. |
-| PROPOSED | Uma única `RealtimeSession` efêmera ativa por `Conversation`; não criar tabela de realtime session. |
-| PROPOSED | Uma `ConversationActivityCoordinator` única, Core-owned, coordena texto e voz sem tratar sessão idle como conflito. |
+| FROZEN | Realtime usa WebSocket local autenticado, separado do HTTP, com controles JSON e frames binários. Materializado em SA-B009.4/SA-B009.5a. |
+| FROZEN | `RealtimeProvider` é contrato especializado; `TextGenerationProvider` não é ampliado para áudio. Materializado em SA-B009.1. |
+| FROZEN | Uma única `RealtimeSession` efêmera ativa por `Conversation`; não criar tabela de realtime session. Materializado em SA-B009.3. |
+| FROZEN | Uma `ConversationActivityCoordinator` única, Core-owned, coordena texto e voz sem tratar sessão idle como conflito. Materializado em SA-B009.2/SA-B009.5a. |
 
 As decisões PROPOSED devem ser congeladas no início do subpass que as materializa;
 nenhuma altera ADR aceita.
