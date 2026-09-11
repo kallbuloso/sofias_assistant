@@ -16,6 +16,8 @@ from sofias_assistant.ai.contracts import (
     ExecutionLocation,
     ModelDescriptor,
     ModelIdentity,
+    ProviderError,
+    ProviderErrorCategory,
 )
 from sofias_assistant.ai.registry import (
     ModelRegistration,
@@ -47,6 +49,7 @@ from ...support.realtime import (
     FakeRealtimeCompleted,
     FakeRealtimePause,
     FakeRealtimeScript,
+    FakeRealtimeSessionFailed,
     FakeUserTranscriptFinal,
     ScriptedFakeRealtimeProvider,
 )
@@ -76,6 +79,14 @@ class FakeOwnership:
 
 def _format() -> AudioFormat:
     return AudioFormat(AudioEncoding.PCM16, 24_000, 1)
+
+
+def _format_wire(value: AudioFormat) -> dict[str, object]:
+    return {
+        "encoding": value.encoding.value,
+        "sample_rate_hz": value.sample_rate_hz,
+        "channels": value.channels,
+    }
 
 
 def _dependencies_factory(
@@ -1142,6 +1153,470 @@ async def test_gate_i3_real_automatic_barge_in_old_terminal_and_new_completion(
         assert not hasattr(new_turn, "assistant_audio")
         assert "OLD-AUDIO" not in repr(old_turn)
         assert "NEW-AUDIO" not in repr(new_turn)
+    finally:
+        if boundary is not None:
+            await boundary.stop()
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_gate_i3_real_post_transcript_session_loss_closes_and_allows_reopen(
+    tmp_path: Path,
+) -> None:
+    failure_entered = asyncio.Event()
+    release_failure = asyncio.Event()
+    safe_message = "safe provider session failure"
+    input_before_failure = b"VOICE-BEFORE-FAILURE"
+    input_after_failure = b"VOICE-AFTER-FAILURE"
+    provider = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("fala antes da queda"),
+                    FakeAssistantTranscriptPartial("resposta parcial"),
+                    FakeRealtimeBarrier(failure_entered, release_failure),
+                    FakeRealtimeSessionFailed(
+                        ProviderError(
+                            ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+                            safe_message,
+                            False,
+                        )
+                    ),
+                )
+            ),
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("fala depois da queda"),
+                    FakeAssistantTranscriptFinal("resposta depois da queda"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+        )
+    )
+    core = _core(tmp_path / "core-data", provider)
+    boundary: LocalClientBoundary | None = None
+    try:
+        await core.start()
+        boundary = LocalClientBoundary(
+            port=0,
+            app_factory=lambda authenticator, sessions: create_local_http_app(
+                authenticator,
+                sessions,
+                core=core,
+                conversation=core.conversation_runtime,
+                realtime=core.realtime_conversation_runtime,
+            ),
+        )
+        access = await boundary.start()
+        credential = access.credential.reveal()
+        status, body, _ = await _request(
+            access.port,
+            "POST",
+            "/api/v1/client-sessions",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert status == 201
+        client_session_id = json.loads(body)["id"]
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "X-Sofia-Client-Session-ID": client_session_id,
+        }
+        status, body, _ = await _request(
+            access.port, "POST", "/api/v1/conversations", headers=headers
+        )
+        assert status == 201
+        conversation_id = UUID(json.loads(body)["id"])
+
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": _format_wire(_format()),
+                        "output_audio_format": _format_wire(_format()),
+                        "model_override": None,
+                    }
+                )
+            )
+            opened = await _control(socket)
+            failed_session_id = str(opened["realtime_session_id"])
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": failed_session_id,
+                    }
+                )
+            )
+            started = await _control(socket)
+            interaction_id = str(started["realtime_interaction_id"])
+            await socket.send(input_before_failure)
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": failed_session_id,
+                        "realtime_interaction_id": interaction_id,
+                    }
+                )
+            )
+
+            before_failure: list[dict[str, object]] = []
+            while not any(item["type"] == "turn.started" for item in before_failure):
+                before_failure.append(await _control(socket))
+            await failure_entered.wait()
+            state = await core.conversation_runtime.get_conversation_state(
+                conversation_id
+            )
+            assert state.turns[0].status is TurnStatus.PROCESSING
+
+            release_failure.set()
+            terminal: list[dict[str, object]] = []
+            while True:
+                payload = await _control(socket)
+                terminal.append(payload)
+                if payload["type"] == "session.failed":
+                    break
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await socket.recv()
+
+        terminal_types = [payload["type"] for payload in terminal]
+        assert terminal_types[-2:] == ["turn.failed", "session.failed"]
+        assert "turn.interrupted" not in terminal_types
+        assert "turn.completed" not in terminal_types
+        assert "session.closed" not in terminal_types
+        session_failed = terminal[-1]
+        assert session_failed["message"] == safe_message
+        assert "SECRET" not in json.dumps(terminal)
+        assert closed.value.rcvd is not None
+        assert closed.value.rcvd.code == 1000
+        assert provider.sessions()[0].close_calls == 1
+
+        state = await core.conversation_runtime.get_conversation_state(conversation_id)
+        assert len(state.turns) == 1
+        failed_turn = state.turns[0]
+        assert failed_turn.input_modality is TurnInputModality.VOICE
+        assert failed_turn.status is TurnStatus.FAILED
+        assert failed_turn.user_text == "fala antes da queda"
+        assert failed_turn.assistant_text == "resposta parcial"
+        assert (failed_turn.provider_id, failed_turn.model_id) == ("fake", "realtime")
+        assert failed_turn.finished_at is not None
+        assert not hasattr(failed_turn, "input_audio")
+        assert not hasattr(failed_turn, "assistant_audio")
+        assert not hasattr(failed_turn, "assistant_transcript_partial")
+        assert failed_turn.provider_session_id is None
+        assert "VOICE-BEFORE-FAILURE" not in repr(failed_turn)
+
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": _format_wire(_format()),
+                        "output_audio_format": _format_wire(_format()),
+                        "model_override": None,
+                    }
+                )
+            )
+            reopened = await _control(socket)
+            reopened_session_id = str(reopened["realtime_session_id"])
+            assert reopened_session_id != failed_session_id
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": reopened_session_id,
+                    }
+                )
+            )
+            restarted = await _control(socket)
+            restarted_interaction_id = str(restarted["realtime_interaction_id"])
+            await socket.send(input_after_failure)
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": reopened_session_id,
+                        "realtime_interaction_id": restarted_interaction_id,
+                    }
+                )
+            )
+            recovered: list[dict[str, object]] = []
+            while not any(item["type"] == "turn.completed" for item in recovered):
+                recovered.append(await _control(socket))
+            assert [item["type"] for item in recovered] == [
+                "user_transcript.final",
+                "turn.started",
+                "assistant_transcript.final",
+                "turn.completed",
+            ]
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.close",
+                        "sequence": 4,
+                        "realtime_session_id": reopened_session_id,
+                    }
+                )
+            )
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await socket.recv()
+            assert closed.value.rcvd is not None
+            assert closed.value.rcvd.code == 1000
+
+        assert provider.sessions()[1].frames()[0].audio == input_after_failure
+        assert provider.sessions()[1].close_calls == 1
+        final_state = await core.conversation_runtime.get_conversation_state(
+            conversation_id
+        )
+        assert len(final_state.turns) == 2
+        first, second = final_state.turns
+        assert (first.status, second.status) == (
+            TurnStatus.FAILED,
+            TurnStatus.COMPLETED,
+        )
+        assert first.user_text == "fala antes da queda"
+        assert first.assistant_text == "resposta parcial"
+        assert second.user_text == "fala depois da queda"
+        assert second.assistant_text == "resposta depois da queda"
+        assert not hasattr(second, "input_audio")
+        assert not hasattr(second, "assistant_audio")
+        assert second.provider_session_id is None
+        assert "VOICE-AFTER-FAILURE" not in repr(second)
+        assert first.conversation_id == second.conversation_id == conversation_id
+        assert (first.sequence, second.sequence) == (1, 2)
+    finally:
+        if boundary is not None:
+            await boundary.stop()
+        if core.state is CoreState.RUNNING:
+            await core.stop()
+
+
+@pytest.mark.asyncio
+async def test_gate_i3_real_pre_transcript_session_loss_creates_no_turn(
+    tmp_path: Path,
+) -> None:
+    failure_entered = asyncio.Event()
+    release_failure = asyncio.Event()
+    provider = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeRealtimeBarrier(failure_entered, release_failure),
+                    FakeRealtimeSessionFailed(
+                        ProviderError(
+                            ProviderErrorCategory.PROVIDER_UNAVAILABLE,
+                            "safe pre-transcript failure",
+                            False,
+                        )
+                    ),
+                )
+            ),
+            FakeRealtimeScript(()),
+        )
+    )
+    core = _core(tmp_path / "core-data", provider)
+    boundary: LocalClientBoundary | None = None
+    try:
+        await core.start()
+        boundary = LocalClientBoundary(
+            port=0,
+            app_factory=lambda authenticator, sessions: create_local_http_app(
+                authenticator,
+                sessions,
+                core=core,
+                conversation=core.conversation_runtime,
+                realtime=core.realtime_conversation_runtime,
+            ),
+        )
+        access = await boundary.start()
+        credential = access.credential.reveal()
+        status, body, _ = await _request(
+            access.port,
+            "POST",
+            "/api/v1/client-sessions",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert status == 201
+        client_session_id = json.loads(body)["id"]
+        headers = {
+            "Authorization": f"Bearer {credential}",
+            "X-Sofia-Client-Session-ID": client_session_id,
+        }
+        status, body, _ = await _request(
+            access.port, "POST", "/api/v1/conversations", headers=headers
+        )
+        assert status == 201
+        conversation_id = UUID(json.loads(body)["id"])
+
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": _format_wire(_format()),
+                        "output_audio_format": _format_wire(_format()),
+                        "model_override": None,
+                    }
+                )
+            )
+            opened = await _control(socket)
+            failed_session_id = str(opened["realtime_session_id"])
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_started",
+                        "sequence": 2,
+                        "realtime_session_id": failed_session_id,
+                    }
+                )
+            )
+            started = await _control(socket)
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "input_committed",
+                        "sequence": 3,
+                        "realtime_session_id": failed_session_id,
+                        "realtime_interaction_id": str(
+                            started["realtime_interaction_id"]
+                        ),
+                    }
+                )
+            )
+            await failure_entered.wait()
+            release_failure.set()
+            received: list[dict[str, object]] = []
+            while True:
+                payload = await _control(socket)
+                received.append(payload)
+                if payload["type"] == "session.failed":
+                    break
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await socket.recv()
+
+        assert [item["type"] for item in received] == ["session.failed"]
+        assert closed.value.rcvd is not None
+        assert closed.value.rcvd.code == 1000
+        assert provider.sessions()[0].close_calls == 1
+        state = await core.conversation_runtime.get_conversation_state(conversation_id)
+        assert state.turns == ()
+
+        async with websockets.connect(
+            f"ws://127.0.0.1:{access.port}/api/v1/realtime"
+        ) as socket:
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "authenticate",
+                        "sequence": 0,
+                        "credential": credential,
+                        "client_session_id": client_session_id,
+                    }
+                )
+            )
+            assert (await _control(socket))["type"] == "authenticated"
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.open",
+                        "sequence": 1,
+                        "conversation_id": str(conversation_id),
+                        "locality": "local_only",
+                        "cloud_context_eligible": True,
+                        "input_audio_format": _format_wire(_format()),
+                        "output_audio_format": _format_wire(_format()),
+                        "model_override": None,
+                    }
+                )
+            )
+            reopened = await _control(socket)
+            assert reopened["realtime_session_id"] != failed_session_id
+            await socket.send(
+                json.dumps(
+                    {
+                        "protocol_version": "realtime.v1",
+                        "type": "session.close",
+                        "sequence": 2,
+                        "realtime_session_id": reopened["realtime_session_id"],
+                    }
+                )
+            )
+            with pytest.raises(websockets.ConnectionClosed) as closed:
+                await socket.recv()
+            assert closed.value.rcvd is not None
+            assert closed.value.rcvd.code == 1000
     finally:
         if boundary is not None:
             await boundary.stop()

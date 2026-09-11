@@ -72,6 +72,7 @@ class RealtimeSession:
     event_queue: object | None = field(default=None, repr=False)
     event_consumer_claimed: bool = False
     event_stream_closed: bool = False
+    provider_generation: int = 0
     response_epoch: int = 0
     retired_interactions: deque[tuple[RealtimeInteractionId, int]] = field(
         default_factory=deque, repr=False

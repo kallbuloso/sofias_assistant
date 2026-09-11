@@ -207,14 +207,11 @@ class RealtimeConversationRuntime:
                     command.locality,
                     command.cloud_context_eligible,
                     revision,
-                    provider_session=provider_session,
                     event_queue=asyncio.Queue(maxsize=128),
                 )
                 self._sessions[session_id] = session
                 self._conversation_sessions[command.conversation_id] = session_id
-                session.consumer_task = asyncio.create_task(
-                    self._consume_provider_events(session)
-                )
+                self._install_provider_session(session, provider_session)
                 await self._emit(
                     session,
                     RealtimeSessionOpened(
@@ -410,30 +407,44 @@ class RealtimeConversationRuntime:
 
     async def close_session(self, realtime_session_id: RealtimeSessionId) -> None:
         session = self._session(realtime_session_id)
-        if session.state in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED):
-            return
-        interaction = session.active_interaction
-        if interaction is not None:
-            if interaction.durable_turn_id is not None:
-                conversation, turn = await self._terminalize_turn(
-                    session,
-                    interaction,
-                    "interrupted",
-                    "Realtime session was closed",
-                    interrupted=True,
-                )
-                await self._emit(
-                    session,
-                    ConversationTurnInterrupted(conversation, turn),
-                    terminal=True,
-                )
-            await self._release_interaction(session)
-        await self._close_provider(session)
-        session.state = RealtimeSessionState.CLOSED
-        await self._emit(session, RealtimeSessionClosed(session.id), terminal=True)
-        await self._end_events(session)
-        async with self._sessions_gate:
-            self._conversation_sessions.pop(session.conversation_id, None)
+        queue = session.event_queue
+        task = session.consumer_task
+        if (
+            isinstance(queue, asyncio.Queue)
+            and queue.full()
+            and isinstance(task, asyncio.Task)
+            and task is not asyncio.current_task()
+            and not task.done()
+        ):
+            task.cancel()
+        async with self._coordinator.voice_transition(session.conversation_id):
+            if session.state in (
+                RealtimeSessionState.CLOSED,
+                RealtimeSessionState.FAILED,
+            ):
+                return
+            interaction = session.active_interaction
+            if interaction is not None:
+                if interaction.durable_turn_id is not None:
+                    conversation, turn = await self._terminalize_turn(
+                        session,
+                        interaction,
+                        "interrupted",
+                        "Realtime session was closed",
+                        interrupted=True,
+                    )
+                    await self._emit(
+                        session,
+                        ConversationTurnInterrupted(conversation, turn),
+                        terminal=True,
+                    )
+                await self._release_interaction(session)
+            await self._close_provider(session)
+            session.state = RealtimeSessionState.CLOSED
+            await self._emit(session, RealtimeSessionClosed(session.id), terminal=True)
+            await self._end_events(session)
+            async with self._sessions_gate:
+                self._conversation_sessions.pop(session.conversation_id, None)
 
     async def close_all(self) -> None:
         for session_id in tuple(self._sessions):
@@ -484,7 +495,7 @@ class RealtimeConversationRuntime:
             raise RuntimeError("Selected realtime route has no realtime provider")
         from sofias_assistant.ai.contracts import RealtimeSessionRequest
 
-        session.provider_session = await provider.open_realtime_session(
+        provider_session = await provider.open_realtime_session(
             model=session.model,
             request=RealtimeSessionRequest(
                 session.id,
@@ -493,37 +504,89 @@ class RealtimeConversationRuntime:
                 seed,
             ),
         )
+        self._install_provider_session(session, provider_session)
         session.synced_context_revision = await self._coordinator.context_revision(
             session.conversation_id
         )
         session.provider_context_stale = False
+
+    def _install_provider_session(
+        self, session: RealtimeSession, provider_session: RealtimeProviderSession
+    ) -> None:
+        if session.provider_session is not None or session.consumer_task is not None:
+            raise InvalidRealtimeStateError(
+                "Realtime provider session ownership is already installed"
+            )
+        session.provider_generation += 1
+        provider_generation = session.provider_generation
+        session.provider_session = provider_session
         session.consumer_task = asyncio.create_task(
-            self._consume_provider_events(session)
+            self._consume_provider_events(
+                session, provider_session, provider_generation
+            )
         )
 
-    async def _consume_provider_events(self, session: RealtimeSession) -> None:
+    def _is_current_provider(
+        self,
+        session: RealtimeSession,
+        provider_session: RealtimeProviderSession,
+        provider_generation: int,
+    ) -> bool:
+        return (
+            session.provider_generation == provider_generation
+            and session.provider_session is provider_session
+        )
+
+    async def _consume_provider_events(
+        self,
+        session: RealtimeSession,
+        provider_session: RealtimeProviderSession,
+        provider_generation: int,
+    ) -> None:
         try:
-            async for event in self._provider(session).events():
-                await self._handle_provider_event(session, event)
-            if session.state not in (
+            async for event in provider_session.events():
+                await self._handle_provider_event(
+                    session, event, provider_session, provider_generation
+                )
+            if self._is_current_provider(
+                session, provider_session, provider_generation
+            ) and session.state not in (
                 RealtimeSessionState.CLOSED,
                 RealtimeSessionState.FAILED,
             ):
-                await self._protocol_failure(
-                    session, "Provider event stream ended unexpectedly"
+                await self._fail_current_provider_session(
+                    session,
+                    provider_session,
+                    provider_generation,
+                    "Realtime provider session ended unexpectedly",
                 )
         except asyncio.CancelledError:
             raise
         except BaseException:
-            if session.state not in (
+            if self._is_current_provider(
+                session, provider_session, provider_generation
+            ) and session.state not in (
                 RealtimeSessionState.CLOSED,
                 RealtimeSessionState.FAILED,
             ):
-                await self._protocol_failure(session, "Provider event stream failed")
+                await self._fail_current_provider_session(
+                    session,
+                    provider_session,
+                    provider_generation,
+                    "Realtime provider session failed",
+                )
 
     async def _handle_provider_event(
-        self, session: RealtimeSession, event: object
+        self,
+        session: RealtimeSession,
+        event: object,
+        provider_session: RealtimeProviderSession,
+        provider_generation: int,
     ) -> None:
+        if not self._is_current_provider(
+            session, provider_session, provider_generation
+        ):
+            return
         if not isinstance(
             event,
             (
@@ -537,40 +600,59 @@ class RealtimeConversationRuntime:
                 RealtimeSessionFailed,
             ),
         ):
-            await self._protocol_failure(
-                session, "Provider emitted an unsupported event"
+            await self._protocol_failure_from_provider(
+                session,
+                provider_session,
+                provider_generation,
+                "Provider emitted an unsupported event",
             )
             return
         if isinstance(event, RealtimeSessionFailed):
             if event.realtime_session_id != session.id:
-                return await self._protocol_failure(
-                    session, "Provider session correlation failed"
+                return await self._protocol_failure_from_provider(
+                    session,
+                    provider_session,
+                    provider_generation,
+                    "Provider session correlation failed",
                 )
-            await self._fail_session(session, event.error.safe_message)
+            await self._fail_current_provider_session(
+                session,
+                provider_session,
+                provider_generation,
+                event.error.safe_message,
+            )
             return
         async with self._coordinator.voice_transition(session.conversation_id):
+            if not self._is_current_provider(
+                session, provider_session, provider_generation
+            ):
+                return
             await self._handle_interaction_event(session, event)
 
     async def _handle_interaction_event(
         self, session: RealtimeSession, event: _InteractionProviderEvent
     ) -> None:
         if not hasattr(event, "realtime_interaction_id"):
-            await self._protocol_failure(
+            await self._protocol_failure_locked(
                 session, "Provider emitted an event outside an active interaction"
             )
             return
         if event.realtime_session_id != session.id:
-            await self._protocol_failure(session, "Provider session correlation failed")
+            await self._protocol_failure_locked(
+                session, "Provider session correlation failed"
+            )
             return
         generation = session.classify_interaction(event.realtime_interaction_id)
         if generation is InteractionGeneration.RETIRED_KNOWN:
             return
         if generation is InteractionGeneration.UNKNOWN:
-            await self._protocol_failure(session, "Provider event correlation failed")
+            await self._protocol_failure_locked(
+                session, "Provider event correlation failed"
+            )
             return
         interaction = session.active_interaction
         if interaction is None or event.sequence <= interaction.last_provider_sequence:
-            await self._protocol_failure(
+            await self._protocol_failure_locked(
                 session, "Provider event ordering or correlation failed"
             )
             return
@@ -585,7 +667,7 @@ class RealtimeConversationRuntime:
             return
         if isinstance(event, UserTranscriptFinal):
             if interaction.user_transcript_final is not None or not event.text.strip():
-                return await self._protocol_failure(
+                return await self._protocol_failure_locked(
                     session, "Provider user transcript was invalid"
                 )
             interaction.user_transcript_final = event.text
@@ -644,7 +726,7 @@ class RealtimeConversationRuntime:
                 or interaction.durable_turn_id is None
                 or interaction.assistant_transcript_final is None
             ):
-                return await self._protocol_failure(
+                return await self._protocol_failure_locked(
                     session, "Provider completed before required transcripts"
                 )
             conversation, turn = await self._complete_turn(session, interaction)
@@ -656,7 +738,9 @@ class RealtimeConversationRuntime:
             )
             await self._release_interaction(session)
             return
-        await self._protocol_failure(session, "Provider emitted an unsupported event")
+        await self._protocol_failure_locked(
+            session, "Provider emitted an unsupported event"
+        )
 
     async def _persist_voice_turn(
         self, session: RealtimeSession, interaction: RealtimeInteraction, text: str
@@ -784,16 +868,51 @@ class RealtimeConversationRuntime:
         session.provider_context_stale = True
         await self._release_interaction(session)
 
-    async def _protocol_failure(self, session: RealtimeSession, message: str) -> None:
+    async def _protocol_failure_from_provider(
+        self,
+        session: RealtimeSession,
+        provider_session: RealtimeProviderSession,
+        provider_generation: int,
+        message: str,
+    ) -> None:
+        async with self._coordinator.voice_transition(session.conversation_id):
+            if not self._is_current_provider(
+                session, provider_session, provider_generation
+            ):
+                return
+            await self._protocol_failure_locked(session, message)
+
+    async def _protocol_failure_locked(
+        self, session: RealtimeSession, message: str
+    ) -> None:
+        if session.state in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED):
+            return
         interaction = session.active_interaction
         if interaction is not None:
+            session.retire_interaction(interaction)
             await self._fail_interaction(
                 session, interaction, "provider_protocol_error", message
             )
-        await self._fail_session(session, message)
+        await self._fail_session_locked(session, message)
 
-    async def _fail_session(self, session: RealtimeSession, message: str) -> None:
-        if session.state is RealtimeSessionState.FAILED:
+    async def _fail_current_provider_session(
+        self,
+        session: RealtimeSession,
+        provider_session: RealtimeProviderSession,
+        provider_generation: int,
+        message: str,
+    ) -> None:
+        async with self._coordinator.voice_transition(session.conversation_id):
+            if not self._is_current_provider(
+                session, provider_session, provider_generation
+            ):
+                return
+            await self._fail_session_locked(session, message)
+
+    async def _fail_session_locked(
+        self, session: RealtimeSession, message: str
+    ) -> None:
+        if session.state in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED):
             return
         interaction = session.active_interaction
         if interaction is not None:
@@ -804,9 +923,10 @@ class RealtimeConversationRuntime:
                 await self._emit(
                     session, ConversationTurnFailed(conversation, turn), terminal=True
                 )
+            session.retire_interaction(interaction)
             await self._release_interaction(session)
-        await self._close_provider(session)
         session.state = RealtimeSessionState.FAILED
+        await self._close_provider(session)
         await self._emit(
             session,
             ConversationRealtimeSessionFailed(session.id, message),
@@ -825,7 +945,17 @@ class RealtimeConversationRuntime:
             session.state = RealtimeSessionState.IDLE
 
     async def _close_provider(self, session: RealtimeSession) -> None:
+        provider = session.provider_session
         task = session.consumer_task
+        provider_generation = session.provider_generation
+        provider_session = self._provider(session) if provider is not None else None
+        if provider_session is not None and self._is_current_provider(
+            session, provider_session, provider_generation
+        ):
+            session.provider_session = None
+            session.consumer_task = None
+        elif provider_session is None and session.consumer_task is task:
+            session.consumer_task = None
         if (
             isinstance(task, asyncio.Task)
             and task is not asyncio.current_task()
@@ -836,11 +966,8 @@ class RealtimeConversationRuntime:
                 await task
             except asyncio.CancelledError:
                 pass
-        provider = session.provider_session
-        if provider is not None:
-            await self._provider(session).close()
-        session.provider_session = None
-        session.consumer_task = None
+        if provider_session is not None:
+            await provider_session.close()
 
     async def _emit(
         self,

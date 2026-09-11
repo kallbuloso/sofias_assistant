@@ -115,6 +115,16 @@ type FakeRealtimeItem = (
 
 
 @dataclass(frozen=True, slots=True)
+class FakeRealtimeConsumerCancellation:
+    """Deterministically continue one consumer after its first cancellation."""
+
+    entered: asyncio.Event
+    release: asyncio.Event
+    event: FakeRealtimeItem | None = None
+    error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class FakeRealtimeScript:
     items: tuple[FakeRealtimeItem, ...]
     start_barrier: FakeRealtimeBarrier | None = None
@@ -127,11 +137,22 @@ class FakeRealtimeOpen:
     request: RealtimeSessionRequest
 
 
+@dataclass(frozen=True, slots=True)
+class _FakeRealtimeStreamError:
+    message: str
+
+
 class ScriptedFakeRealtimeProvider:
     """No-I/O realtime fake that injects Core IDs only after receiving them."""
 
-    def __init__(self, scripts: Iterable[FakeRealtimeScript] = ()) -> None:
+    def __init__(
+        self,
+        scripts: Iterable[FakeRealtimeScript] = (),
+        *,
+        consumer_cancellations: Iterable[FakeRealtimeConsumerCancellation] = (),
+    ) -> None:
         self._scripts = deque(scripts)
+        self._consumer_cancellations = deque(consumer_cancellations)
         self._opens: list[FakeRealtimeOpen] = []
         self._sessions: list[ScriptedFakeRealtimeProviderSession] = []
 
@@ -140,7 +161,11 @@ class ScriptedFakeRealtimeProvider:
     ) -> "ScriptedFakeRealtimeProviderSession":
         self._opens.append(FakeRealtimeOpen(model, request))
         session = ScriptedFakeRealtimeProviderSession(
-            request.realtime_session_id, self._scripts
+            request.realtime_session_id,
+            self._scripts,
+            self._consumer_cancellations.popleft()
+            if self._consumer_cancellations
+            else None,
         )
         self._sessions.append(session)
         return session
@@ -154,11 +179,16 @@ class ScriptedFakeRealtimeProvider:
 
 class ScriptedFakeRealtimeProviderSession:
     def __init__(
-        self, session_id: RealtimeSessionId, scripts: deque[FakeRealtimeScript]
+        self,
+        session_id: RealtimeSessionId,
+        scripts: deque[FakeRealtimeScript],
+        consumer_cancellation: FakeRealtimeConsumerCancellation | None,
     ) -> None:
         self._session_id, self._scripts = session_id, scripts
         self._events: asyncio.Queue[
-            tuple[RealtimeInteractionId, FakeRealtimeScript] | None
+            tuple[RealtimeInteractionId, FakeRealtimeScript]
+            | _FakeRealtimeStreamError
+            | None
         ] = asyncio.Queue(maxsize=32)
         self._started: list[RealtimeInteractionId] = []
         self._frames: list[AudioInputFrame] = []
@@ -167,6 +197,7 @@ class ScriptedFakeRealtimeProviderSession:
         self._close_calls = 0
         self._events_consumers = 0
         self._closed = False
+        self._consumer_cancellation = consumer_cancellation
 
     def started_interactions(self) -> tuple[RealtimeInteractionId, ...]:
         return tuple(self._started)
@@ -222,15 +253,54 @@ class ScriptedFakeRealtimeProviderSession:
         self._closed = True
         await self._events.put(None)
 
+    async def emit_session_failure(self, error: ProviderError) -> None:
+        await self._events.put(
+            (
+                RealtimeInteractionId(uuid4()),
+                FakeRealtimeScript((FakeRealtimeSessionFailed(error),)),
+            )
+        )
+
+    async def end_event_stream(self) -> None:
+        await self._events.put(None)
+
+    async def fail_event_stream(self, message: str) -> None:
+        await self._events.put(_FakeRealtimeStreamError(message))
+
     async def events(self) -> AsyncIterator[RealtimeProviderEvent]:
         self._events_consumers += 1
         if self._events_consumers > 1:
             raise AssertionError("Fake provider session has multiple event consumers")
         sequence = 0
         while True:
-            item = await self._events.get()
+            try:
+                item = await self._events.get()
+            except asyncio.CancelledError:
+                cancellation = self._consumer_cancellation
+                if cancellation is None:
+                    raise
+                self._consumer_cancellation = None
+                cancellation.entered.set()
+                await cancellation.release.wait()
+                if cancellation.error_message is not None:
+                    raise RuntimeError(cancellation.error_message)
+                if cancellation.event is not None:
+                    interaction_id = (
+                        self._started[-1]
+                        if self._started
+                        else RealtimeInteractionId(uuid4())
+                    )
+                    yield _event(
+                        self._session_id,
+                        interaction_id,
+                        sequence,
+                        cancellation.event,
+                    )
+                return
             if item is None:
                 return
+            if isinstance(item, _FakeRealtimeStreamError):
+                raise RuntimeError(item.message)
             interaction_id, script = item
             for scripted in script.items:
                 if isinstance(scripted, FakeRealtimePause):

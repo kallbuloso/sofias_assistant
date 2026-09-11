@@ -43,6 +43,8 @@ from sofias_assistant.conversation.models import TurnInputModality, TurnStatus
 from sofias_assistant.conversation.realtime_events import (
     ConversationRealtimeSessionFailed,
     RealtimeAssistantAudioChunk,
+    RealtimeInteractionFailed,
+    RealtimeSessionClosed,
 )
 from sofias_assistant.conversation.realtime_models import (
     RETIRED_INTERACTION_LIMIT,
@@ -71,6 +73,7 @@ from tests.support.realtime import (
     FakeAssistantTranscriptPartial,
     FakeRealtimeBarrier,
     FakeRealtimeCompleted,
+    FakeRealtimeConsumerCancellation,
     FakeRealtimeFailed,
     FakeRealtimePause,
     FakeRealtimeScript,
@@ -191,6 +194,7 @@ async def test_voice_success_is_ephemeral_until_final_transcript_and_sequences_a
                 conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
             )
         )
+        assert session.provider_generation == 1
         stream = runtime.events(session.id)
         opened = await anext(stream)
         assert opened.realtime_session_id == session.id  # type: ignore[union-attr]
@@ -243,6 +247,7 @@ async def test_failures_do_not_leave_a_voice_lease_or_processing_turn(
                 conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
             )
         )
+        assert session.provider_generation == 1
         stream = runtime.events(session.id)
         await anext(stream)
         await runtime.start_interaction(session.id)
@@ -253,6 +258,152 @@ async def test_failures_do_not_leave_a_voice_lease_or_processing_turn(
             assert await uow.turns.list_for_conversation(conversation.id) == []
         assert session.provider_context_stale is True
         await runtime.close_session(session.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_initial_provider_install_has_generation_one_and_one_consumer(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (FakeRealtimeBarrier(entered, release),),
+            ),
+        )
+    )
+    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        assert session.provider_generation == 1
+        assert session.provider_session is fake.sessions()[0]
+
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await entered.wait()
+
+        assert fake.sessions()[0].events_consumers == 1
+        await runtime.cancel_interaction(session.id, interaction_id)
+        await runtime.close_session(session.id)
+        release.set()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("event", "end", "exception"))
+async def test_detached_old_provider_consumer_cannot_affect_reseeded_session(
+    tmp_path: Path, outcome: str
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "old lost", False)
+    cancellation = FakeRealtimeConsumerCancellation(
+        entered,
+        release,
+        event=FakeRealtimeSessionFailed(error) if outcome == "event" else None,
+        error_message="old stream failed" if outcome == "exception" else None,
+    )
+    new_hold = asyncio.Event()
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("old input"),
+                    FakeAssistantTranscriptFinal("old answer"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+            FakeRealtimeScript((FakeRealtimePause(new_hold),)),
+        ),
+        consumer_cancellations=(cancellation,),
+    )
+    text = ScriptedFakeProvider(text_scripts=(FakeTextSuccess("text answer"),))
+    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake, text)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        while not isinstance(await anext(stream), ConversationTurnCompleted):
+            pass
+        await text_runtime.send_text(
+            SendTextCommand(conversation.id, "text", DataLocality.LOCAL_ONLY, True)
+        )
+
+        replacement = asyncio.create_task(runtime.start_interaction(session.id))
+        await entered.wait()
+        assert session.provider_session is None
+        assert session.consumer_task is None
+        assert session.provider_generation == 1
+
+        release.set()
+        new_id = await replacement
+        started = await anext(stream)
+        assert started.realtime_interaction_id == new_id  # type: ignore[union-attr]
+        assert session.provider_generation == 2
+        assert session.provider_session is fake.sessions()[1]
+        assert session.event_stream_closed is False
+        assert session.state.value == "ACTIVE"
+        assert fake.sessions()[0].close_calls == 1
+        assert [
+            provider_session.events_consumers for provider_session in fake.sessions()
+        ] == [
+            1,
+            1,
+        ]
+
+        await runtime.cancel_interaction(session.id, new_id)
+        await runtime.close_session(session.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_current_provider_stream_end_remains_authoritative(
+    tmp_path: Path,
+) -> None:
+    fake = ScriptedFakeRealtimeProvider()
+    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+
+        await fake.sessions()[0].end_event_stream()
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        failures = [
+            event
+            for event in received
+            if isinstance(event, ConversationRealtimeSessionFailed)
+        ]
+        assert len(failures) == 1
+        assert (
+            failures[0].safe_message == "Realtime provider session ended unexpectedly"
+        )
+        assert fake.sessions()[0].close_calls == 1
     finally:
         await engine.dispose()
 
@@ -342,6 +493,899 @@ async def test_session_loss_fails_processing_turn_and_allows_a_new_core_session(
 
 
 @pytest.mark.asyncio
+async def test_idle_current_session_failure_is_terminal_and_releases_conversation(
+    tmp_path: Path,
+) -> None:
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider()
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+
+        await fake.sessions()[0].emit_session_failure(error)
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert fake.sessions()[0].close_calls == 1
+        assert [
+            event
+            for event in received
+            if isinstance(event, ConversationRealtimeSessionFailed)
+        ] and len(
+            [
+                event
+                for event in received
+                if isinstance(event, ConversationRealtimeSessionFailed)
+            ]
+        ) == 1
+        async with factory() as uow:
+            assert await uow.turns.list_for_conversation(conversation.id) == []
+
+        replacement = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        assert replacement.id != session.id
+        await runtime.close_session(replacement.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pre_transcript_session_loss_retires_without_creating_turn(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                    FakeUserTranscriptFinal("late transcript"),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await entered.wait()
+
+        release.set()
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert session.active_interaction is None
+        assert (
+            session.classify_interaction(interaction_id)
+            is InteractionGeneration.RETIRED_KNOWN
+        )
+        assert fake.sessions()[0].interrupts() == ()
+        assert fake.sessions()[0].close_calls == 1
+        assert not any(
+            isinstance(
+                event,
+                (
+                    RealtimeInteractionFailed,
+                    ConversationTurnFailed,
+                    ConversationTurnInterrupted,
+                ),
+            )
+            for event in received
+        )
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            assert await uow.turns.list_for_conversation(conversation.id) == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_transcript_session_loss_fails_once_and_preserves_partial(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        started = await anext(stream)
+        assert isinstance(started, ConversationTurnStarted)
+        await anext(stream)
+        await entered.wait()
+
+        async with factory() as uow:
+            processing = await uow.turns.list_for_conversation(conversation.id)
+        assert processing[0].status is TurnStatus.PROCESSING
+
+        release.set()
+        received = [event async for event in stream]
+
+        assert [type(event) for event in received] == [
+            ConversationTurnFailed,
+            ConversationRealtimeSessionFailed,
+        ]
+        assert session.state.value == "FAILED"
+        assert session.active_interaction is None
+        assert (
+            session.classify_interaction(interaction_id)
+            is InteractionGeneration.RETIRED_KNOWN
+        )
+        assert fake.sessions()[0].interrupts() == ()
+        assert fake.sessions()[0].close_calls == 1
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert turns[0].status is TurnStatus.FAILED
+        assert turns[0].assistant_text == "partial"
+        assert turns[0].error_category == "provider_session_failed"
+        assert turns[0].provider_id == "fake"
+        assert turns[0].model_id == "realtime"
+        assert turns[0].finished_at is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_close_wins_over_concurrent_session_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    close_terminalized = asyncio.Event()
+    release_close = asyncio.Event()
+    failure_attempted = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+
+        terminalize_turn = runtime._terminalize_turn
+
+        async def hold_close_terminalization(*args: object, **kwargs: object) -> object:
+            if kwargs.get("interrupted") is True:
+                close_terminalized.set()
+                await release_close.wait()
+            return await terminalize_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+        fail_current_provider_session = runtime._fail_current_provider_session
+
+        async def signal_failure_attempt(*args: object, **kwargs: object) -> None:
+            failure_attempted.set()
+            await fail_current_provider_session(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(runtime, "_terminalize_turn", hold_close_terminalization)
+        monkeypatch.setattr(
+            runtime, "_fail_current_provider_session", signal_failure_attempt
+        )
+
+        close_task = asyncio.create_task(runtime.close_session(session.id))
+        await close_terminalized.wait()
+        await fake.sessions()[0].emit_session_failure(error)
+        await failure_attempted.wait()
+        release_close.set()
+        await close_task
+        received = [event async for event in stream]
+
+        assert session.state.value == "CLOSED"
+        assert session.synced_context_revision == 0
+        assert fake.sessions()[0].close_calls == 1
+        assert (
+            sum(isinstance(event, ConversationTurnInterrupted) for event in received)
+            == 1
+        )
+        assert sum(isinstance(event, RealtimeSessionClosed) for event in received) == 1
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 0
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 0
+        )
+        assert (
+            sum(isinstance(event, ConversationTurnCompleted) for event in received) == 0
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.INTERRUPTED
+        assert turns[0].assistant_text == "partial"
+    finally:
+        release_close.set()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_loss_wins_over_concurrent_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failure_terminalized = asyncio.Event()
+    release_failure = asyncio.Event()
+    close_attempted = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+
+        terminalize_turn = runtime._terminalize_turn
+
+        async def hold_failure_terminalization(
+            *args: object, **kwargs: object
+        ) -> object:
+            if kwargs.get("interrupted", False) is False:
+                failure_terminalized.set()
+                await release_failure.wait()
+            return await terminalize_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+        close_session = runtime.close_session
+
+        async def signal_close_attempt(realtime_session_id: RealtimeSessionId) -> None:
+            close_attempted.set()
+            await close_session(realtime_session_id)
+
+        monkeypatch.setattr(runtime, "_terminalize_turn", hold_failure_terminalization)
+        monkeypatch.setattr(runtime, "close_session", signal_close_attempt)
+
+        await fake.sessions()[0].emit_session_failure(error)
+        await failure_terminalized.wait()
+        close_task = asyncio.create_task(runtime.close_session(session.id))
+        await close_attempted.wait()
+        release_failure.set()
+        await close_task
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert session.synced_context_revision == 0
+        assert fake.sessions()[0].close_calls == 1
+        assert fake.sessions()[0].interrupts() == ()
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 1
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        assert (
+            sum(isinstance(event, ConversationTurnInterrupted) for event in received)
+            == 0
+        )
+        assert sum(isinstance(event, RealtimeSessionClosed) for event in received) == 0
+        assert (
+            sum(isinstance(event, ConversationTurnCompleted) for event in received) == 0
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.FAILED
+    finally:
+        release_failure.set()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_close_pre_transcript_creates_no_turn(
+    tmp_path: Path,
+) -> None:
+    fake = ScriptedFakeRealtimeProvider(
+        (FakeRealtimeScript((FakeRealtimePause(asyncio.Event()),)),)
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        await anext(stream)
+
+        await runtime.close_session(session.id)
+        received = [event async for event in stream]
+
+        assert session.state.value == "CLOSED"
+        assert sum(isinstance(event, RealtimeSessionClosed) for event in received) == 1
+        assert (
+            sum(isinstance(event, ConversationTurnInterrupted) for event in received)
+            == 0
+        )
+        async with factory() as uow:
+            assert await uow.turns.list_for_conversation(conversation.id) == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_completion_wins_over_later_session_loss_without_rewriting_turn(
+    tmp_path: Path,
+) -> None:
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptFinal("final answer"),
+                    FakeRealtimeCompleted(),
+                )
+            ),
+            FakeRealtimeScript(()),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        observed: list[object] = []
+        while not any(
+            isinstance(event, ConversationTurnCompleted) for event in observed
+        ):
+            observed.append(await anext(stream))
+
+        assert session.active_interaction is None
+        assert session.synced_context_revision == 1
+        assert (
+            sum(isinstance(event, ConversationTurnCompleted) for event in observed) == 1
+        )
+
+        await fake.sessions()[0].emit_session_failure(error)
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert session.synced_context_revision == 1
+        assert fake.sessions()[0].interrupts() == ()
+        assert fake.sessions()[0].close_calls == 1
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 0
+        assert (
+            sum(isinstance(event, ConversationTurnInterrupted) for event in received)
+            == 0
+        )
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.COMPLETED
+        assert turns[0].assistant_text == "final answer"
+
+        replacement = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        assert replacement.id != session.id
+        assert interaction_id not in fake.sessions()[0].interrupts()
+        await runtime.close_session(replacement.id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_loss_wins_over_completion_and_late_completion_is_discarded(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    after_late_completion = asyncio.Event()
+    release_after_late_completion = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptFinal("final answer"),
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                    FakeRealtimeCompleted(),
+                    FakeRealtimeBarrier(
+                        after_late_completion, release_after_late_completion
+                    ),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+        await entered.wait()
+
+        release.set()
+        received = [event async for event in stream]
+        await after_late_completion.wait()
+        release_after_late_completion.set()
+
+        assert session.state.value == "FAILED"
+        assert session.synced_context_revision == 0
+        assert session.active_interaction is None
+        assert (
+            session.classify_interaction(interaction_id)
+            is InteractionGeneration.RETIRED_KNOWN
+        )
+        assert fake.sessions()[0].interrupts() == ()
+        assert fake.sessions()[0].close_calls == 1
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 1
+        assert (
+            sum(isinstance(event, ConversationTurnCompleted) for event in received) == 0
+        )
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.FAILED
+    finally:
+        release_after_late_completion.set()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_wins_over_later_session_loss_without_rewriting_turn(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+        await entered.wait()
+
+        await runtime.interrupt_interaction(session.id, interaction_id)
+        interrupted = await anext(stream)
+        assert isinstance(interrupted, ConversationTurnInterrupted)
+        release.set()
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert session.synced_context_revision == 0
+        assert fake.sessions()[0].interrupts() == (interaction_id,)
+        assert fake.sessions()[0].close_calls == 1
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 0
+        assert (
+            sum(isinstance(event, ConversationTurnCompleted) for event in received) == 0
+        )
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.INTERRUPTED
+        assert turns[0].assistant_text == "partial"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_loss_wins_over_interrupt_and_rejects_late_interrupt(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+        await entered.wait()
+
+        release.set()
+        received = [event async for event in stream]
+        with pytest.raises(InvalidRealtimeStateError):
+            await runtime.interrupt_interaction(session.id, interaction_id)
+
+        assert session.state.value == "FAILED"
+        assert session.synced_context_revision == 0
+        assert fake.sessions()[0].interrupts() == ()
+        assert fake.sessions()[0].close_calls == 1
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 1
+        assert (
+            sum(isinstance(event, ConversationTurnInterrupted) for event in received)
+            == 0
+        )
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.FAILED
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_loss_wins_over_automatic_barge_in(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeRealtimeBarrier(entered, release),
+                    FakeRealtimeSessionFailed(error),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        old_interaction_id = await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await entered.wait()
+
+        release.set()
+        received = [event async for event in stream]
+        with pytest.raises(InvalidRealtimeStateError):
+            await runtime.start_interaction(session.id)
+
+        assert session.state.value == "FAILED"
+        assert session.active_interaction is None
+        assert fake.sessions()[0].started_interactions() == (old_interaction_id,)
+        assert fake.sessions()[0].interrupts() == ()
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 1
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert turns[0].status is TurnStatus.FAILED
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_current_stream_exception_uses_safe_session_failure_semantics(
+    tmp_path: Path,
+) -> None:
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeAssistantTranscriptPartial("partial"),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        await anext(stream)
+        await runtime.commit_interaction(session.id)
+        await anext(stream)
+        await anext(stream)
+        await anext(stream)
+
+        await fake.sessions()[0].fail_event_stream("SDK SECRET INTERNAL")
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert isinstance(received[0], ConversationTurnFailed)
+        assert isinstance(received[1], ConversationRealtimeSessionFailed)
+        assert all(
+            "SDK SECRET INTERNAL" not in event.safe_message
+            for event in received
+            if isinstance(event, ConversationRealtimeSessionFailed)
+        )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert turns[0].status is TurnStatus.FAILED
+        assert turns[0].error_category == "provider_session_failed"
+        assert "SDK SECRET INTERNAL" not in (turns[0].error_message or "")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_current_session_failures_terminalize_once(
+    tmp_path: Path,
+) -> None:
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "lost", False)
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeRealtimeSessionFailed(error),
+                    FakeRealtimeSessionFailed(error),
+                )
+            ),
+        )
+    )
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+        await runtime.start_interaction(session.id)
+        await anext(stream)
+        received = [event async for event in stream]
+
+        assert session.state.value == "FAILED"
+        assert sum(isinstance(event, ConversationTurnFailed) for event in received) == 1
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 1
+        )
+        assert fake.sessions()[0].close_calls == 1
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert len(turns) == 1
+        assert turns[0].status is TurnStatus.FAILED
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_closed_session_ignores_late_current_provider_failure(
+    tmp_path: Path,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    error = ProviderError(ProviderErrorCategory.PROVIDER_UNAVAILABLE, "late", False)
+    fake = ScriptedFakeRealtimeProvider(
+        consumer_cancellations=(
+            FakeRealtimeConsumerCancellation(
+                entered,
+                release,
+                event=FakeRealtimeSessionFailed(error),
+            ),
+        )
+    )
+    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        session = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        stream = runtime.events(session.id)
+        await anext(stream)
+
+        close_task = asyncio.create_task(runtime.close_session(session.id))
+        await entered.wait()
+        release.set()
+        await close_task
+        received = [event async for event in stream]
+
+        assert session.state.value == "CLOSED"
+        assert (
+            sum(
+                isinstance(event, ConversationRealtimeSessionFailed)
+                for event in received
+            )
+            == 0
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_active_voice_conflicts_with_text_and_idle_text_causes_reseed(
     tmp_path: Path,
 ) -> None:
@@ -374,6 +1418,7 @@ async def test_active_voice_conflicts_with_text_and_idle_text_causes_reseed(
                 conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
             )
         )
+        assert session.provider_generation == 1
         stream = runtime.events(session.id)
         await runtime.start_interaction(session.id)
         with pytest.raises(ConversationActivityConflictError):
@@ -390,6 +1435,7 @@ async def test_active_voice_conflicts_with_text_and_idle_text_causes_reseed(
             SendTextCommand(conversation.id, "text", DataLocality.LOCAL_ONLY, True)
         )
         await runtime.start_interaction(session.id)
+        assert session.provider_generation == 2
         await anext(stream)
         await anext(stream)
         assert len(realtime.opens()) == 2
@@ -1155,9 +2201,16 @@ async def test_unknown_interaction_event_remains_protocol_failure(
     tmp_path: Path,
 ) -> None:
     fake = ScriptedFakeRealtimeProvider(
-        (FakeRealtimeScript((FakeUnknownInteractionEvent("unknown"),)),)
+        (
+            FakeRealtimeScript(
+                (
+                    FakeUserTranscriptFinal("voice input"),
+                    FakeUnknownInteractionEvent("unknown"),
+                )
+            ),
+        )
     )
-    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake)
+    runtime, text_runtime, factory, engine = await _runtime(tmp_path, fake)
     try:
         conversation = await text_runtime.create_conversation()
         session = await runtime.open_session(
@@ -1174,6 +2227,10 @@ async def test_unknown_interaction_event_remains_protocol_failure(
         assert any(
             isinstance(event, ConversationRealtimeSessionFailed) for event in received
         )
+        async with factory() as uow:
+            turns = await uow.turns.list_for_conversation(conversation.id)
+        assert turns[0].status is TurnStatus.FAILED
+        assert turns[0].error_category == "provider_protocol_error"
     finally:
         await engine.dispose()
 
