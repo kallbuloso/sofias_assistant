@@ -1,5 +1,6 @@
 """Ephemeral, Core-owned realtime conversation state."""
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -33,6 +34,10 @@ class InteractionGeneration(StrEnum):
 
 
 RETIRED_INTERACTION_LIMIT = 8
+REALTIME_AUDIO_FRAME_MAX_BYTES = 64 * 1024
+REALTIME_EVENT_QUEUE_MAX_ITEMS = 128
+REALTIME_TEXT_EVENT_MAX_BYTES = 16 * 1024
+REALTIME_ASSISTANT_TRANSCRIPT_MAX_BYTES = 256 * 1024
 
 
 @dataclass(slots=True)
@@ -47,6 +52,7 @@ class RealtimeInteraction:
     input_committed: bool = False
     user_transcript_final: str | None = None
     assistant_transcript: str = ""
+    assistant_transcript_bytes: int = 0
     assistant_transcript_final: str | None = None
     durable_turn_id: UUID | None = None
     last_provider_sequence: int = -1
@@ -71,7 +77,19 @@ class RealtimeSession:
     consumer_task: object | None = field(default=None, repr=False)
     event_queue: object | None = field(default=None, repr=False)
     event_consumer_claimed: bool = False
+    event_consumer_waiting: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
     event_stream_closed: bool = False
+    event_delivery_close_requested: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    event_delivery_shutdown_requested: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
+    event_delivery_stopped: asyncio.Event = field(
+        default_factory=asyncio.Event, repr=False
+    )
     provider_generation: int = 0
     response_epoch: int = 0
     retired_interactions: deque[tuple[RealtimeInteractionId, int]] = field(

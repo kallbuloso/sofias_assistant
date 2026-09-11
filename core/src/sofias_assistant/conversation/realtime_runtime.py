@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -59,6 +60,10 @@ from sofias_assistant.conversation.realtime_events import (
     RealtimeUserTranscriptPartial,
 )
 from sofias_assistant.conversation.realtime_models import (
+    REALTIME_ASSISTANT_TRANSCRIPT_MAX_BYTES,
+    REALTIME_AUDIO_FRAME_MAX_BYTES,
+    REALTIME_EVENT_QUEUE_MAX_ITEMS,
+    REALTIME_TEXT_EVENT_MAX_BYTES,
     InteractionGeneration,
     RealtimeInteraction,
     RealtimeSession,
@@ -82,6 +87,10 @@ class InvalidRealtimeStateError(RuntimeError):
 
 class RealtimeProtocolError(RuntimeError):
     pass
+
+
+class _EventDeliveryStopped(RuntimeError):
+    """Internal signal that a blocked normal event cannot be delivered."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +120,7 @@ class OpenRealtimeSessionCommand:
 
 
 _END = object()
+_RESOURCE_LIMIT_MESSAGE = "Realtime provider event exceeded resource limits"
 
 type _InteractionProviderEvent = (
     UserTranscriptPartial
@@ -207,7 +217,7 @@ class RealtimeConversationRuntime:
                     command.locality,
                     command.cloud_context_eligible,
                     revision,
-                    event_queue=asyncio.Queue(maxsize=128),
+                    event_queue=asyncio.Queue(maxsize=REALTIME_EVENT_QUEUE_MAX_ITEMS),
                 )
                 self._sessions[session_id] = session
                 self._conversation_sessions[command.conversation_id] = session_id
@@ -289,6 +299,8 @@ class RealtimeConversationRuntime:
         session, interaction = self._active(realtime_session_id)
         if not isinstance(audio, bytes) or not audio:
             raise ValueError("audio must be non-empty bytes")
+        if len(audio) > REALTIME_AUDIO_FRAME_MAX_BYTES:
+            raise ValueError("audio frame exceeds the realtime safety limit")
         if interaction.input_committed:
             raise InvalidRealtimeStateError("Realtime interaction input is committed")
         frame = AudioInputFrame(interaction.next_input_sequence, audio)
@@ -341,13 +353,21 @@ class RealtimeConversationRuntime:
         session.event_consumer_claimed = True
         queue = session.event_queue
         assert isinstance(queue, asyncio.Queue)
-        while True:
-            if session.event_stream_closed and queue.empty():
-                return
-            event = await queue.get()
-            if event is _END:
-                return
-            yield event
+        try:
+            while True:
+                if session.event_stream_closed and queue.empty():
+                    return
+                session.event_consumer_waiting.set()
+                try:
+                    event = await queue.get()
+                finally:
+                    session.event_consumer_waiting.clear()
+                if event is _END:
+                    return
+                yield event
+        finally:
+            session.event_delivery_stopped.set()
+            await self._cleanup_terminal_session_if_releasable(session)
 
     async def _retire_interaction(
         self,
@@ -407,16 +427,8 @@ class RealtimeConversationRuntime:
 
     async def close_session(self, realtime_session_id: RealtimeSessionId) -> None:
         session = self._session(realtime_session_id)
-        queue = session.event_queue
-        task = session.consumer_task
-        if (
-            isinstance(queue, asyncio.Queue)
-            and queue.full()
-            and isinstance(task, asyncio.Task)
-            and task is not asyncio.current_task()
-            and not task.done()
-        ):
-            task.cancel()
+        session.event_delivery_shutdown_requested.set()
+        session.event_delivery_close_requested.set()
         async with self._coordinator.voice_transition(session.conversation_id):
             if session.state in (
                 RealtimeSessionState.CLOSED,
@@ -562,6 +574,8 @@ class RealtimeConversationRuntime:
                 )
         except asyncio.CancelledError:
             raise
+        except _EventDeliveryStopped:
+            return
         except BaseException:
             if self._is_current_provider(
                 session, provider_session, provider_generation
@@ -615,6 +629,14 @@ class RealtimeConversationRuntime:
                     provider_generation,
                     "Provider session correlation failed",
                 )
+            if self._provider_event_resource_violation(event) is not None:
+                await self._protocol_failure_from_provider(
+                    session,
+                    provider_session,
+                    provider_generation,
+                    _RESOURCE_LIMIT_MESSAGE,
+                )
+                return
             await self._fail_current_provider_session(
                 session,
                 provider_session,
@@ -626,6 +648,9 @@ class RealtimeConversationRuntime:
             if not self._is_current_provider(
                 session, provider_session, provider_generation
             ):
+                return
+            if self._provider_event_resource_violation(event) is not None:
+                await self._protocol_failure_locked(session, _RESOURCE_LIMIT_MESSAGE)
                 return
             await self._handle_interaction_event(session, event)
 
@@ -695,7 +720,15 @@ class RealtimeConversationRuntime:
             )
             return
         if isinstance(event, AssistantTranscriptPartial):
+            fragment_bytes = len(event.text.encode("utf-8"))
+            if (
+                interaction.assistant_transcript_bytes + fragment_bytes
+                > REALTIME_ASSISTANT_TRANSCRIPT_MAX_BYTES
+            ):
+                await self._protocol_failure_locked(session, _RESOURCE_LIMIT_MESSAGE)
+                return
             interaction.assistant_transcript += event.text
+            interaction.assistant_transcript_bytes += fragment_bytes
             await self._emit(
                 session,
                 RealtimeAssistantTranscriptPartial(
@@ -741,6 +774,30 @@ class RealtimeConversationRuntime:
         await self._protocol_failure_locked(
             session, "Provider emitted an unsupported event"
         )
+
+    @staticmethod
+    def _provider_event_resource_violation(event: object) -> str | None:
+        if isinstance(event, AssistantAudioChunk):
+            if len(event.audio) > REALTIME_AUDIO_FRAME_MAX_BYTES:
+                return _RESOURCE_LIMIT_MESSAGE
+        elif isinstance(
+            event,
+            (
+                UserTranscriptPartial,
+                UserTranscriptFinal,
+                AssistantTranscriptPartial,
+                AssistantTranscriptFinal,
+            ),
+        ):
+            if len(event.text.encode("utf-8")) > REALTIME_TEXT_EVENT_MAX_BYTES:
+                return _RESOURCE_LIMIT_MESSAGE
+        elif isinstance(event, (RealtimeResponseFailed, RealtimeSessionFailed)):
+            if (
+                len(event.error.safe_message.encode("utf-8"))
+                > REALTIME_TEXT_EVENT_MAX_BYTES
+            ):
+                return _RESOURCE_LIMIT_MESSAGE
+        return None
 
     async def _persist_voice_turn(
         self, session: RealtimeSession, interaction: RealtimeInteraction, text: str
@@ -976,24 +1033,80 @@ class RealtimeConversationRuntime:
         *,
         terminal: bool = False,
     ) -> None:
-        queue = session.event_queue
-        assert isinstance(queue, asyncio.Queue)
-        if terminal:
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                return
-            return
-        await queue.put(event)
+        await self._enqueue_event(session, event, terminal=terminal)
 
     async def _end_events(self, session: RealtimeSession) -> None:
+        session.event_stream_closed = True
+        session.event_delivery_shutdown_requested.set()
+        await self._enqueue_event(session, _END, terminal=True)
+        await self._cleanup_terminal_session_if_releasable(session)
+
+    async def _enqueue_event(
+        self,
+        session: RealtimeSession,
+        event: RealtimeConversationEvent | object,
+        *,
+        terminal: bool,
+    ) -> None:
         queue = session.event_queue
         assert isinstance(queue, asyncio.Queue)
-        session.event_stream_closed = True
+        if session.event_delivery_stopped.is_set():
+            if not terminal:
+                raise _EventDeliveryStopped("event delivery stopped")
+            return
+        if terminal and not session.event_consumer_claimed:
+            with suppress(asyncio.QueueFull):
+                queue.put_nowait(event)
+            return
         try:
-            queue.put_nowait(_END)
+            queue.put_nowait(event)
+            return
         except asyncio.QueueFull:
             pass
+        if terminal and session.event_delivery_close_requested.is_set():
+            return
+
+        put_task = asyncio.create_task(queue.put(event))
+        signal = (
+            session.event_delivery_stopped
+            if terminal
+            else session.event_delivery_shutdown_requested
+        )
+        signal_task = asyncio.create_task(signal.wait())
+        done, _ = await asyncio.wait(
+            (put_task, signal_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        if put_task in done:
+            signal_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await signal_task
+            return
+        put_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await put_task
+        if terminal:
+            return
+        raise _EventDeliveryStopped("event delivery stopped")
+
+    async def _cleanup_terminal_session_if_releasable(
+        self, session: RealtimeSession
+    ) -> None:
+        if (
+            session.state
+            not in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED)
+            or not session.event_stream_closed
+            or not session.event_delivery_stopped.is_set()
+        ):
+            return
+        async with self._sessions_gate:
+            if (
+                self._sessions.get(session.id) is session
+                and session.state
+                in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED)
+                and session.event_stream_closed
+                and session.event_delivery_stopped.is_set()
+            ):
+                self._sessions.pop(session.id, None)
 
     def _provider(self, session: RealtimeSession) -> RealtimeProviderSession:
         provider = session.provider_session

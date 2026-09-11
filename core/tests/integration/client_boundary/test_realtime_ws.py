@@ -24,7 +24,7 @@ from sofias_assistant.client_boundary.boundary import (
     LocalClientBoundary,
 )
 from sofias_assistant.client_boundary.http_api import create_local_http_app
-from sofias_assistant.client_boundary.realtime_ws import _event_wire
+from sofias_assistant.client_boundary.realtime_ws import _Connection, _event_wire
 from sofias_assistant.client_boundary.sessions import ClientSessionRegistry
 from sofias_assistant.conversation.events import (
     ConversationTurnCompleted,
@@ -75,10 +75,14 @@ class _RealtimeApi:
         *,
         stream_end: bool = False,
         stream_error: Exception | None = None,
+        audio_entered: asyncio.Event | None = None,
+        audio_release: asyncio.Event | None = None,
     ) -> None:
         self.open_error = open_error
         self.stream_end = stream_end
         self.stream_error = stream_error
+        self.audio_entered = audio_entered
+        self.audio_release = audio_release
         self.events_calls = 0
         self.events_finished = 0
         self.events_cancelled = 0
@@ -86,6 +90,7 @@ class _RealtimeApi:
         self.commands: list[OpenRealtimeSessionCommand] = []
         self.started_sessions: list[RealtimeSessionId] = []
         self.committed_sessions: list[RealtimeSessionId] = []
+        self.commit_seen = asyncio.Event()
         self.cancelled: list[tuple[RealtimeSessionId, RealtimeInteractionId]] = []
         self.interrupted: list[tuple[RealtimeSessionId, RealtimeInteractionId]] = []
         self.audio: list[bytes] = []
@@ -123,12 +128,17 @@ class _RealtimeApi:
         self, realtime_session_id: RealtimeSessionId, audio: bytes
     ) -> None:
         assert realtime_session_id == self._session_id
+        if self.audio_entered is not None:
+            self.audio_entered.set()
+        if self.audio_release is not None:
+            await self.audio_release.wait()
         self.audio.append(audio)
 
     async def commit_interaction(self, realtime_session_id: RealtimeSessionId) -> None:
         assert realtime_session_id == self._session_id
         assert self._interaction_id is not None
         self.committed_sessions.append(realtime_session_id)
+        self.commit_seen.set()
         await self._queue.put(
             RealtimeAssistantAudioChunk(
                 realtime_session_id, self._interaction_id, 0, b"assistant", _format()
@@ -849,11 +859,17 @@ async def _boundary_for_auth(
     *,
     stream_end: bool = False,
     stream_error: Exception | None = None,
+    audio_entered: asyncio.Event | None = None,
+    audio_release: asyncio.Event | None = None,
 ) -> tuple[
     LocalClientBoundary, tuple[LocalClientAccess, ClientSessionRegistry], _RealtimeApi
 ]:
     realtime = _RealtimeApi(
-        open_error, stream_end=stream_end, stream_error=stream_error
+        open_error,
+        stream_end=stream_end,
+        stream_error=stream_error,
+        audio_entered=audio_entered,
+        audio_release=audio_release,
     )
     captured: list[ClientSessionRegistry] = []
 
@@ -1561,6 +1577,149 @@ async def test_binary_frame_over_64_kib_closes_1009_without_forwarding() -> None
             audio = b"a" * (64 * 1024 + 1)
             assert await _closed_after_first(socket, audio) == 1009
         assert realtime.audio == []
+    finally:
+        await boundary.stop()
+
+
+@pytest.mark.asyncio
+async def test_empty_binary_frame_closes_1002_without_forwarding() -> None:
+    boundary, pair, realtime = await _boundary_for_auth()
+    access, sessions = pair
+    session = sessions.open_session(access.credential)
+    try:
+        async with websockets.connect(
+            f"ws://{access.host}:{access.port}/api/v1/realtime"
+        ) as socket:
+            await _active_interaction(socket, access, session.id)
+            assert await _closed_after_first(socket, b"") == 1002
+        assert realtime.audio == []
+    finally:
+        await boundary.stop()
+
+
+@pytest.mark.asyncio
+async def test_blocked_provider_send_audio_stops_input_receive_loop() -> None:
+    audio_entered = asyncio.Event()
+    audio_release = asyncio.Event()
+    boundary, pair, realtime = await _boundary_for_auth(
+        audio_entered=audio_entered, audio_release=audio_release
+    )
+    access, sessions = pair
+    session = sessions.open_session(access.credential)
+    try:
+        async with websockets.connect(
+            f"ws://{access.host}:{access.port}/api/v1/realtime"
+        ) as socket:
+            opened, started = await _active_interaction(socket, access, session.id)
+            session_id = opened["realtime_session_id"]
+            interaction_id = started["realtime_interaction_id"]
+            await socket.send(b"blocked-audio")
+            await audio_entered.wait()
+
+            await socket.send(_input_committed_control(3, session_id, interaction_id))
+            assert realtime.committed_sessions == []
+
+            audio_release.set()
+            await realtime.commit_seen.wait()
+            assert realtime.committed_sessions == [
+                RealtimeSessionId(UUID(str(session_id)))
+            ]
+    finally:
+        audio_release.set()
+        await boundary.stop()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancels_blocked_sender_and_closes_owned_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_entered = asyncio.Event()
+    send_release = asyncio.Event()
+
+    async def blocked_send(self: _Connection, audio: bytes) -> None:
+        del self, audio
+        send_entered.set()
+        await send_release.wait()
+
+    monkeypatch.setattr(_Connection, "_send_bytes", blocked_send)
+    boundary, pair, realtime = await _boundary_for_auth()
+    access, sessions = pair
+    client_session = sessions.open_session(access.credential)
+    try:
+        async with websockets.connect(
+            f"ws://{access.host}:{access.port}/api/v1/realtime"
+        ) as socket:
+            opened, started = await _active_interaction(
+                socket, access, client_session.id
+            )
+            assert realtime._session_id is not None
+            await realtime.emit(
+                RealtimeAssistantAudioChunk(
+                    realtime._session_id,
+                    RealtimeInteractionId(
+                        UUID(str(started["realtime_interaction_id"]))
+                    ),
+                    0,
+                    b"blocked",
+                    _format(),
+                )
+            )
+            announced = await _control(socket)
+            assert announced["type"] == "assistant_output.started"
+            await send_entered.wait()
+            await socket.close()
+        send_release.set()
+        assert realtime.closed == [
+            RealtimeSessionId(UUID(str(opened["realtime_session_id"])))
+        ]
+        assert realtime.events_cancelled in (0, 1)
+    finally:
+        send_release.set()
+        await boundary.stop()
+
+
+@pytest.mark.asyncio
+async def test_transport_send_failure_closes_owned_session_without_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_send(self: _Connection, audio: bytes) -> None:
+        del self, audio
+        raise RuntimeError("transport send failed")
+
+    monkeypatch.setattr(_Connection, "_send_bytes", failing_send)
+    boundary, pair, realtime = await _boundary_for_auth()
+    access, sessions = pair
+    client_session = sessions.open_session(access.credential)
+    try:
+        async with websockets.connect(
+            f"ws://{access.host}:{access.port}/api/v1/realtime"
+        ) as socket:
+            opened, started = await _active_interaction(
+                socket, access, client_session.id
+            )
+            assert realtime._session_id is not None
+            await realtime.emit(
+                RealtimeAssistantAudioChunk(
+                    realtime._session_id,
+                    RealtimeInteractionId(
+                        UUID(str(started["realtime_interaction_id"]))
+                    ),
+                    0,
+                    b"failure",
+                    _format(),
+                )
+            )
+            announced = await _control(socket)
+            assert announced["type"] == "assistant_output.started"
+            payload = await _control(socket)
+            assert payload["type"] == "error"
+            assert payload["code"] == "internal_realtime_error"
+            with pytest.raises(ConnectionClosed):
+                await socket.recv()
+        assert realtime.closed == [
+            RealtimeSessionId(UUID(str(opened["realtime_session_id"])))
+        ]
+        assert realtime.events_cancelled in (0, 1)
     finally:
         await boundary.stop()
 

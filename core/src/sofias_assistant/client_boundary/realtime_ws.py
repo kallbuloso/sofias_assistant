@@ -38,6 +38,9 @@ from sofias_assistant.conversation.realtime_events import (
     RealtimeUserTranscriptFinal,
     RealtimeUserTranscriptPartial,
 )
+from sofias_assistant.conversation.realtime_models import (
+    REALTIME_AUDIO_FRAME_MAX_BYTES,
+)
 from sofias_assistant.conversation.realtime_runtime import (
     InvalidRealtimeStateError,
     OpenRealtimeSessionCommand,
@@ -48,7 +51,7 @@ PROTOCOL_VERSION = "realtime.v1"
 AUTH_TIMEOUT_SECONDS = 5.0
 AUTH_JSON_MAX_BYTES = 4 * 1024
 CONTROL_JSON_MAX_BYTES = 16 * 1024
-AUDIO_MAX_BYTES = 64 * 1024
+AUDIO_MAX_BYTES = REALTIME_AUDIO_FRAME_MAX_BYTES
 
 _CONTROL_FIELDS: dict[str, frozenset[str]] = {
     "session.open": frozenset(
@@ -390,8 +393,9 @@ class _Connection:
         self._realtime_session_id = None
 
     async def _forward_events(self, session_id: RealtimeSessionId) -> None:
+        stream = self._realtime.events(session_id)
         try:
-            async for event in self._realtime.events(session_id):
+            async for event in stream:
                 await self._forward_event(event)
                 if isinstance(
                     event, (ConversationRealtimeSessionFailed, RealtimeSessionClosed)
@@ -413,6 +417,13 @@ class _Connection:
             except Exception:
                 pass
             await self._close(1011)
+        finally:
+            close_stream = getattr(stream, "aclose", None)
+            if close_stream is not None:
+                try:
+                    await close_stream()
+                except Exception:
+                    pass
 
     async def _forward_event(self, event: RealtimeConversationEvent) -> None:
         if isinstance(event, RealtimeAssistantAudioChunk):
