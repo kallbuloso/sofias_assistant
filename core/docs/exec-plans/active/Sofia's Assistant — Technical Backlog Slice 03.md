@@ -17,9 +17,9 @@ registra execução, checkpoints, commits, CI e o próximo passo.
 **Slice:** SA-B009 — Realtime Voice / Gate I3
 **Slice status:** ACTIVE
 **Gate I3:** OPEN
-**Current implementation HEAD:** `48b635d0decf0489657070cafe8718f082d91ebc`
-**Current active block:** SA-B009.5b — Provider Session Loss & Failure Lifecycle
-**Current next micro-step:** SA-B009.5b.1 — Provider-generation ownership
+**Current implementation HEAD:** `49452368a28529801f60d525fc1ac3917364fead`
+**Current active block:** SA-B009.5c — Backpressure & Resource Bounds
+**Current next micro-step:** SA-B009.5c.0 — Backpressure & Resource Bounds Preflight
 
 ### Checkpoints concluídos
 
@@ -30,6 +30,7 @@ registra execução, checkpoints, commits, CI e o próximo passo.
 | SA-B009.3 — Fake Realtime Provider & RealtimeConversationRuntime | DONE — REMOTE VERIFIED | `c2b7cb2c961293a348006623e6567d3b41d42279` |
 | SA-B009.4 — Authenticated Local WebSocket Boundary | DONE — REMOTE VERIFIED | Feature `624024444441790bf0d790fef51d4011edab1e40`; docs closeout `80ad7fd53c23f682d509be7e43d4dd427022a471` |
 | SA-B009.5a — Interruption / Barge-in / Wire Controls | DONE — REMOTE VERIFIED | Core checkpoint `3fb137f41e22bad731cb2c15ea66afde84f48aab`; WebSocket/vertical checkpoint `48b635d0decf0489657070cafe8718f082d91ebc`; GitHub Actions run `34434466878` SUCCESS |
+| SA-B009.5b — Provider Session Loss & Failure Lifecycle | DONE — REMOTE VERIFIED | Checkpoint `49452368a28529801f60d525fc1ac3917364fead` — `feat(realtime): harden provider session lifecycle`; GitHub Actions run `34545185395` SUCCESS |
 
 ### SA-B009.5a — ledger de micro-steps
 
@@ -55,7 +56,7 @@ Decisões congeladas em SA-B009.5a:
 - Evento terminal OLD não pode limpar a ownership de NEW.
 - Nenhum epoch ou provider-native ID entra no wire ou na persistence.
 
-### SA-B009.5b — preflight
+### SA-B009.5b — Provider Session Loss & Failure Lifecycle
 
 **SA-B009.5b.0 — Provider Session Loss & Failure Lifecycle Preflight**
 **Status:** DONE — REVIEWED
@@ -82,20 +83,68 @@ geração nova. `provider_generation` não reutiliza `response_epoch`, pois as
 responsabilidades de interaction generation e provider-session generation são
 distintas.
 
+**Status:** DONE — REMOTE VERIFIED
+
+**Checkpoint:** `49452368a28529801f60d525fc1ac3917364fead` —
+`feat(realtime): harden provider session lifecycle`
+
+**CI:** GitHub Actions run `34545185395` — SUCCESS
+
+Evidências finais:
+
+- `provider_generation` é efêmera, monotônica e separada de `response_epoch`;
+  cada consumer captura provider instance e generation, e geração stale não tem
+  autoridade.
+- Provider session loss terminaliza como `FAILED`, nunca como `INTERRUPTED`;
+  protocol corruption permanece semanticamente separado.
+- Completion, interrupt, automatic barge-in, session loss e explicit close são
+  arbitrados por `voice_transition`; o estado terminal do Turn é monotônico.
+- Provider loss preserva a Conversation; uma nova Core realtime session para a
+  mesma Conversation funciona.
+- O boundary entrega `turn.failed` antes de `session.failed`, e `session.failed`
+  antecede o fechamento do WebSocket.
+- Full regression local do checkpoint: `500 passed`, `2 skipped`, zero warnings.
+
 ### Plano operacional SA-B009.5b
 
 | Micro-step | Status | Objective |
 | --- | --- | --- |
 | SA-B009.5b.0 | DONE — REVIEWED | Session-loss preflight |
-| SA-B009.5b.1 | NEXT | Provider-generation ownership |
-| SA-B009.5b.2 | PLANNED | Session-failure terminal semantics |
-| SA-B009.5b.3 | PLANNED | Completion/interrupt/session-loss race matrix |
-| SA-B009.5b.4 | PLANNED | Boundary/session-loss acceptance |
-| SA-B009.5b.5 | PLANNED | Regression and remote checkpoint |
+| SA-B009.5b.1 | DONE | Provider-generation ownership |
+| SA-B009.5b.2 | DONE | Session-failure terminal semantics |
+| SA-B009.5b.3 | DONE | Completion / Interrupt / Session-loss Race Matrix |
+| SA-B009.5b.3a | DONE | Explicit Close vs Session-loss Arbitration |
+| SA-B009.5b.4 | DONE | Boundary / Session-loss Acceptance |
+| SA-B009.5b.5 | DONE — REMOTE VERIFIED | Regression & Remote Checkpoint |
 
-Depois seguem, sem detalhamento adicional neste ledger: `SA-B009.5c` —
-Backpressure & Resource Bounds; `SA-B009.5d` — Final Hardening / Gate Evidence;
-`SA-B009.6` — OpenAI Realtime Adapter.
+### Próximo bloco operacional
+
+`SA-B009.5c — Backpressure & Resource Bounds` está ativo. O próximo micro-step
+é somente `SA-B009.5c.0 — Backpressure & Resource Bounds Preflight`.
+
+`SA-B009.5d — Final Hardening / Gate Evidence` permanece subsequente.
+`SA-B009.6 — OpenAI Realtime Adapter` permanece PLANNED / subsequent.
+
+### Deferred audit — SA-B009.5c
+
+Auditar o guard de `close_session()` relacionado a `event_queue.full()` e
+`consumer_task.cancel()`, usado antes de `voice_transition` para evitar bloqueio
+durante cleanup.
+
+Objetivo do 5c: confirmar que o comportamento é compatível com a política final
+de backpressure/resource bounds e não cria dependência indevida de queue
+occupancy para lifecycle semantics.
+
+Não alterar isso neste commit documental.
+
+### Deferred audit — SA-B009.5d
+
+Client-initiated `session.close` continua ACK-less no boundary atual. O Core
+possui `RealtimeSessionClosed`, mas o boundary fecha diretamente o WebSocket com
+`1000` sem tornar `session.closed` observável ao cliente nesse fluxo.
+
+Não é blocker de SA-B009.5b. Reavaliar em SA-B009.5d — Final Hardening / Gate
+Evidence.
 
 Regra do ledger: em cada checkpoint remoto relevante, atualizar o status do
 micro-step, registrar commit SHA, registrar CI quando aplicável, registrar nova
