@@ -17,9 +17,9 @@ registra execução, checkpoints, commits, CI e o próximo passo.
 **Slice:** SA-B009 — Realtime Voice / Gate I3
 **Slice status:** ACTIVE
 **Gate I3:** OPEN
-**Current implementation HEAD:** `49452368a28529801f60d525fc1ac3917364fead`
-**Current active block:** SA-B009.5c — Backpressure & Resource Bounds
-**Current next micro-step:** SA-B009.5c.0 — Backpressure & Resource Bounds Preflight
+**Current implementation HEAD:** `1687c30907d6813d0ba2e4d64dbf619d35214f2f`
+**Current active block:** SA-B009.5d — Final Hardening / Gate Evidence
+**Current next micro-step:** SA-B009.5d.0 — Final Hardening / Gate Evidence Preflight
 
 ### Checkpoints concluídos
 
@@ -117,34 +117,92 @@ Evidências finais:
 | SA-B009.5b.4 | DONE | Boundary / Session-loss Acceptance |
 | SA-B009.5b.5 | DONE — REMOTE VERIFIED | Regression & Remote Checkpoint |
 
-### Próximo bloco operacional
+### SA-B009.5c — Backpressure & Resource Bounds
 
-`SA-B009.5c — Backpressure & Resource Bounds` está ativo. O próximo micro-step
-é somente `SA-B009.5c.0 — Backpressure & Resource Bounds Preflight`.
+**Status:** DONE — REMOTE VERIFIED
 
-`SA-B009.5d — Final Hardening / Gate Evidence` permanece subsequente.
-`SA-B009.6 — OpenAI Realtime Adapter` permanece PLANNED / subsequent.
+**Checkpoint:** `1687c30907d6813d0ba2e4d64dbf619d35214f2f` —
+`feat(realtime): bound realtime resource delivery`
 
-### Deferred audit — SA-B009.5c
+**CI:** GitHub Actions run `34562297487` — SUCCESS
 
-Auditar o guard de `close_session()` relacionado a `event_queue.full()` e
-`consumer_task.cancel()`, usado antes de `voice_transition` para evitar bloqueio
-durante cleanup.
+| Micro-step | Status | Result |
+| --- | --- | --- |
+| SA-B009.5c.0 | DONE — REVIEWED | Backpressure & Resource Bounds Preflight |
+| SA-B009.5c.1 | DONE | Input Bounds & Natural Backpressure |
+| SA-B009.5c.2 | DONE | Output Event Size & Queue Bounds |
+| SA-B009.5c.3 | DONE | Terminal Delivery & Saturated Shutdown |
+| SA-B009.5c.4 | DONE | Boundary / Disconnect Vertical |
+| SA-B009.5c.5 | DONE — REMOTE VERIFIED | Regression & Remote Checkpoint |
 
-Objetivo do 5c: confirmar que o comportamento é compatível com a política final
-de backpressure/resource bounds e não cria dependência indevida de queue
-occupancy para lifecycle semantics.
+Evidências e decisões congeladas:
 
-Não alterar isso neste commit documental.
+- Input não possui application queue; WebSocket → `runtime.send_audio()` →
+  `provider.send_audio()` usa await-chain e fornece backpressure natural.
+- O single realtime audio frame máximo é 64 KiB; o bound é Core-owned e
+  reutilizado pelo boundary.
+- A event queue permanece uma única FIFO bounded em 128 itens; provider output
+  é validado independentemente do adapter.
+- Text events são limitados por tamanho UTF-8 e assistant partial transcript
+  possui limite acumulado; resource violations usam `provider_protocol_error`
+  seguro.
+- Stale provider generation continua sem autoridade.
+- Terminal events não são silenciosamente descartados por `QueueFull`; `_END`
+  preserva FIFO com consumer vivo.
+- Consumer lento aplica backpressure; consumer abandonado libera producer e
+  cleanup cooperativamente.
+- `close_session()` não depende mais de `queue.full()`.
+- Não existe terminal queue, priority queue, eviction ou weighted queue.
+- Slow WebSocket send aplica backpressure sem provider failure falso; disconnect
+  cancela sender antes de Core close.
+- CLOSED/FAILED sessions só são removidas de `_sessions` após stream
+  completion/abandonment apropriado; `_conversation_sessions` mantém ownership
+  semântica separada.
+- Repeated terminal sessions não acumulam registry state.
+- Full regression local: `522 passed`, `2 skipped`, `0 failed`, `0 warnings`.
+
+Decisões operacionais de 5c:
+
+1. Não criar input `asyncio.Queue` enquanto a await-chain síncrona fornece
+   backpressure adequada.
+2. Resource bounds do Core não dependem de provider bem-comportado.
+3. Output boundedness MVP usa per-event bounds, cumulative transcript bound e
+   queue item-count bound, sem weighted byte-budget queue.
+4. Uma única FIFO preserva ordering.
+5. Cliente lento significa backpressure; consumer/client desaparecido significa
+   cancellation/cleanup cooperativo.
+6. Delivery failure não redefine lifecycle authority; `voice_transition` continua
+   árbitro.
 
 ### Deferred audit — SA-B009.5d
 
-Client-initiated `session.close` continua ACK-less no boundary atual. O Core
-possui `RealtimeSessionClosed`, mas o boundary fecha diretamente o WebSocket com
-`1000` sem tornar `session.closed` observável ao cliente nesse fluxo.
+#### Client session.close
 
-Não é blocker de SA-B009.5b. Reavaliar em SA-B009.5d — Final Hardening / Gate
-Evidence.
+Client-initiated `session.close` continua ACK-less no boundary. O Core possui
+`RealtimeSessionClosed`, porém nesse fluxo o cliente não observa `session.closed`
+antes do WebSocket `1000`.
+
+Reavaliar em `SA-B009.5d — Final Hardening / Gate Evidence`. Não é blocker de 5c.
+
+#### Timeout / bounded shutdown policy
+
+Não existe timeout explícito para `provider.close()`, slow client ou global
+boundary shutdown. 5c deliberadamente não introduziu timeout arbitrário.
+
+Reavaliar necessidade/política em 5d e/ou no adapter real.
+
+#### Input wording
+
+O texto antigo de backpressure menciona “filas de entrada e saída”, mas a
+implementação final usa input await-chain e transport buffering, sem application
+input queue. Revisar esse wording no hardening documental de 5d.
+
+### Próximo bloco operacional
+
+`SA-B009.5d — Final Hardening / Gate Evidence` está ativo. O próximo micro-step
+é somente `SA-B009.5d.0 — Final Hardening / Gate Evidence Preflight`.
+
+`SA-B009.6 — OpenAI Realtime Adapter` permanece PLANNED / subsequent.
 
 Regra do ledger: em cada checkpoint remoto relevante, atualizar o status do
 micro-step, registrar commit SHA, registrar CI quando aplicável, registrar nova
