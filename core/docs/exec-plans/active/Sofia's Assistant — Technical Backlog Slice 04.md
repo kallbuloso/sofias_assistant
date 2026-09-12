@@ -1856,13 +1856,13 @@ as decisões normativas.
 
 ```text
 Slice 04 status:
-    ACTIVE
+    DONE — REMOTE VERIFIED
 
 Current active Gate:
-    I10 — Sofia é Rastreável
+    none
 
 Current next micro-step:
-    SA-B030 — Audit Evidence
+    Slice 05 — Gate I6 — Sofia Remembers
 
 Gate I4:
     CLOSED — REMOTE VERIFIED
@@ -1871,10 +1871,10 @@ Gate I5:
     CLOSED — REMOTE VERIFIED
 
 Gate I10:
-    READY / NEXT GATE
+    CLOSED — REMOTE VERIFIED
 
 Current implementation HEAD:
-    83172549bc06a88f62bb0baddab8fa51acbbca25
+    cb67b159f0ffec0fb22015b122358105557be9a8
 ```
 
 ## Gate I5 — Sofia Pode Trabalhar
@@ -1941,4 +1941,70 @@ full recovery, capabilities de produção e Experimental Agent, continuam
 deferred conforme as seções de não-objetivos deste documento. O próximo
 checkpoint deve atualizar status, SHA, CI, decisões congeladas e `NEXT`, sem
 registrar logs brutos ou prompts completos.
+```
+
+## Gate I10 — Sofia é Rastreável
+
+```text
+SA-B030 — Audit & Traceability:
+    DONE — REMOTE VERIFIED
+
+Feature checkpoint:
+    cb67b159f0ffec0fb22015b122358105557be9a8
+    feat(audit): add execution traceability
+
+GitHub Actions:
+    run 34712893407 — SUCCESS
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/34712893407
+
+Local full regression:
+    535 collected; 532 passed; 3 skipped; 0 failed; 0 warnings
+```
+
+### Evidência operacional
+
+- `AuditEntry`, `AuditService` e `AuditStore` persistem fatos estruturados em
+  `audit_entries`, separados de logs e de Sofias Memory, com append-oriented
+  por convenção da aplicação.
+- Direct Invocation, PolicyDecision, Confirmation/Grant, execução e resultado
+  compartilham `correlation_id`/`causation_id`; Task/Attempt e AgentRun
+  preservam a mesma cadeia sem criar Task artificial para invocações diretas.
+- Query determinística por correlation, Task, Attempt, AgentRun, ToolCall,
+  PolicyDecision, Grant, resource, outcome e origin reconstrói a trace por
+  evidência persistida.
+- A boundary autenticada expõe somente DTO seguro de Audit e uma consulta de
+  trace; não grava SQL diretamente, não autoriza execução e não expõe
+  chain-of-thought, stdout/stderr bruto ou provider state.
+- Redaction recursiva remove chaves sensíveis e Tool arguments são reduzidos a
+  chaves/summary; o Gate I10 vertical prova que o sentinel secreto não chega
+  à persistence nem ao DTO.
+- Isolation mode é registrado no execution context; Task lifecycle, attempts,
+  cancellation e AgentRun possuem eventos significativos e correlacionáveis.
+- Migration `0007_audit_traceability` adiciona a tabela de Audit e os campos
+  mínimos de correlation sem reescrever migrations anteriores.
+
+### Decisões congeladas
+
+- Audit é evidence operacional local, não logging, metrics, Memory ou Event
+  Sourcing; histórico não é atualizado para refletir estado posterior.
+- Evidence pré-execução é persistida antes do side effect; resultado observado
+  é anexado depois, sem rollback fictício se a persistência posterior falhar.
+- Secrets, bearer material, argumentos arbitrários, ambiente completo, raw
+  stdout/stderr e private reasoning nunca são persistidos.
+
+### Deferred não bloqueante
+
+- retention/export/hash chaining/tamper evidence permanecem futuros;
+- Event Runtime/Scheduler e audit de Memory/Plugins não foram iniciados;
+- smoke OpenAI continua opt-in e não faz parte do Gate I10 determinístico.
+
+## Fechamento do Slice 04
+
+```text
+I4 — CLOSED — REMOTE VERIFIED
+I5 — CLOSED — REMOTE VERIFIED
+I10 — CLOSED — REMOTE VERIFIED
+Slice 04 — DONE — REMOTE VERIFIED
+Current active Gate: none
+Next planning unit: Slice 05 — Gate I6 — Sofia Remembers
 ```
