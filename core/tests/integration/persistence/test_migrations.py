@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0004_add_voice_turn_input_modality"
+HEAD_REVISION = "0005_safe_execution_schema"
 DOMAIN_TABLES = {
     "application_settings",
     "conversations",

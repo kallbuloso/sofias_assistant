@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated, Literal, Protocol, assert_never
+from typing import Annotated, Any, Literal, Protocol, assert_never
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
@@ -36,6 +36,8 @@ from sofias_assistant.conversation.runtime import (
     SendTextCommand,
 )
 from sofias_assistant.core.core import CoreState
+from sofias_assistant.execution import ExecutionRuntime
+from sofias_assistant.execution.models import GrantLifetime, ToolCall
 from sofias_assistant.health.models import (
     ComponentHealth,
     HealthStatus,
@@ -298,6 +300,58 @@ class ToolCallProposalResponse(BaseModel):
     arguments: object
 
 
+class ToolResponse(BaseModel):
+    """Transport-safe Tool metadata without exposing handlers."""
+
+    name: str
+    version: str
+    description: str
+    capability: str
+    side_effect: str
+    execution_mode: str
+    timeout_seconds: float
+    idempotent: bool
+
+
+class ToolInvokeRequest(BaseModel):
+    """Authenticated normalized ToolCall input."""
+
+    arguments: dict[str, Any] = {}
+    call_id: UUID | None = None
+    grant_id: UUID | None = None
+
+
+class ToolInvokeResponse(BaseModel):
+    """Normalized ToolResult representation."""
+
+    status: str
+    call_id: UUID
+    value: Any = None
+    error_code: str | None = None
+    error_message: str | None = None
+    confirmation_id: UUID | None = None
+    artifact_refs: list[UUID]
+
+
+class ConfirmationResponse(BaseModel):
+    """Explicit confirmation request scope shown to the authenticated client."""
+
+    id: UUID
+    subject: str
+    capability: str
+    operation: str
+    resource: str
+    requested_lifetime: GrantLifetime
+    status: str
+    tool_call_id: UUID
+
+
+class ConfirmationDecisionRequest(BaseModel):
+    """Approval may choose only a supported lifetime; scope is never client-widened."""
+
+    lifetime: GrantLifetime = GrantLifetime.ONE_SHOT
+
+
 class TurnStartedRecord(BaseModel):
     type: Literal["turn_started"] = "turn_started"
     conversation: ConversationResponse
@@ -368,6 +422,7 @@ def create_local_http_app(
     core: CoreReadApi | None = None,
     conversation: ConversationHttpApi | None = None,
     realtime: RealtimeConversationApi | None = None,
+    execution: ExecutionRuntime | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -499,7 +554,144 @@ def create_local_http_app(
                 media_type="application/x-ndjson",
             )
 
+    if execution is not None:
+
+        @app.get("/api/v1/tools", response_model=list[ToolResponse])
+        async def list_tools(
+            _: Annotated[ClientSession, Depends(require_session)],
+        ) -> list[ToolResponse]:
+            """List normalized enabled Tool metadata without handlers."""
+
+            return [
+                ToolResponse(
+                    name=spec.name,
+                    version=spec.version,
+                    description=spec.description,
+                    capability=spec.capability,
+                    side_effect=spec.side_effect.value,
+                    execution_mode=spec.execution_mode.value,
+                    timeout_seconds=spec.timeout_seconds,
+                    idempotent=spec.idempotent,
+                )
+                for spec in execution.list_tools()
+            ]
+
+        @app.post(
+            "/api/v1/tools/{tool_name}/invoke",
+            response_model=ToolInvokeResponse,
+        )
+        async def invoke_tool(
+            tool_name: str,
+            request: ToolInvokeRequest,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> ToolInvokeResponse:
+            """Submit a normalized ToolCall; Policy remains Core-owned."""
+
+            call = ToolCall(
+                **({"id": request.call_id} if request.call_id is not None else {}),
+                name=tool_name,
+                arguments=request.arguments,
+                subject=f"client:{session.id}",
+                session_id=session.id,
+            )
+            result = await execution.invoke(call, grant_id=request.grant_id)
+            return _tool_result_response(result)
+
+        @app.get(
+            "/api/v1/confirmations/{confirmation_id}",
+            response_model=ConfirmationResponse,
+        )
+        async def get_confirmation(
+            confirmation_id: UUID,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> ConfirmationResponse:
+            """Read a pending confirmation without permitting scope changes."""
+
+            try:
+                confirmation = await execution.store.get_confirmation(confirmation_id)
+            except Exception:
+                raise _execution_failure() from None
+            if confirmation is None:
+                raise _confirmation_not_found()
+            if confirmation.subject != f"client:{session.id}":
+                raise _confirmation_not_found()
+            return ConfirmationResponse(
+                id=confirmation.id,
+                subject=confirmation.subject,
+                capability=confirmation.capability,
+                operation=confirmation.operation,
+                resource=confirmation.resource,
+                requested_lifetime=confirmation.requested_lifetime,
+                status=confirmation.status.value,
+                tool_call_id=confirmation.tool_call_id,
+            )
+
+        @app.post(
+            "/api/v1/confirmations/{confirmation_id}/approve",
+            response_model=ToolInvokeResponse,
+        )
+        async def approve_confirmation(
+            confirmation_id: UUID,
+            request: ConfirmationDecisionRequest,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> ToolInvokeResponse:
+            """Approve exactly the presented scope and continue its ToolCall."""
+
+            try:
+                confirmation = await execution.store.get_confirmation(confirmation_id)
+                if (
+                    confirmation is None
+                    or confirmation.subject != f"client:{session.id}"
+                ):
+                    raise KeyError("Confirmation not found")
+                result = await execution.approve_confirmation(
+                    confirmation_id, lifetime=request.lifetime
+                )
+            except (KeyError, ValueError):
+                raise _confirmation_not_found() from None
+            return _tool_result_response(result)
+
+        @app.post("/api/v1/confirmations/{confirmation_id}/deny", status_code=204)
+        async def deny_confirmation(
+            confirmation_id: UUID,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> Response:
+            try:
+                confirmation = await execution.store.get_confirmation(confirmation_id)
+                if (
+                    confirmation is None
+                    or confirmation.subject != f"client:{session.id}"
+                ):
+                    raise KeyError("Confirmation not found")
+                await execution.deny_confirmation(confirmation_id)
+            except (KeyError, ValueError):
+                raise _confirmation_not_found() from None
+            return Response(status_code=204)
+
+        @app.get("/api/v1/artifacts/{artifact_id}")
+        async def get_artifact(
+            artifact_id: UUID,
+            _: Annotated[ClientSession, Depends(require_session)],
+        ) -> Response:
+            try:
+                ref, content = await execution.artifacts.read(artifact_id)
+            except FileNotFoundError:
+                raise _artifact_not_found() from None
+            return Response(content=content, media_type=ref.media_type)
+
     return app
+
+
+def _tool_result_response(result: Any) -> ToolInvokeResponse:
+    return ToolInvokeResponse(
+        status=result.status,
+        call_id=result.call_id,
+        value=result.value,
+        error_code=result.error.code if result.error is not None else None,
+        error_message=result.error.message if result.error is not None else None,
+        confirmation_id=result.confirmation_id,
+        artifact_refs=[ref.id for ref in result.artifact_refs],
+    )
 
 
 async def _ndjson_records(
@@ -603,4 +795,25 @@ def _conversation_not_found() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Conversation not found",
+    )
+
+
+def _confirmation_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Confirmation not found",
+    )
+
+
+def _artifact_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Artifact not found",
+    )
+
+
+def _execution_failure() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Execution service unavailable",
     )

@@ -13,6 +13,7 @@ from sofias_assistant.core.composition import (
     ConversationDependenciesFactory,
     ConversationRuntimeDependencies,
 )
+from sofias_assistant.execution import ExecutionRuntime
 from sofias_assistant.health.models import (
     ComponentHealth,
     HealthStatus,
@@ -72,6 +73,7 @@ class SofiaCore:
         self._resources: RuntimeResources | None = None
         self._session_lifecycle: RuntimeSessionLifecycle | None = None
         self._secret_service: SecretService | None = None
+        self._execution_runtime: ExecutionRuntime | None = None
         self._instance_ownership: InstanceOwnership | None = None
         self._instance_ownership_acquired = False
         self._conversation_runtime: TextConversationRuntime | None = None
@@ -110,6 +112,16 @@ class SofiaCore:
                 "SecretService is only available while SofiaCore is running"
             )
         return self._secret_service
+
+    @property
+    def execution_runtime(self) -> ExecutionRuntime:
+        """Return Core-owned authorized Tool execution while the Core is running."""
+
+        if self._state is not CoreState.RUNNING or self._execution_runtime is None:
+            raise RuntimeError(
+                "Execution Runtime is only available while SofiaCore is running"
+            )
+        return self._execution_runtime
 
     @property
     def conversation_runtime(self) -> TextConversationRuntime:
@@ -155,6 +167,10 @@ class SofiaCore:
                 application_version=self._application_version,
             )
             await self._session_lifecycle.start()
+            self._execution_runtime = ExecutionRuntime(
+                self._resources.session_factory,
+                artifact_root=self._config.paths.data_dir / "artifacts",
+            )
             self._compose_conversation_runtime()
             self._health = RuntimeHealthSnapshot(
                 (
@@ -255,6 +271,7 @@ class SofiaCore:
         self._resources = None
         self._session_lifecycle = None
         self._secret_service = None
+        self._execution_runtime = None
         self._instance_ownership = None
         self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())

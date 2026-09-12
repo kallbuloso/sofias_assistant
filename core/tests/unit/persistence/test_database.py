@@ -35,6 +35,12 @@ def test_base_metadata_contains_mapped_operational_tables() -> None:
         "conversations",
         "runtime_sessions",
         "turns",
+        "permission_grants",
+        "delegations",
+        "confirmation_requests",
+        "policy_decisions",
+        "tool_calls",
+        "artifacts",
     }
 
 

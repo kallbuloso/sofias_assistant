@@ -127,3 +127,107 @@ class TurnRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class PermissionGrantRecord(Base):
+    """Durable, revocable authority owned by the Core."""
+
+    __tablename__ = "permission_grants"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False)
+    lifetime: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    issuing_context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    remaining_uses: Mapped[int | None] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class DelegationRecord(Base):
+    """Durable optional narrowed authority contract."""
+
+    __tablename__ = "delegations"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    authority_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class ConfirmationRequestRecord(Base):
+    """Durable pending confirmation with an exact requested scope."""
+
+    __tablename__ = "confirmation_requests"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability: Mapped[str] = mapped_column(String(255), nullable=False)
+    operation: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_call_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    requested_lifetime: Mapped[str] = mapped_column(String(32), nullable=False)
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    grant_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+
+class PolicyDecisionRecord(Base):
+    """Persisted policy evidence for future audit correlation."""
+
+    __tablename__ = "policy_decisions"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    grant_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ToolCallRecord(Base):
+    """Durable normalized ToolCall lifecycle marker."""
+
+    __tablename__ = "tool_calls"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    session_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    arguments_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    confirmation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ArtifactRecord(Base):
+    """Metadata for a Core-controlled artifact blob."""
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String(128), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size: Mapped[int] = mapped_column(nullable=False)
+    retention: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

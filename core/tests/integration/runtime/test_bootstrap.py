@@ -10,13 +10,19 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.persistence.database import SQLITE_BUSY_TIMEOUT_MS
 from sofias_assistant.runtime import bootstrap_runtime
 
-HEAD_REVISION = "0004_add_voice_turn_input_modality"
+HEAD_REVISION = "0005_safe_execution_schema"
 EXPECTED_TABLES = {
     "alembic_version",
     "application_settings",
     "conversations",
     "runtime_sessions",
     "turns",
+    "permission_grants",
+    "delegations",
+    "confirmation_requests",
+    "policy_decisions",
+    "tool_calls",
+    "artifacts",
 }
 
 
