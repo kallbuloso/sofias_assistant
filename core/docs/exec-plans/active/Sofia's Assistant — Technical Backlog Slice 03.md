@@ -15,11 +15,11 @@ pertencendo aos ADRs e às seções arquiteturais deste exec-plan; o ledger
 registra execução, checkpoints, commits, CI e o próximo passo.
 
 **Slice:** SA-B009 — Realtime Voice / Gate I3
-**Slice status:** ACTIVE
-**Gate I3:** CLOSURE READY — remote verification pending
+**Slice status:** DONE — REMOTE VERIFIED
+**Gate I3:** CLOSED — REMOTE VERIFIED
 **Current implementation HEAD:** `1850d859285ee6db9f3446f8b10052ed34413e95`
-**Current active block:** Gate I3 closure / remote verification
-**Current next micro-step:** Remote CI evidence and formal Gate I3 closure
+**Current active block:** Slice 03 complete
+**Current next micro-step:** none
 
 ### Checkpoints concluídos
 
@@ -31,6 +31,7 @@ registra execução, checkpoints, commits, CI e o próximo passo.
 | SA-B009.4 — Authenticated Local WebSocket Boundary | DONE — REMOTE VERIFIED | Feature `624024444441790bf0d790fef51d4011edab1e40`; docs closeout `80ad7fd53c23f682d509be7e43d4dd427022a471` |
 | SA-B009.5a — Interruption / Barge-in / Wire Controls | DONE — REMOTE VERIFIED | Core checkpoint `3fb137f41e22bad731cb2c15ea66afde84f48aab`; WebSocket/vertical checkpoint `48b635d0decf0489657070cafe8718f082d91ebc`; GitHub Actions run `34434466878` SUCCESS |
 | SA-B009.5b — Provider Session Loss & Failure Lifecycle | DONE — REMOTE VERIFIED | Checkpoint `49452368a28529801f60d525fc1ac3917364fead` — `feat(realtime): harden provider session lifecycle`; GitHub Actions run `34545185395` SUCCESS |
+| SA-B009.5c–SA-B009.6 — Resource Bounds, Final Hardening & OpenAI Adapter | DONE — REMOTE VERIFIED | Feature `1850d859285ee6db9f3446f8b10052ed34413e95`; final Gate CI run `34668230824` SUCCESS |
 
 ### SA-B009.5a — ledger de micro-steps
 
@@ -176,7 +177,7 @@ Decisões operacionais de 5c:
 
 ### SA-B009.5d — Final Hardening / Gate Evidence
 
-**Status:** DONE — LOCAL VERIFIED; remote CI pending.
+**Status:** DONE — REMOTE VERIFIED.
 
 - Client-initiated `session.close` agora encaminha `session.closed` antes do
   WebSocket `1000`; o boundary aguarda o único sender já responsável pela ordem
@@ -188,7 +189,7 @@ Decisões operacionais de 5c:
 
 ### SA-B009.6 — OpenAI Realtime Adapter
 
-**Status:** DONE — LOCAL VERIFIED; remote CI pending.
+**Status:** DONE — REMOTE VERIFIED.
 
 **Checkpoint de código:** `1850d859285ee6db9f3446f8b10052ed34413e95` —
 `feat(realtime): finish realtime hardening and OpenAI adapter`
@@ -215,10 +216,10 @@ Não há timeout explícito para `provider.close()`, slow client ou shutdown glo
 Não foi introduzido timeout arbitrário: o lifecycle cooperativo já cobre o Gate;
 uma política de deadline depende de requisito operacional do adapter/host real.
 
-### Próximo bloco operacional
+### Fechamento operacional
 
-Nenhum novo subpass de Slice 03 está autorizado antes da verificação remota e do
-fechamento formal do Gate I3. `SA-B009.6` não é mais subsequent.
+O CI final do Gate, GitHub Actions run `34668230824`, concluiu `SUCCESS`. Slice
+03 e Gate I3 estão fechados; `SA-B009.6` não é mais subsequent.
 
 Regra do ledger: em cada checkpoint remoto relevante, atualizar o status do
 micro-step, registrar commit SHA, registrar CI quando aplicável, registrar nova
