@@ -1,6 +1,11 @@
 """Core-owned authorization and safe Tool execution boundaries."""
 
+from sofias_assistant.execution.agents import AgentRegistry, AgentRuntime, RootAuthority
+from sofias_assistant.execution.dispatcher import ExecutionDispatcher
 from sofias_assistant.execution.models import (
+    AgentDefinition,
+    AgentRun,
+    AgentRunStatus,
     ArtifactRef,
     ArtifactRetention,
     AuthorityContext,
@@ -12,6 +17,11 @@ from sofias_assistant.execution.models import (
     PermissionGrant,
     PolicyDecision,
     PolicyRequest,
+    SpecializationRequest,
+    Task,
+    TaskAttempt,
+    TaskExecutionStrategy,
+    TaskStatus,
     ToolCall,
     ToolError,
     ToolExecutionMode,
@@ -20,6 +30,7 @@ from sofias_assistant.execution.models import (
     ToolSpec,
 )
 from sofias_assistant.execution.runtime import ExecutionRuntime
+from sofias_assistant.execution.task_runtime import TaskRuntime
 
 __all__ = [
     "ArtifactRef",
@@ -29,6 +40,19 @@ __all__ = [
     "DecisionOutcome",
     "Delegation",
     "ExecutionRuntime",
+    "ExecutionDispatcher",
+    "TaskRuntime",
+    "AgentRegistry",
+    "AgentRuntime",
+    "RootAuthority",
+    "AgentDefinition",
+    "AgentRun",
+    "AgentRunStatus",
+    "SpecializationRequest",
+    "Task",
+    "TaskAttempt",
+    "TaskExecutionStrategy",
+    "TaskStatus",
     "GrantLifetime",
     "GrantStatus",
     "PermissionGrant",

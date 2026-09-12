@@ -10,7 +10,7 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.persistence.database import SQLITE_BUSY_TIMEOUT_MS
 from sofias_assistant.runtime import bootstrap_runtime
 
-HEAD_REVISION = "0005_safe_execution_schema"
+HEAD_REVISION = "0006_task_agent_execution"
 EXPECTED_TABLES = {
     "alembic_version",
     "application_settings",
@@ -23,6 +23,10 @@ EXPECTED_TABLES = {
     "policy_decisions",
     "tool_calls",
     "artifacts",
+    "tasks",
+    "task_attempts",
+    "agent_definitions",
+    "agent_runs",
 }
 
 

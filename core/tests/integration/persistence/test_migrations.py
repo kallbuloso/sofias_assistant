@@ -28,12 +28,16 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0005_safe_execution_schema"
+HEAD_REVISION = "0006_task_agent_execution"
 DOMAIN_TABLES = {
     "application_settings",
     "conversations",
     "runtime_sessions",
     "turns",
+    "tasks",
+    "task_attempts",
+    "agent_definitions",
+    "agent_runs",
 }
 
 

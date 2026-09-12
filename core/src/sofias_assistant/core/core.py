@@ -13,7 +13,7 @@ from sofias_assistant.core.composition import (
     ConversationDependenciesFactory,
     ConversationRuntimeDependencies,
 )
-from sofias_assistant.execution import ExecutionRuntime
+from sofias_assistant.execution import AgentRuntime, ExecutionRuntime, TaskRuntime
 from sofias_assistant.health.models import (
     ComponentHealth,
     HealthStatus,
@@ -74,6 +74,8 @@ class SofiaCore:
         self._session_lifecycle: RuntimeSessionLifecycle | None = None
         self._secret_service: SecretService | None = None
         self._execution_runtime: ExecutionRuntime | None = None
+        self._task_runtime: TaskRuntime | None = None
+        self._agent_runtime: AgentRuntime | None = None
         self._instance_ownership: InstanceOwnership | None = None
         self._instance_ownership_acquired = False
         self._conversation_runtime: TextConversationRuntime | None = None
@@ -124,6 +126,26 @@ class SofiaCore:
         return self._execution_runtime
 
     @property
+    def task_runtime(self) -> TaskRuntime:
+        """Return Core-owned durable Task execution while running."""
+
+        if self._state is not CoreState.RUNNING or self._task_runtime is None:
+            raise RuntimeError(
+                "Task Runtime is only available while SofiaCore is running"
+            )
+        return self._task_runtime
+
+    @property
+    def agent_runtime(self) -> AgentRuntime:
+        """Return Core-owned root Agent runtime while running."""
+
+        if self._state is not CoreState.RUNNING or self._agent_runtime is None:
+            raise RuntimeError(
+                "Agent Runtime is only available while SofiaCore is running"
+            )
+        return self._agent_runtime
+
+    @property
     def conversation_runtime(self) -> TextConversationRuntime:
         """Return the Core-owned conversation runtime while it is configured and running."""
 
@@ -171,6 +193,8 @@ class SofiaCore:
                 self._resources.session_factory,
                 artifact_root=self._config.paths.data_dir / "artifacts",
             )
+            self._task_runtime = TaskRuntime(self._execution_runtime)
+            self._agent_runtime = AgentRuntime(self._execution_runtime)
             self._compose_conversation_runtime()
             self._health = RuntimeHealthSnapshot(
                 (
@@ -210,6 +234,16 @@ class SofiaCore:
                 await realtime_runtime.close_all()
             except BaseException as error:
                 primary_error = error
+        if self._agent_runtime is not None:
+            try:
+                await self._agent_runtime.stop()
+            except BaseException as error:
+                primary_error = primary_error or error
+        if self._task_runtime is not None:
+            try:
+                await self._task_runtime.stop()
+            except BaseException as error:
+                primary_error = primary_error or error
         try:
             await lifecycle.stop()
         except BaseException as error:
@@ -272,6 +306,8 @@ class SofiaCore:
         self._session_lifecycle = None
         self._secret_service = None
         self._execution_runtime = None
+        self._task_runtime = None
+        self._agent_runtime = None
         self._instance_ownership = None
         self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())

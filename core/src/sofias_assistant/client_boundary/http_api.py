@@ -36,7 +36,7 @@ from sofias_assistant.conversation.runtime import (
     SendTextCommand,
 )
 from sofias_assistant.core.core import CoreState
-from sofias_assistant.execution import ExecutionRuntime
+from sofias_assistant.execution import ExecutionRuntime, TaskRuntime
 from sofias_assistant.execution.models import GrantLifetime, ToolCall
 from sofias_assistant.health.models import (
     ComponentHealth,
@@ -352,6 +352,38 @@ class ConfirmationDecisionRequest(BaseModel):
     lifetime: GrantLifetime = GrantLifetime.ONE_SHOT
 
 
+class TaskCreateRequest(BaseModel):
+    """Authenticated request to enqueue one durable Tool-backed Task."""
+
+    objective: str
+    tool_name: str
+    arguments: dict[str, Any] = {}
+    grant_id: UUID | None = None
+
+    @field_validator("objective", "tool_name")
+    @classmethod
+    def _require_task_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("task fields must not be blank")
+        return value
+
+
+class TaskResponse(BaseModel):
+    id: UUID
+    objective: str
+    status: str
+    result: Any = None
+    error_code: str | None = None
+    error_message: str | None = None
+    cancellation_requested: bool
+    confirmation_id: UUID | None = None
+
+
+class TaskCancelResponse(BaseModel):
+    id: UUID
+    status: str
+
+
 class TurnStartedRecord(BaseModel):
     type: Literal["turn_started"] = "turn_started"
     conversation: ConversationResponse
@@ -423,6 +455,7 @@ def create_local_http_app(
     conversation: ConversationHttpApi | None = None,
     realtime: RealtimeConversationApi | None = None,
     execution: ExecutionRuntime | None = None,
+    tasks: TaskRuntime | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -678,6 +711,83 @@ def create_local_http_app(
             except FileNotFoundError:
                 raise _artifact_not_found() from None
             return Response(content=content, media_type=ref.media_type)
+
+    if tasks is not None:
+
+        def _task_response(task: Any) -> TaskResponse:
+            return TaskResponse(
+                id=task.id,
+                objective=task.objective,
+                status=task.status.value,
+                result=task.result,
+                error_code=task.error.code if task.error is not None else None,
+                error_message=task.error.message if task.error is not None else None,
+                cancellation_requested=task.cancellation_requested,
+                confirmation_id=tasks.pending_confirmation(task.id),
+            )
+
+        @app.post("/api/v1/tasks", response_model=TaskResponse, status_code=201)
+        async def create_task(
+            request: TaskCreateRequest,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> TaskResponse:
+            call = ToolCall(
+                name=request.tool_name,
+                arguments=request.arguments,
+                subject=f"client:{session.id}",
+                session_id=session.id,
+            )
+            task = await tasks.create_task(
+                objective=request.objective,
+                subject=call.subject,
+                tool_call=call,
+                grant_id=request.grant_id,
+            )
+            return _task_response(task)
+
+        @app.get("/api/v1/tasks/{task_id}", response_model=TaskResponse)
+        async def get_task(
+            task_id: UUID,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> TaskResponse:
+            task = await tasks.get_task(task_id)
+            if task is None or task.subject != f"client:{session.id}":
+                raise HTTPException(status_code=404, detail="Task not found")
+            return _task_response(task)
+
+        @app.post("/api/v1/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
+        async def cancel_task(
+            task_id: UUID,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> TaskCancelResponse:
+            try:
+                existing = await tasks.get_task(task_id)
+                if existing is None or existing.subject != f"client:{session.id}":
+                    raise KeyError("Task not found")
+                task = await tasks.cancel_task(task_id)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Task not found") from None
+            return TaskCancelResponse(id=task.id, status=task.status.value)
+
+        @app.post(
+            "/api/v1/tasks/{task_id}/confirmations/{confirmation_id}/approve",
+            response_model=TaskResponse,
+        )
+        async def approve_task_confirmation(
+            task_id: UUID,
+            confirmation_id: UUID,
+            session: Annotated[ClientSession, Depends(require_session)],
+        ) -> TaskResponse:
+            try:
+                existing = await tasks.get_task(task_id)
+                if existing is None or existing.subject != f"client:{session.id}":
+                    raise KeyError("Task not found")
+                task = await tasks.approve_confirmation(task_id, confirmation_id)
+            except (KeyError, ValueError):
+                raise HTTPException(
+                    status_code=404, detail="Task confirmation not found"
+                ) from None
+            return _task_response(task)
 
     return app
 

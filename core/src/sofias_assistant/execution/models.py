@@ -47,6 +47,42 @@ class ToolExecutionMode(StrEnum):
     """Execution modes reserved by the approved architecture."""
 
     IN_PROCESS = "IN_PROCESS"
+    SUBPROCESS = "SUBPROCESS"
+    SANDBOX = "SANDBOX"
+
+
+class TaskStatus(StrEnum):
+    """Durable lifecycle states for Core-owned work."""
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+    WAITING_EXTERNAL = "WAITING_EXTERNAL"
+    WAITING_SCHEDULE = "WAITING_SCHEDULE"
+    PAUSED = "PAUSED"
+    CANCELLING = "CANCELLING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class TaskExecutionStrategy(StrEnum):
+    """Explicit choice between a durable Tool task and an Agent run."""
+
+    DIRECT_TOOL = "DIRECT_TOOL"
+    WORKFLOW = "WORKFLOW"
+    AGENT = "AGENT"
+
+
+class AgentRunStatus(StrEnum):
+    """Lifecycle of one concrete Agent execution."""
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class ToolSideEffect(StrEnum):
@@ -225,6 +261,10 @@ class ToolSpec:
     timeout_seconds: float = 30.0
     idempotent: bool = True
     enabled: bool = True
+    subprocess_command: tuple[str, ...] | None = None
+    subprocess_cwd: str | None = None
+    subprocess_environment: Mapping[str, str] = field(default_factory=dict)
+    subprocess_output_limit_bytes: int = 64 * 1024
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -237,6 +277,13 @@ class ToolSpec:
                 raise ValueError(f"ToolSpec {name} must not be blank")
         if self.timeout_seconds <= 0:
             raise ValueError("ToolSpec timeout_seconds must be positive")
+        if self.subprocess_output_limit_bytes <= 0:
+            raise ValueError("subprocess_output_limit_bytes must be positive")
+        if (
+            self.execution_mode is ToolExecutionMode.SUBPROCESS
+            and not self.subprocess_command
+        ):
+            raise ValueError("SUBPROCESS tools require subprocess_command")
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +294,105 @@ class ToolCall:
     arguments: Mapping[str, Any]
     subject: str
     session_id: UUID | None = None
+    id: UUID = field(default_factory=uuid4)
+
+
+@dataclass(frozen=True, slots=True)
+class Task:
+    """Durable work identity and lifecycle snapshot."""
+
+    objective: str
+    subject: str
+    status: TaskStatus = TaskStatus.QUEUED
+    origin: str = "client"
+    authority: AuthorityContext | None = None
+    conversation_id: UUID | None = None
+    delegation_id: UUID | None = None
+    execution_strategy: TaskExecutionStrategy = TaskExecutionStrategy.DIRECT_TOOL
+    result: Any = None
+    error: ToolError | None = None
+    cancellation_requested: bool = False
+    claimed_by: str | None = None
+    claim_expires_at: datetime | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    id: UUID = field(default_factory=uuid4)
+
+    def __post_init__(self) -> None:
+        if not self.objective.strip() or not self.subject.strip():
+            raise ValueError("Task objective and subject must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAttempt:
+    """Append-only execution attempt evidence for a Task."""
+
+    task_id: UUID
+    attempt_number: int
+    status: TaskStatus = TaskStatus.QUEUED
+    tool_call_id: UUID | None = None
+    execution_mode: ToolExecutionMode | None = None
+    process_id: int | None = None
+    result: Any = None
+    error: ToolError | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    id: UUID = field(default_factory=uuid4)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDefinition:
+    """Versioned, registered Agent capability metadata."""
+
+    name: str
+    version: str
+    description: str
+    required_capabilities: frozenset[str]
+    allowed_tools: frozenset[str]
+    context_policy: str = "task_minimal"
+    provider_requirements: Mapping[str, Any] = field(default_factory=dict)
+    runtime_limits: Mapping[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    id: UUID = field(default_factory=uuid4)
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or not self.version.strip():
+            raise ValueError("Agent identity must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRun:
+    """Concrete Agent execution with narrowed context and authority."""
+
+    task_id: UUID
+    agent_definition_id: UUID
+    agent_definition_version: str
+    objective: str
+    delegated_context: Mapping[str, Any]
+    authority_scope: str
+    allowed_tools: frozenset[str]
+    status: AgentRunStatus = AgentRunStatus.QUEUED
+    workspace: str | None = None
+    provider_requirements: Mapping[str, Any] = field(default_factory=dict)
+    runtime_limits: Mapping[str, Any] = field(default_factory=dict)
+    result: Any = None
+    correlation_id: UUID = field(default_factory=uuid4)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    id: UUID = field(default_factory=uuid4)
+
+
+@dataclass(frozen=True, slots=True)
+class SpecializationRequest:
+    """Structured request returned to root instead of nested Agent creation."""
+
+    agent_run_id: UUID
+    objective: str
+    requested_tools: frozenset[str]
+    reason: str
     id: UUID = field(default_factory=uuid4)
 
 

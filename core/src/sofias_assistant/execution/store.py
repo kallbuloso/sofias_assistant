@@ -8,12 +8,15 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sofias_assistant.execution.models import (
+    AgentDefinition,
+    AgentRun,
     ArtifactRef,
     ArtifactRetention,
+    AuthorityContext,
     ConfirmationRequest,
     ConfirmationStatus,
     Delegation,
@@ -21,16 +24,25 @@ from sofias_assistant.execution.models import (
     GrantStatus,
     PermissionGrant,
     PolicyDecision,
+    Task,
+    TaskAttempt,
+    TaskExecutionStrategy,
+    TaskStatus,
     ToolCall,
     ToolError,
+    ToolExecutionMode,
     ToolResult,
 )
 from sofias_assistant.persistence.models import (
+    AgentDefinitionRecord,
+    AgentRunRecord,
     ArtifactRecord,
     ConfirmationRequestRecord,
     DelegationRecord,
     PermissionGrantRecord,
     PolicyDecisionRecord,
+    TaskAttemptRecord,
+    TaskRecord,
     ToolCallRecord,
 )
 
@@ -235,6 +247,94 @@ class ExecutionStore:
                 record.relative_path,
             )
 
+    async def save_task(self, task: Task) -> None:
+        async with self._session_factory() as session:
+            session.add(_task_record(task))
+            await session.commit()
+
+    async def get_task(self, task_id: UUID) -> Task | None:
+        async with self._session_factory() as session:
+            record = await session.get(TaskRecord, task_id)
+            return _task_from_record(record) if record is not None else None
+
+    async def update_task(self, task: Task) -> None:
+        async with self._session_factory() as session:
+            record = await session.get(TaskRecord, task.id)
+            if record is None:
+                raise KeyError("Task not found")
+            for key, value in _task_record_values(task).items():
+                setattr(record, key, value)
+            await session.commit()
+
+    async def claim_task(self, task_id: UUID, owner: str) -> Task | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                update(TaskRecord)
+                .where(
+                    TaskRecord.id == task_id,
+                    TaskRecord.status == TaskStatus.QUEUED.value,
+                    TaskRecord.claimed_by.is_(None),
+                )
+                .values(
+                    status=TaskStatus.RUNNING.value,
+                    claimed_by=owner,
+                    started_at=datetime.now(call_created_timezone()),
+                    updated_at=datetime.now(call_created_timezone()),
+                )
+            )
+            await session.commit()
+            if getattr(result, "rowcount", 0) != 1:
+                return None
+            record = await session.get(TaskRecord, task_id)
+            return _task_from_record(record) if record is not None else None
+
+    async def save_task_attempt(self, attempt: TaskAttempt) -> None:
+        async with self._session_factory() as session:
+            session.add(_task_attempt_record(attempt))
+            await session.commit()
+
+    async def update_task_attempt(self, attempt: TaskAttempt) -> None:
+        async with self._session_factory() as session:
+            record = await session.get(TaskAttemptRecord, attempt.id)
+            if record is None:
+                raise KeyError("Task attempt not found")
+            for key, value in _task_attempt_record_values(attempt).items():
+                setattr(record, key, value)
+            await session.commit()
+
+    async def list_task_attempts(self, task_id: UUID) -> tuple[TaskAttempt, ...]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(TaskAttemptRecord)
+                .where(TaskAttemptRecord.task_id == task_id)
+                .order_by(TaskAttemptRecord.attempt_number)
+            )
+            return tuple(_task_attempt_from_record(row) for row in result.scalars())
+
+    async def save_agent_definition(self, definition: AgentDefinition) -> None:
+        async with self._session_factory() as session:
+            session.add(_agent_definition_record(definition))
+            await session.commit()
+
+    async def get_agent_definition(self, definition_id: UUID) -> AgentDefinition | None:
+        async with self._session_factory() as session:
+            record = await session.get(AgentDefinitionRecord, definition_id)
+            return _agent_definition_from_record(record) if record is not None else None
+
+    async def save_agent_run(self, run: AgentRun) -> None:
+        async with self._session_factory() as session:
+            session.add(_agent_run_record(run))
+            await session.commit()
+
+    async def update_agent_run(self, run: AgentRun) -> None:
+        async with self._session_factory() as session:
+            record = await session.get(AgentRunRecord, run.id)
+            if record is None:
+                raise KeyError("AgentRun not found")
+            for key, value in _agent_run_record_values(run).items():
+                setattr(record, key, value)
+            await session.commit()
+
 
 def call_created_timezone() -> Any:
     from datetime import UTC
@@ -384,3 +484,179 @@ def _confirmation_from_record(record: ConfirmationRequestRecord) -> Confirmation
         resolved_at=record.resolved_at,
         grant_id=record.grant_id,
     )
+
+
+def _task_record(task: Task) -> TaskRecord:
+    return TaskRecord(**_task_record_values(task), id=task.id)
+
+
+def _task_record_values(task: Task) -> dict[str, Any]:
+    return {
+        "objective": task.objective,
+        "origin": task.origin,
+        "subject": task.subject,
+        "status": task.status.value,
+        "authority_json": _encode(
+            {
+                "subject": task.authority.subject if task.authority else task.subject,
+                "session_id": str(task.authority.session_id)
+                if task.authority and task.authority.session_id
+                else None,
+                "root_subject": task.authority.root_subject if task.authority else None,
+            }
+        ),
+        "conversation_id": task.conversation_id,
+        "delegation_id": task.delegation_id,
+        "execution_strategy": task.execution_strategy.value,
+        "result_json": json.dumps(task.result, default=_json_default)
+        if task.result is not None
+        else None,
+        "error_code": task.error.code if task.error else None,
+        "error_message": task.error.message if task.error else None,
+        "cancellation_requested": task.cancellation_requested,
+        "claimed_by": task.claimed_by,
+        "claim_expires_at": task.claim_expires_at,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "started_at": task.started_at,
+        "finished_at": task.finished_at,
+    }
+
+
+def _task_from_record(record: TaskRecord) -> Task:
+    authority = json.loads(record.authority_json)
+    return Task(
+        id=record.id,
+        objective=record.objective,
+        origin=record.origin,
+        subject=record.subject,
+        status=TaskStatus(record.status),
+        authority=AuthorityContext(
+            authority["subject"],
+            UUID(authority["session_id"]) if authority.get("session_id") else None,
+            authority.get("root_subject"),
+        ),
+        conversation_id=record.conversation_id,
+        delegation_id=record.delegation_id,
+        execution_strategy=TaskExecutionStrategy(record.execution_strategy),
+        result=json.loads(record.result_json) if record.result_json else None,
+        error=(
+            ToolError(record.error_code, record.error_message or "Task failed")
+            if record.error_code
+            else None
+        ),
+        cancellation_requested=record.cancellation_requested,
+        claimed_by=record.claimed_by,
+        claim_expires_at=record.claim_expires_at,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )
+
+
+def _task_attempt_record(attempt: TaskAttempt) -> TaskAttemptRecord:
+    return TaskAttemptRecord(**_task_attempt_record_values(attempt), id=attempt.id)
+
+
+def _task_attempt_record_values(attempt: TaskAttempt) -> dict[str, Any]:
+    return {
+        "task_id": attempt.task_id,
+        "attempt_number": attempt.attempt_number,
+        "status": attempt.status.value,
+        "tool_call_id": attempt.tool_call_id,
+        "execution_mode": attempt.execution_mode.value
+        if attempt.execution_mode
+        else None,
+        "process_id": attempt.process_id,
+        "result_json": json.dumps(attempt.result, default=_json_default)
+        if attempt.result is not None
+        else None,
+        "error_code": attempt.error.code if attempt.error else None,
+        "error_message": attempt.error.message if attempt.error else None,
+        "started_at": attempt.started_at,
+        "finished_at": attempt.finished_at,
+    }
+
+
+def _task_attempt_from_record(record: TaskAttemptRecord) -> TaskAttempt:
+    return TaskAttempt(
+        id=record.id,
+        task_id=record.task_id,
+        attempt_number=record.attempt_number,
+        status=TaskStatus(record.status),
+        tool_call_id=record.tool_call_id,
+        execution_mode=(
+            ToolExecutionMode(record.execution_mode) if record.execution_mode else None
+        ),
+        process_id=record.process_id,
+        result=json.loads(record.result_json) if record.result_json else None,
+        error=(
+            ToolError(record.error_code, record.error_message or "Task failed")
+            if record.error_code
+            else None
+        ),
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )
+
+
+def _agent_definition_record(definition: AgentDefinition) -> AgentDefinitionRecord:
+    return AgentDefinitionRecord(
+        id=definition.id,
+        name=definition.name,
+        version=definition.version,
+        description=definition.description,
+        required_capabilities_json=_encode(
+            {"values": sorted(definition.required_capabilities)}
+        ),
+        allowed_tools_json=_encode({"values": sorted(definition.allowed_tools)}),
+        context_policy=definition.context_policy,
+        provider_requirements_json=_encode(definition.provider_requirements),
+        runtime_limits_json=_encode(definition.runtime_limits),
+        enabled=definition.enabled,
+    )
+
+
+def _agent_definition_from_record(record: AgentDefinitionRecord) -> AgentDefinition:
+    return AgentDefinition(
+        id=record.id,
+        name=record.name,
+        version=record.version,
+        description=record.description,
+        required_capabilities=frozenset(
+            json.loads(record.required_capabilities_json)["values"]
+        ),
+        allowed_tools=frozenset(json.loads(record.allowed_tools_json)["values"]),
+        context_policy=record.context_policy,
+        provider_requirements=json.loads(record.provider_requirements_json),
+        runtime_limits=json.loads(record.runtime_limits_json),
+        enabled=record.enabled,
+    )
+
+
+def _agent_run_record(run: AgentRun) -> AgentRunRecord:
+    return AgentRunRecord(**_agent_run_record_values(run), id=run.id)
+
+
+def _agent_run_record_values(run: AgentRun) -> dict[str, Any]:
+    return {
+        "task_id": run.task_id,
+        "agent_definition_id": run.agent_definition_id,
+        "agent_definition_version": run.agent_definition_version,
+        "objective": run.objective,
+        "delegated_context_json": _encode(run.delegated_context),
+        "authority_scope": run.authority_scope,
+        "allowed_tools_json": _encode({"values": sorted(run.allowed_tools)}),
+        "status": run.status.value,
+        "workspace": run.workspace,
+        "provider_requirements_json": _encode(run.provider_requirements),
+        "runtime_limits_json": _encode(run.runtime_limits),
+        "result_json": json.dumps(run.result, default=_json_default)
+        if run.result is not None
+        else None,
+        "correlation_id": run.correlation_id,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+    }

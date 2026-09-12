@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +12,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sofias_assistant.execution.artifacts import ArtifactService
+from sofias_assistant.execution.dispatcher import ExecutionDispatcher
 from sofias_assistant.execution.models import (
     AuthorityContext,
     ConfirmationRequest,
@@ -47,6 +47,7 @@ class ExecutionRuntime:
         self.registry = ToolRegistry()
         self.policy = PolicyEngine(self.store.get_grant)
         self.artifacts = ArtifactService(artifact_root, self.store)
+        self.dispatcher = ExecutionDispatcher()
         self._lock = asyncio.Lock()
 
     def register_tool(self, spec: ToolSpec) -> None:
@@ -220,23 +221,31 @@ class ExecutionRuntime:
             )
             try:
                 async with asyncio.timeout(spec.timeout_seconds):
-                    value = spec.handler(arguments)
-                    if inspect.isawaitable(value):
-                        value = await value
-                if isinstance(value, ToolResult):
+                    dispatched = await self.dispatcher.dispatch(
+                        spec, arguments, call_id=call.id
+                    )
+                if dispatched.status != "SUCCEEDED":
+                    result = ToolResult(
+                        status="FAILED",
+                        call_id=call.id,
+                        error=dispatched.error
+                        or ToolError("TOOL_FAILED", "Tool execution failed"),
+                        decision=decision,
+                    )
+                elif isinstance(dispatched.value, ToolResult):
                     result = ToolResult(
                         status="SUCCEEDED",
                         call_id=call.id,
-                        value=value.value,
-                        error=value.error,
+                        value=dispatched.value.value,
+                        error=dispatched.value.error,
                         decision=decision,
-                        artifact_refs=value.artifact_refs,
+                        artifact_refs=dispatched.value.artifact_refs,
                     )
                 else:
                     result = ToolResult(
                         status="SUCCEEDED",
                         call_id=call.id,
-                        value=value,
+                        value=dispatched.value,
                         decision=decision,
                     )
                 await self.store.save_tool_call(
