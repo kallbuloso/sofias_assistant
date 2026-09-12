@@ -1841,4 +1841,104 @@ Gate I4 execution checkpoint:
     Remote CI: run 34706985628 — success
     Remote CI URL: https://github.com/kallbuloso/sofias_assistant/actions/runs/34706985628
     Deferred findings: full Audit remains assigned to Gate I10; no I4 blockers
+
+---
+
+# 26. Execution Ledger
+
+Este ledger é a fonte versionada do estado operacional do Slice 04. Prompts
+e reports de chat não são source of truth. As decisões arquiteturais continuam
+pertencendo aos ADRs e às seções arquiteturais deste exec-plan. O ledger
+registra execução, checkpoints, commits, CI e o próximo passo, sem substituir
+as decisões normativas.
+
+## Estado atual
+
+```text
+Slice 04 status:
+    ACTIVE
+
+Current active Gate:
+    I10 — Sofia é Rastreável
+
+Current next micro-step:
+    SA-B030 — Audit Evidence
+
+Gate I4:
+    CLOSED — REMOTE VERIFIED
+
+Gate I5:
+    CLOSED — REMOTE VERIFIED
+
+Gate I10:
+    READY / NEXT GATE
+
+Current implementation HEAD:
+    83172549bc06a88f62bb0baddab8fa51acbbca25
+```
+
+## Gate I5 — Sofia Pode Trabalhar
+
+```text
+SA-B015 — Task Runtime:
+    DONE — REMOTE VERIFIED
+
+SA-B016 — Agent Runtime:
+    DONE — REMOTE VERIFIED
+
+SA-B017 — Execution Isolation:
+    DONE — REMOTE VERIFIED
+
+Feature checkpoint:
+    83172549bc06a88f62bb0baddab8fa51acbbca25
+    feat(execution): add durable task agent and isolation runtime
+
+GitHub Actions:
+    run 34710780395 — SUCCESS
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/34710780395
+
+Local full regression:
+    533 collected; 530 passed; 3 skipped; 0 failed; 0 warnings
+```
+
+### Evidência operacional
+
+- Task é uma unidade durável separada de Direct Invocation, com estados
+  `QUEUED`, `RUNNING`, `WAITING_CONFIRMATION`, `CANCELLING`, `SUCCEEDED`,
+  `FAILED` e `CANCELLED`, claim local atômico em SQLite e histórico de
+  attempts.
+- Confirmation reutiliza o fluxo I4: o mesmo ToolCall mantém o Task em
+  `WAITING_CONFIRMATION` até aprovação válida; waiting não é failure.
+- Cancellation propaga para o trabalho ativo e para o processo SUBPROCESS
+  pertencente à execução atual, sem rollback fictício.
+- AgentDefinition possui registry próprio; AgentRun é criado somente pelo
+  token opaco de root, recebe contexto, authority e subset de Tools reduzidos,
+  e só pode solicitar especialização de forma estruturada.
+- Toda execução autorizada continua passando por `ExecutionRuntime` e agora
+  por um único `ExecutionDispatcher`: IN_PROCESS preserva I4, SUBPROCESS usa
+  `asyncio.create_subprocess_exec` sem shell, environment filtrado, timeout,
+  cancellation e limites de stdout/stderr; SANDBOX falha fechado sem fallback.
+- A migração 0006 adiciona somente `tasks`, `task_attempts`,
+  `agent_definitions` e `agent_runs`; nenhum segredo é persistido.
+- A boundary autenticada permite criar, ler, observar e cancelar Task, mas
+  não expõe endpoint para criar AgentRun diretamente.
+
+### Reference harvest
+
+A leitura dirigida de Mark LI foi usada apenas como referência de skills
+autodescritivas, tarefas duráveis e confirmação explícita; a leitura de
+Brahma AI foi usada apenas para comparar separação entre planner/executor e
+fila de tarefas. A implementação foi clean-room, adaptada aos ADRs e à
+authority model do Sofia's Assistant, sem cópia de código:
+
+- https://github.com/FatihMakes/Mark-LI
+- https://github.com/SanjayGanesh614/Brahma-Ai
+
+## Regras do próximo passo
+
+Gate I10 permanece separado deste checkpoint. SA-B018–SA-B034, incluindo
+full recovery, capabilities de produção e Experimental Agent, continuam
+deferred conforme as seções de não-objetivos deste documento. O próximo
+checkpoint deve atualizar status, SHA, CI, decisões congeladas e `NEXT`, sem
+registrar logs brutos ou prompts completos.
 ```
