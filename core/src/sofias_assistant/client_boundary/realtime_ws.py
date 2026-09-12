@@ -389,7 +389,9 @@ class _Connection:
     async def _client_close(self, value: dict[str, object]) -> None:
         session_id = self._require_session(value)
         await self._realtime.close_session(session_id)
-        await self._close(1000)
+        sender = self._sender
+        if sender is not None:
+            await sender
         self._realtime_session_id = None
 
     async def _forward_events(self, session_id: RealtimeSessionId) -> None:

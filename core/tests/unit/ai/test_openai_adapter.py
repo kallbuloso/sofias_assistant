@@ -26,15 +26,28 @@ from sofias_assistant.ai.contracts import (
     AIMessage,
     AIMessageRole,
     AIRequest,
+    AssistantAudioChunk,
+    AssistantTranscriptFinal,
+    AudioEncoding,
+    AudioFormat,
+    AudioInputFrame,
     ModelIdentity,
     ProviderCompleted,
     ProviderErrorCategory,
     ProviderFailed,
     ProviderInvocationError,
+    RealtimeContextSeed,
+    RealtimeInteractionId,
+    RealtimeResponseCompleted,
+    RealtimeSessionFailed,
+    RealtimeSessionId,
+    RealtimeSessionRequest,
     StructuredOutputSpec,
     TextDelta,
+    UserTranscriptFinal,
 )
 from sofias_assistant.ai.providers import (
+    RealtimeProvider,
     StructuredOutputProvider,
     TextGenerationProvider,
     TextStreamingProvider,
@@ -90,6 +103,83 @@ class _Client:
         self.closed = True
 
 
+class _RealtimeNamespace:
+    def __init__(self, connection: "_RealtimeConnection") -> None:
+        self._connection = connection
+        self.calls: list[dict[str, object]] = []
+
+    def connect(self, **kwargs: object) -> "_RealtimeManager":
+        self.calls.append(kwargs)
+        return _RealtimeManager(self._connection)
+
+
+class _RealtimeManager:
+    def __init__(self, connection: "_RealtimeConnection") -> None:
+        self._connection = connection
+
+    async def enter(self) -> "_RealtimeConnection":
+        return self._connection
+
+
+class _RealtimeConnection:
+    def __init__(self, events: tuple[object, ...] = ()) -> None:
+        self._events = events
+        self.session = SimpleNamespace(update=self._update)
+        self.input_audio_buffer = SimpleNamespace(
+            append=self._append, commit=self._commit
+        )
+        self.response = SimpleNamespace(create=self._create, cancel=self._cancel)
+        self.conversation = SimpleNamespace(
+            item=SimpleNamespace(create=self._create_item)
+        )
+        self.session_updates: list[dict[str, object]] = []
+        self.audio: list[str] = []
+        self.commits = 0
+        self.responses: list[dict[str, object]] = []
+        self.items: list[dict[str, object]] = []
+        self.cancellations: list[dict[str, object]] = []
+        self.closed = False
+
+    async def _update(self, *, session: dict[str, object]) -> None:
+        self.session_updates.append(session)
+
+    async def _append(self, *, audio: str) -> None:
+        self.audio.append(audio)
+
+    async def _commit(self) -> None:
+        self.commits += 1
+
+    async def _create(self, *, response: dict[str, object]) -> None:
+        self.responses.append(response)
+
+    async def _cancel(self, **kwargs: object) -> None:
+        self.cancellations.append(kwargs)
+
+    async def _create_item(self, *, item: dict[str, object]) -> None:
+        self.items.append(item)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __aiter__(self) -> AsyncIterator[object]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[object]:
+        for event in self._events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event
+
+
+class _RealtimeClient:
+    def __init__(self, connection: _RealtimeConnection) -> None:
+        self.realtime = _RealtimeNamespace(connection)
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def _request() -> AIRequest:
     return AIRequest(
         uuid4(),
@@ -97,6 +187,26 @@ def _request() -> AIRequest:
             AIMessage(AIMessageRole.SYSTEM, "  system  "),
             AIMessage(AIMessageRole.USER, "  user  "),
             AIMessage(AIMessageRole.ASSISTANT, "  assistant  "),
+        ),
+    )
+
+
+def _audio_format() -> AudioFormat:
+    return AudioFormat(AudioEncoding.PCM16, 24_000, 1)
+
+
+def _realtime_request() -> RealtimeSessionRequest:
+    return RealtimeSessionRequest(
+        RealtimeSessionId(uuid4()),
+        _audio_format(),
+        _audio_format(),
+        RealtimeContextSeed(
+            (
+                AIMessage(AIMessageRole.SYSTEM, "Realtime system instruction."),
+                AIMessage(AIMessageRole.USER, "Previous user turn."),
+                AIMessage(AIMessageRole.ASSISTANT, "Previous assistant turn."),
+            ),
+            True,
         ),
     )
 
@@ -135,6 +245,126 @@ async def test_openai_adapter_maps_stateless_text_request_and_response() -> None
         }
     ]
     assert client.closed
+
+
+@pytest.mark.asyncio
+async def test_openai_realtime_adapter_normalizes_manual_ptt_audio_and_response() -> (
+    None
+):
+    provider_item_id = "provider-item"
+    provider_response_id = "provider-response"
+    audio = b"\x01\x02\x03\x04"
+    connection = _RealtimeConnection(
+        (
+            SimpleNamespace(
+                type="input_audio_buffer.committed", item_id=provider_item_id
+            ),
+            SimpleNamespace(
+                type="conversation.item.input_audio_transcription.completed",
+                item_id=provider_item_id,
+                transcript="spoken request",
+            ),
+            SimpleNamespace(
+                type="response.created",
+                response=SimpleNamespace(id=provider_response_id),
+            ),
+            SimpleNamespace(
+                type="response.output_audio.delta",
+                response_id=provider_response_id,
+                delta="AQIDBA==",
+            ),
+            SimpleNamespace(
+                type="response.output_audio_transcript.done",
+                response_id=provider_response_id,
+                transcript="spoken response",
+            ),
+            SimpleNamespace(
+                type="response.done",
+                response=SimpleNamespace(id=provider_response_id, status="completed"),
+            ),
+        )
+    )
+    client = _RealtimeClient(connection)
+    request = _realtime_request()
+    adapter = _adapter(client)
+
+    session = await adapter.open_realtime_session(
+        model=ModelIdentity("openai", "gpt-realtime"), request=request
+    )
+    interaction_id = RealtimeInteractionId(uuid4())
+    await session.start_interaction(realtime_interaction_id=interaction_id)
+    await session.send_audio(frame=AudioInputFrame(0, audio))
+    await session.commit_interaction(realtime_interaction_id=interaction_id)
+    events = [event async for event in session.events()]
+    await session.close()
+
+    assert client.realtime.calls == [{"model": "gpt-realtime", "max_retries": 0}]
+    assert connection.session_updates == [
+        {
+            "type": "realtime",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24_000},
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": None,
+                },
+                "output": {"format": {"type": "audio/pcm", "rate": 24_000}},
+            },
+            "output_modalities": ["audio"],
+            "instructions": "Realtime system instruction.",
+        }
+    ]
+    assert connection.items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Previous user turn."}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "input_text", "text": "Previous assistant turn."}],
+        },
+    ]
+    assert connection.audio == ["AQIDBA=="]
+    assert connection.commits == 1
+    assert connection.responses == [{"output_modalities": ["audio"]}]
+    assert [type(event) for event in events] == [
+        UserTranscriptFinal,
+        AssistantAudioChunk,
+        AssistantTranscriptFinal,
+        RealtimeResponseCompleted,
+    ]
+    assert [event.sequence for event in events] == [0, 1, 2, 3]
+    user_final, audio_chunk, assistant_final, _completed = events
+    assert isinstance(user_final, UserTranscriptFinal)
+    assert isinstance(audio_chunk, AssistantAudioChunk)
+    assert isinstance(assistant_final, AssistantTranscriptFinal)
+    assert user_final.text == "spoken request"
+    assert audio_chunk.audio == audio
+    assert audio_chunk.audio_format == _audio_format()
+    assert assistant_final.text == "spoken response"
+    assert connection.closed and client.closed
+
+
+@pytest.mark.asyncio
+async def test_openai_realtime_adapter_redacts_transport_failure_and_closes_once() -> (
+    None
+):
+    connection = _RealtimeConnection((RuntimeError("SDK SECRET INTERNAL"),))
+    client = _RealtimeClient(connection)
+    session = await _adapter(client).open_realtime_session(
+        model=ModelIdentity("openai", "gpt-realtime"), request=_realtime_request()
+    )
+
+    events = [event async for event in session.events()]
+    await session.close()
+    await session.close()
+
+    assert len(events) == 1 and isinstance(events[0], RealtimeSessionFailed)
+    assert events[0].error.safe_message == "OpenAI realtime session failed"
+    assert "SDK SECRET INTERNAL" not in repr(events[0])
+    assert connection.closed and client.closed
 
 
 @pytest.mark.asyncio
@@ -246,12 +476,17 @@ def _spec() -> StructuredOutputSpec:
 
 def _as_provider_protocols(
     provider: OpenAIProviderAdapter,
-) -> tuple[TextGenerationProvider, TextStreamingProvider, StructuredOutputProvider]:
-    return provider, provider, provider
+) -> tuple[
+    TextGenerationProvider,
+    TextStreamingProvider,
+    StructuredOutputProvider,
+    RealtimeProvider,
+]:
+    return provider, provider, provider, provider
 
 
 def test_openai_adapter_satisfies_provider_protocols() -> None:
-    assert len(_as_provider_protocols(_adapter(_Client()))) == 3
+    assert len(_as_provider_protocols(_adapter(_Client()))) == 4
 
 
 @pytest.mark.asyncio

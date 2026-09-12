@@ -1407,6 +1407,12 @@ async def test_gate_i3_real_post_transcript_session_loss_closes_and_allows_reope
                     }
                 )
             )
+            assert (await _control(socket)) == {
+                "protocol_version": "realtime.v1",
+                "type": "session.closed",
+                "sequence": 7,
+                "realtime_session_id": reopened_session_id,
+            }
             with pytest.raises(websockets.ConnectionClosed) as closed:
                 await socket.recv()
             assert closed.value.rcvd is not None
@@ -1613,6 +1619,12 @@ async def test_gate_i3_real_pre_transcript_session_loss_creates_no_turn(
                     }
                 )
             )
+            assert (await _control(socket)) == {
+                "protocol_version": "realtime.v1",
+                "type": "session.closed",
+                "sequence": 2,
+                "realtime_session_id": reopened["realtime_session_id"],
+            }
             with pytest.raises(websockets.ConnectionClosed) as closed:
                 await socket.recv()
             assert closed.value.rcvd is not None

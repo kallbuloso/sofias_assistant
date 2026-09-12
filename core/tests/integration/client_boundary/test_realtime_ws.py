@@ -719,6 +719,17 @@ async def test_session_close_closes_owned_core_session_once_and_stops_sender() -
                     }
                 )
             )
+            closed = await _control(socket)
+            assert closed == {
+                "protocol_version": "realtime.v1",
+                "type": "session.closed",
+                "sequence": 2,
+                "realtime_session_id": opened["realtime_session_id"],
+            }
+            with pytest.raises(websockets.ConnectionClosed) as socket_closed:
+                await socket.recv()
+            assert socket_closed.value.rcvd is not None
+            assert socket_closed.value.rcvd.code == 1000
         assert realtime._session_id is not None
         assert realtime.closed == [realtime._session_id]
         assert realtime.events_calls == 1
