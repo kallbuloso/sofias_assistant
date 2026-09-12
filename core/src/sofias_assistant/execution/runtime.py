@@ -12,6 +12,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sofias_assistant.execution.artifacts import ArtifactService
+from sofias_assistant.execution.audit import AuditService
 from sofias_assistant.execution.dispatcher import ExecutionDispatcher
 from sofias_assistant.execution.models import (
     AuthorityContext,
@@ -44,6 +45,7 @@ class ExecutionRuntime:
         artifact_root: Path,
     ) -> None:
         self.store = ExecutionStore(session_factory)
+        self.audit = AuditService(session_factory)
         self.registry = ToolRegistry()
         self.policy = PolicyEngine(self.store.get_grant)
         self.artifacts = ArtifactService(artifact_root, self.store)
@@ -80,6 +82,19 @@ class ExecutionRuntime:
             remaining_uses=1 if lifetime is GrantLifetime.ONE_SHOT else None,
         )
         await self.store.save_grant(grant)
+        await self.audit.record(
+            event_type="GRANT_CREATED",
+            actor=grant.subject,
+            subject=grant.subject,
+            action="grant.create",
+            resource=grant.resource_scope,
+            outcome="SUCCEEDED",
+            origin="SYSTEM_RUNTIME",
+            correlation_id=grant.id,
+            grant_id=grant.id,
+            authority_context={"capability": grant.capability},
+            metadata={"lifetime": grant.lifetime.value},
+        )
         return grant
 
     async def create_delegation(
@@ -101,10 +116,35 @@ class ExecutionRuntime:
             expires_at=expires_at,
         )
         await self.store.save_delegation(delegation)
+        await self.audit.record(
+            event_type="DELEGATION_CREATED",
+            actor=delegation.subject,
+            subject=delegation.subject,
+            action="delegation.create",
+            resource=delegation.resource_scope,
+            outcome="SUCCEEDED",
+            origin="SYSTEM_RUNTIME",
+            correlation_id=delegation.id,
+            delegation_id=delegation.id,
+            metadata={"authority_scope": delegation.authority_scope},
+        )
         return delegation
 
     async def revoke_grant(self, grant_id: UUID) -> bool:
-        return await self.store.revoke_grant(grant_id, datetime.now(UTC))
+        revoked = await self.store.revoke_grant(grant_id, datetime.now(UTC))
+        if revoked:
+            await self.audit.record(
+                event_type="GRANT_REVOKED",
+                actor="Sofia/root",
+                subject="Sofia/root",
+                action="grant.revoke",
+                resource=str(grant_id),
+                outcome="SUCCEEDED",
+                origin="SYSTEM_RUNTIME",
+                correlation_id=grant_id,
+                grant_id=grant_id,
+            )
+        return revoked
 
     async def invoke(
         self,
@@ -113,6 +153,19 @@ class ExecutionRuntime:
         grant_id: UUID | None = None,
     ) -> ToolResult:
         async with self._lock:
+            await self.audit.record(
+                event_type="TOOL_CALL_REQUESTED",
+                actor=call.subject,
+                subject=call.subject,
+                action=call.name,
+                resource=call.name,
+                outcome="REQUESTED",
+                origin="DIRECT_INVOCATION",
+                correlation_id=call.correlation_id,
+                causation_id=call.causation_id,
+                tool_call_id=call.id,
+                metadata={"argument_keys": sorted(call.arguments)},
+            )
             existing = await self.store.get_tool_call(call.id)
             if existing is not None:
                 _, prior, status = existing
@@ -137,10 +190,12 @@ class ExecutionRuntime:
                     call, "UNREGISTERED_TOOL", "Tool is not registered"
                 )
                 await self.store.save_tool_call(call, status="DENIED", result=result)
+                await self._audit_result(call, result, None, call.name, None)
                 return result
             if not spec.enabled:
                 result = self._error(call, "TOOL_DISABLED", "Tool is disabled")
                 await self.store.save_tool_call(call, status="DENIED", result=result)
+                await self._audit_result(call, result, None, call.name, None)
                 return result
             try:
                 arguments = dict(call.arguments)
@@ -154,6 +209,7 @@ class ExecutionRuntime:
                     call, "INVALID_ARGUMENTS", "Tool arguments are invalid"
                 )
                 await self.store.save_tool_call(call, status="DENIED", result=result)
+                await self._audit_result(call, result, None, call.name, None)
                 return result
             request = PolicyRequest(
                 subject=call.subject,
@@ -166,9 +222,29 @@ class ExecutionRuntime:
                 requires_elevation=spec.elevation_required,
                 grant_id=grant_id,
                 tool_call_id=call.id,
+                correlation_id=call.correlation_id,
             )
             decision = await self.policy.evaluate(request)
             await self.store.save_decision(decision)
+            await self.audit.record(
+                event_type="POLICY_DECISION",
+                actor=call.subject,
+                subject=call.subject,
+                action=call.name,
+                resource=resource,
+                outcome=decision.outcome.value,
+                origin="DIRECT_INVOCATION",
+                correlation_id=call.correlation_id,
+                causation_id=call.id,
+                tool_call_id=call.id,
+                policy_decision_id=decision.id,
+                grant_id=decision.grant_id,
+                authority_context={"capability": spec.capability},
+                metadata={
+                    "reason": decision.reason,
+                    "policy_version": decision.policy_version,
+                },
+            )
             if decision.outcome is DecisionOutcome.REQUIRE_CONFIRMATION:
                 confirmation = ConfirmationRequest(
                     subject=call.subject,
@@ -193,6 +269,20 @@ class ExecutionRuntime:
                     decision_id=decision.id,
                     confirmation_id=confirmation.id,
                 )
+                await self.audit.record(
+                    event_type="CONFIRMATION_REQUESTED",
+                    actor=call.subject,
+                    subject=call.subject,
+                    action=call.name,
+                    resource=resource,
+                    outcome="WAITING_CONFIRMATION",
+                    origin="DIRECT_INVOCATION",
+                    correlation_id=call.correlation_id,
+                    causation_id=decision.id,
+                    tool_call_id=call.id,
+                    policy_decision_id=decision.id,
+                    confirmation_id=confirmation.id,
+                )
                 return result
             if decision.outcome is not DecisionOutcome.ALLOW:
                 result = ToolResult(
@@ -204,6 +294,7 @@ class ExecutionRuntime:
                 await self.store.save_tool_call(
                     call, status="DENIED", result=result, decision_id=decision.id
                 )
+                await self._audit_result(call, result, decision, resource, None)
                 return result
             if grant_id is not None:
                 grant = await self.store.get_grant(grant_id)
@@ -215,9 +306,39 @@ class ExecutionRuntime:
                         await self.store.save_tool_call(
                             call, status="DENIED", result=result
                         )
+                        await self._audit_result(call, result, decision, resource, None)
                         return result
+                    await self.audit.record(
+                        event_type="GRANT_CONSUMED",
+                        actor=call.subject,
+                        subject=call.subject,
+                        action=call.name,
+                        resource=resource,
+                        outcome="CONSUMED",
+                        origin="DIRECT_INVOCATION",
+                        correlation_id=call.correlation_id,
+                        causation_id=decision.id,
+                        tool_call_id=call.id,
+                        policy_decision_id=decision.id,
+                        grant_id=grant_id,
+                    )
             await self.store.save_tool_call(
                 call, status="RUNNING", decision_id=decision.id
+            )
+            await self.audit.record(
+                event_type="TOOL_EXECUTION_STARTED",
+                actor=call.subject,
+                subject=call.subject,
+                action=call.name,
+                resource=resource,
+                outcome="RUNNING",
+                origin="DIRECT_INVOCATION",
+                correlation_id=call.correlation_id,
+                causation_id=decision.id,
+                tool_call_id=call.id,
+                policy_decision_id=decision.id,
+                grant_id=decision.grant_id,
+                execution_context={"mode": spec.execution_mode.value},
             )
             try:
                 async with asyncio.timeout(spec.timeout_seconds):
@@ -251,6 +372,9 @@ class ExecutionRuntime:
                 await self.store.save_tool_call(
                     call, status="SUCCEEDED", result=result, decision_id=decision.id
                 )
+                await self._audit_result(
+                    call, result, decision, resource, spec.execution_mode.value
+                )
                 return result
             except TimeoutError:
                 result = self._error(
@@ -262,6 +386,9 @@ class ExecutionRuntime:
                 )
             await self.store.save_tool_call(
                 call, status="FAILED", result=result, decision_id=decision.id
+            )
+            await self._audit_result(
+                call, result, decision, resource, spec.execution_mode.value
             )
             return result
 
@@ -293,6 +420,21 @@ class ExecutionRuntime:
         if not resolved:
             await self.revoke_grant(grant.id)
             raise ValueError("Confirmation was resolved concurrently")
+        await self.audit.record(
+            event_type="CONFIRMATION_APPROVED",
+            actor=confirmation.subject,
+            subject=confirmation.subject,
+            action=confirmation.operation,
+            resource=confirmation.resource,
+            outcome="APPROVED",
+            origin="USER_REQUEST",
+            correlation_id=confirmation.tool_call_id,
+            causation_id=confirmation.id,
+            tool_call_id=confirmation.tool_call_id,
+            confirmation_id=confirmation.id,
+            grant_id=grant.id,
+            metadata={"lifetime": lifetime.value},
+        )
         stored_call = await self.store.get_tool_call(confirmation.tool_call_id)
         if stored_call is None:
             raise RuntimeError("Confirmation ToolCall is missing")
@@ -302,12 +444,27 @@ class ExecutionRuntime:
         confirmation = await self.store.get_confirmation(confirmation_id)
         if confirmation is None:
             raise KeyError("Confirmation not found")
-        return await self.store.resolve_confirmation(
+        resolved = await self.store.resolve_confirmation(
             confirmation.id,
             status=ConfirmationStatus.DENIED,
             resolved_at=datetime.now(UTC),
             grant_id=None,
         )
+        if resolved:
+            await self.audit.record(
+                event_type="CONFIRMATION_DENIED",
+                actor=confirmation.subject,
+                subject=confirmation.subject,
+                action=confirmation.operation,
+                resource=confirmation.resource,
+                outcome="DENIED",
+                origin="USER_REQUEST",
+                correlation_id=confirmation.tool_call_id,
+                causation_id=confirmation.id,
+                tool_call_id=confirmation.tool_call_id,
+                confirmation_id=confirmation.id,
+            )
+        return resolved
 
     def _error(
         self,
@@ -321,4 +478,37 @@ class ExecutionRuntime:
             call_id=call.id,
             error=ToolError(code, message),
             decision=decision,
+        )
+
+    async def _audit_result(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        decision: PolicyDecision | None,
+        resource: str,
+        mode: str | None,
+    ) -> None:
+        await self.audit.record(
+            event_type=(
+                "TOOL_EXECUTION_COMPLETED"
+                if result.status == "SUCCEEDED"
+                else "TOOL_CALL_DENIED"
+                if decision is None or decision.outcome is not DecisionOutcome.ALLOW
+                else "TOOL_EXECUTION_FAILED"
+            ),
+            actor=call.subject,
+            subject=call.subject,
+            action=call.name,
+            resource=resource,
+            outcome=result.status,
+            origin="DIRECT_INVOCATION",
+            correlation_id=call.correlation_id,
+            causation_id=decision.id if decision else call.id,
+            tool_call_id=call.id,
+            policy_decision_id=decision.id if decision else None,
+            execution_context={"mode": mode},
+            metadata={
+                "error_code": result.error.code if result.error else None,
+                "artifact_count": len(result.artifact_refs),
+            },
         )

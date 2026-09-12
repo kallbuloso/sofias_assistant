@@ -49,12 +49,27 @@ class TaskRuntime:
         task = Task(
             objective=objective,
             subject=subject,
+            origin="TASK",
             authority=authority or AuthorityContext(subject, tool_call.session_id),
             conversation_id=conversation_id,
             delegation_id=delegation_id,
             execution_strategy=execution_strategy,
+            correlation_id=tool_call.correlation_id,
+            causation_id=tool_call.causation_id,
         )
         await self.store.save_task(task)
+        await self.execution.audit.record(
+            event_type="TASK_CREATED",
+            actor=subject,
+            subject=subject,
+            action="task.create",
+            resource=str(task.id),
+            outcome=task.status.value,
+            origin=task.origin.upper() if task.origin else "TASK",
+            correlation_id=task.correlation_id,
+            task_id=task.id,
+            metadata={"objective_summary": objective[:160]},
+        )
         self._cancel_events[task.id] = asyncio.Event()
         self._tasks[task.id] = asyncio.create_task(
             self._run(task.id, tool_call, grant_id=grant_id)
@@ -85,6 +100,17 @@ class TaskRuntime:
                 updated_at=datetime.now(UTC),
             )
             await self.store.update_task(updated)
+            await self.execution.audit.record(
+                event_type="TASK_CANCELLATION_REQUESTED",
+                actor=task.subject,
+                subject=task.subject,
+                action="task.cancel",
+                resource=str(task.id),
+                outcome=updated.status.value,
+                origin="TASK",
+                correlation_id=task.correlation_id,
+                task_id=task.id,
+            )
             event = self._cancel_events.setdefault(task_id, asyncio.Event())
             event.set()
             runner = self._tasks.get(task_id)
@@ -194,8 +220,27 @@ class TaskRuntime:
             execution_mode=execution_mode,
             status=TaskStatus.RUNNING,
             started_at=datetime.now(UTC),
+            correlation_id=claimed.correlation_id,
+            causation_id=claimed.id,
         )
         await self.store.save_task_attempt(attempt)
+        await self.execution.audit.record(
+            event_type="TASK_ATTEMPT_STARTED",
+            actor=claimed.subject,
+            subject=claimed.subject,
+            action="task.attempt",
+            resource=str(task_id),
+            outcome=attempt.status.value,
+            origin="TASK",
+            correlation_id=claimed.correlation_id,
+            causation_id=claimed.id,
+            task_id=task_id,
+            attempt_id=attempt.id,
+            tool_call_id=attempt.tool_call_id,
+            execution_context={
+                "mode": execution_mode.value if execution_mode else None
+            },
+        )
         cancel_event = self._cancel_events[task_id]
         try:
             if cancel_event.is_set():
@@ -214,6 +259,18 @@ class TaskRuntime:
                 if result.confirmation_id is not None:
                     self._pending_confirmations[task_id] = result.confirmation_id
                 await self.store.update_task(waiting)
+                await self.execution.audit.record(
+                    event_type="TASK_STATE_CHANGED",
+                    actor=waiting.subject,
+                    subject=waiting.subject,
+                    action="task.transition",
+                    resource=str(task_id),
+                    outcome=waiting.status.value,
+                    origin="TASK",
+                    correlation_id=waiting.correlation_id,
+                    causation_id=attempt.id,
+                    task_id=task_id,
+                )
                 return
             if cancel_event.is_set() or current.cancellation_requested:
                 await self._finish_cancelled(task_id)
@@ -237,6 +294,19 @@ class TaskRuntime:
                     error=result.error,
                     finished_at=datetime.now(UTC),
                 )
+            )
+            await self.execution.audit.record(
+                event_type="TASK_STATE_CHANGED",
+                actor=final.subject,
+                subject=final.subject,
+                action="task.transition",
+                resource=str(task_id),
+                outcome=final.status.value,
+                origin="TASK",
+                correlation_id=final.correlation_id,
+                causation_id=attempt.id,
+                task_id=task_id,
+                attempt_id=attempt.id,
             )
         except asyncio.CancelledError:
             if not self._stopping:
@@ -272,3 +342,16 @@ class TaskRuntime:
                 finished_at=datetime.now(UTC),
             )
         )
+        current = await self.store.get_task(task_id)
+        if current is not None:
+            await self.execution.audit.record(
+                event_type="TASK_CANCELLED",
+                actor=current.subject,
+                subject=current.subject,
+                action="task.transition",
+                resource=str(task_id),
+                outcome=current.status.value,
+                origin="TASK",
+                correlation_id=current.correlation_id,
+                task_id=task_id,
+            )

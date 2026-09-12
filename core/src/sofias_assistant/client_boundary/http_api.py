@@ -37,6 +37,7 @@ from sofias_assistant.conversation.runtime import (
 )
 from sofias_assistant.core.core import CoreState
 from sofias_assistant.execution import ExecutionRuntime, TaskRuntime
+from sofias_assistant.execution.audit import AuditEntry
 from sofias_assistant.execution.models import GrantLifetime, ToolCall
 from sofias_assistant.health.models import (
     ComponentHealth,
@@ -318,6 +319,7 @@ class ToolInvokeRequest(BaseModel):
 
     arguments: dict[str, Any] = {}
     call_id: UUID | None = None
+    correlation_id: UUID | None = None
     grant_id: UUID | None = None
 
 
@@ -382,6 +384,58 @@ class TaskResponse(BaseModel):
 class TaskCancelResponse(BaseModel):
     id: UUID
     status: str
+
+
+class AuditEntryResponse(BaseModel):
+    """Safe authenticated transport representation of one audit fact."""
+
+    id: UUID
+    timestamp: datetime
+    event_type: str
+    actor: str
+    subject: str
+    action: str
+    resource: str
+    outcome: str
+    origin: str
+    correlation_id: UUID
+    causation_id: UUID | None
+    task_id: UUID | None
+    attempt_id: UUID | None
+    agent_run_id: UUID | None
+    tool_call_id: UUID | None
+    policy_decision_id: UUID | None
+    grant_id: UUID | None
+    confirmation_id: UUID | None
+    authority_context: dict[str, Any]
+    execution_context: dict[str, Any]
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_entry(cls, entry: AuditEntry) -> "AuditEntryResponse":
+        return cls(
+            id=entry.id,
+            timestamp=entry.timestamp,
+            event_type=entry.event_type,
+            actor=entry.actor,
+            subject=entry.subject,
+            action=entry.action,
+            resource=entry.resource,
+            outcome=entry.outcome,
+            origin=entry.origin,
+            correlation_id=entry.correlation_id,
+            causation_id=entry.causation_id,
+            task_id=entry.task_id,
+            attempt_id=entry.attempt_id,
+            agent_run_id=entry.agent_run_id,
+            tool_call_id=entry.tool_call_id,
+            policy_decision_id=entry.policy_decision_id,
+            grant_id=entry.grant_id,
+            confirmation_id=entry.confirmation_id,
+            authority_context=entry.authority_context,
+            execution_context=entry.execution_context,
+            metadata=entry.safe_metadata,
+        )
 
 
 class TurnStartedRecord(BaseModel):
@@ -622,6 +676,11 @@ def create_local_http_app(
 
             call = ToolCall(
                 **({"id": request.call_id} if request.call_id is not None else {}),
+                **(
+                    {"correlation_id": request.correlation_id}
+                    if request.correlation_id is not None
+                    else {}
+                ),
                 name=tool_name,
                 arguments=request.arguments,
                 subject=f"client:{session.id}",
@@ -711,6 +770,55 @@ def create_local_http_app(
             except FileNotFoundError:
                 raise _artifact_not_found() from None
             return Response(content=content, media_type=ref.media_type)
+
+        @app.get("/api/v1/audit", response_model=list[AuditEntryResponse])
+        async def query_audit(
+            session: Annotated[ClientSession, Depends(require_session)],
+            correlation_id: UUID | None = None,
+            task_id: UUID | None = None,
+            attempt_id: UUID | None = None,
+            agent_run_id: UUID | None = None,
+            tool_call_id: UUID | None = None,
+            policy_decision_id: UUID | None = None,
+            grant_id: UUID | None = None,
+            outcome: str | None = None,
+            origin: str | None = None,
+            resource: str | None = None,
+            tool_name: str | None = None,
+            start: datetime | None = None,
+            end: datetime | None = None,
+            limit: int = 500,
+        ) -> list[AuditEntryResponse]:
+            """Return safe, authenticated structured execution evidence."""
+
+            entries = await execution.audit.query(
+                correlation_id=correlation_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                agent_run_id=agent_run_id,
+                tool_call_id=tool_call_id,
+                policy_decision_id=policy_decision_id,
+                grant_id=grant_id,
+                outcome=outcome,
+                origin=origin,
+                resource=resource,
+                tool_name=tool_name,
+                start=start,
+                end=end,
+                limit=limit,
+            )
+            return [AuditEntryResponse.from_entry(entry) for entry in entries]
+
+        @app.get(
+            "/api/v1/audit/traces/{correlation_id}",
+            response_model=list[AuditEntryResponse],
+        )
+        async def get_audit_trace(
+            correlation_id: UUID,
+            _: Annotated[ClientSession, Depends(require_session)],
+        ) -> list[AuditEntryResponse]:
+            entries = await execution.audit.trace(correlation_id)
+            return [AuditEntryResponse.from_entry(entry) for entry in entries]
 
     if tasks is not None:
 

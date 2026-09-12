@@ -81,6 +81,8 @@ class AgentExecutionContext:
                 arguments=arguments,
                 subject=self._authority.subject,
                 session_id=self._authority.session_id,
+                correlation_id=self.run.correlation_id,
+                causation_id=self.run.id,
             ),
             grant_id=self._grants.get(name),
         )
@@ -150,6 +152,23 @@ class AgentRuntime:
             runtime_limits=definition.runtime_limits,
         )
         await self.store.save_agent_run(run)
+        await self.execution.audit.record(
+            event_type="AGENT_RUN_CREATED",
+            actor="Sofia/root",
+            subject=authority.subject,
+            action="agent.run.create",
+            resource=definition.name,
+            outcome=run.status.value,
+            origin="AGENT_RUN",
+            correlation_id=run.correlation_id,
+            task_id=task.id,
+            agent_run_id=run.id,
+            metadata={
+                "agent": definition.name,
+                "version": definition.version,
+                "allowed_tools": sorted(definition.allowed_tools),
+            },
+        )
         return run
 
     async def run(
@@ -167,11 +186,37 @@ class AgentRuntime:
                 result={"error": "runner unavailable"},
             )
             await self.store.update_agent_run(failed)
+            await self.execution.audit.record(
+                event_type="AGENT_RUN_COMPLETED",
+                actor="Sofia/root",
+                subject=authority.subject,
+                action="agent.run",
+                resource=str(run.id),
+                outcome=failed.status.value,
+                origin="AGENT_RUN",
+                correlation_id=run.correlation_id,
+                causation_id=run.id,
+                task_id=run.task_id,
+                agent_run_id=run.id,
+            )
             return failed
         started = replace(
             run, status=AgentRunStatus.RUNNING, started_at=datetime.now(UTC)
         )
         await self.store.update_agent_run(started)
+        await self.execution.audit.record(
+            event_type="AGENT_RUN_STARTED",
+            actor="Sofia/root",
+            subject=authority.subject,
+            action="agent.run",
+            resource=str(run.id),
+            outcome=started.status.value,
+            origin="AGENT_RUN",
+            correlation_id=run.correlation_id,
+            causation_id=run.id,
+            task_id=run.task_id,
+            agent_run_id=run.id,
+        )
         context = AgentExecutionContext(started, self.execution, authority, grants)
         try:
             result = await runner(context)
@@ -180,12 +225,38 @@ class AgentRuntime:
                 started, status=AgentRunStatus.CANCELLED, finished_at=datetime.now(UTC)
             )
             await self.store.update_agent_run(cancelled)
+            await self.execution.audit.record(
+                event_type="AGENT_RUN_CANCELLED",
+                actor="Sofia/root",
+                subject=authority.subject,
+                action="agent.run",
+                resource=str(run.id),
+                outcome=cancelled.status.value,
+                origin="AGENT_RUN",
+                correlation_id=run.correlation_id,
+                causation_id=run.id,
+                task_id=run.task_id,
+                agent_run_id=run.id,
+            )
             raise
         except Exception:
             failed = replace(
                 started, status=AgentRunStatus.FAILED, finished_at=datetime.now(UTC)
             )
             await self.store.update_agent_run(failed)
+            await self.execution.audit.record(
+                event_type="AGENT_RUN_COMPLETED",
+                actor="Sofia/root",
+                subject=authority.subject,
+                action="agent.run",
+                resource=str(run.id),
+                outcome=failed.status.value,
+                origin="AGENT_RUN",
+                correlation_id=run.correlation_id,
+                causation_id=run.id,
+                task_id=run.task_id,
+                agent_run_id=run.id,
+            )
             return failed
         completed = replace(
             started,
@@ -194,6 +265,19 @@ class AgentRuntime:
             finished_at=datetime.now(UTC),
         )
         await self.store.update_agent_run(completed)
+        await self.execution.audit.record(
+            event_type="AGENT_RUN_COMPLETED",
+            actor="Sofia/root",
+            subject=authority.subject,
+            action="agent.run",
+            resource=str(run.id),
+            outcome=completed.status.value,
+            origin="AGENT_RUN",
+            correlation_id=run.correlation_id,
+            causation_id=run.id,
+            task_id=run.task_id,
+            agent_run_id=run.id,
+        )
         return completed
 
     async def stop(self) -> None:

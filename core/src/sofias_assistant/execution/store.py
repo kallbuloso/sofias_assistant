@@ -185,6 +185,8 @@ class ExecutionStore:
                 result_json=_encode_result(result) if result is not None else None,
                 decision_id=decision_id,
                 confirmation_id=confirmation_id,
+                correlation_id=call.correlation_id,
+                causation_id=call.causation_id,
             )
             if record is None:
                 session.add(
@@ -211,6 +213,8 @@ class ExecutionStore:
                 name=record.name,
                 subject=record.subject,
                 session_id=record.session_id,
+                correlation_id=record.correlation_id,
+                causation_id=record.causation_id,
                 arguments=json.loads(record.arguments_json),
             )
             return call, _decode_result(record.result_json), record.status
@@ -520,6 +524,8 @@ def _task_record_values(task: Task) -> dict[str, Any]:
         "updated_at": task.updated_at,
         "started_at": task.started_at,
         "finished_at": task.finished_at,
+        "correlation_id": task.correlation_id,
+        "causation_id": task.causation_id,
     }
 
 
@@ -552,6 +558,8 @@ def _task_from_record(record: TaskRecord) -> Task:
         updated_at=record.updated_at,
         started_at=record.started_at,
         finished_at=record.finished_at,
+        correlation_id=record.correlation_id,
+        causation_id=record.causation_id,
     )
 
 
@@ -576,6 +584,8 @@ def _task_attempt_record_values(attempt: TaskAttempt) -> dict[str, Any]:
         "error_message": attempt.error.message if attempt.error else None,
         "started_at": attempt.started_at,
         "finished_at": attempt.finished_at,
+        "correlation_id": attempt.correlation_id,
+        "causation_id": attempt.causation_id,
     }
 
 
@@ -598,6 +608,8 @@ def _task_attempt_from_record(record: TaskAttemptRecord) -> TaskAttempt:
         ),
         started_at=record.started_at,
         finished_at=record.finished_at,
+        correlation_id=record.correlation_id,
+        causation_id=record.causation_id,
     )
 
 

@@ -45,6 +45,7 @@ def test_base_metadata_contains_mapped_operational_tables() -> None:
         "task_attempts",
         "agent_definitions",
         "agent_runs",
+        "audit_entries",
     }
 
 

@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0006_task_agent_execution"
+HEAD_REVISION = "0007_audit_traceability"
 DOMAIN_TABLES = {
     "application_settings",
     "conversations",
@@ -38,6 +38,7 @@ DOMAIN_TABLES = {
     "task_attempts",
     "agent_definitions",
     "agent_runs",
+    "audit_entries",
 }
 
 

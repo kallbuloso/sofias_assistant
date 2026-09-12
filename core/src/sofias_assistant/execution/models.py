@@ -294,6 +294,8 @@ class ToolCall:
     arguments: Mapping[str, Any]
     subject: str
     session_id: UUID | None = None
+    correlation_id: UUID = field(default_factory=uuid4)
+    causation_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
 
 
@@ -318,6 +320,8 @@ class Task:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    correlation_id: UUID = field(default_factory=uuid4)
+    causation_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
@@ -339,6 +343,8 @@ class TaskAttempt:
     error: ToolError | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    correlation_id: UUID | None = None
+    causation_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
 
 

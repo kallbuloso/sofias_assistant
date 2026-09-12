@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
@@ -215,6 +216,8 @@ class ToolCallRecord(Base):
     confirmation_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
     )
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    causation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
@@ -263,6 +266,8 @@ class TaskRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    causation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
 
 class TaskAttemptRecord(Base):
@@ -285,6 +290,10 @@ class TaskAttemptRecord(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    correlation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    causation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
 
 class AgentDefinitionRecord(Base):
@@ -331,3 +340,48 @@ class AgentRunRecord(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class AuditEntryRecord(Base):
+    """Append-only structured evidence for consequential Core actions."""
+
+    __tablename__ = "audit_entries"
+    __table_args__ = (
+        Index("ix_audit_entries_correlation_id", "correlation_id"),
+        Index("ix_audit_entries_task_id", "task_id"),
+        Index("ix_audit_entries_timestamp", "timestamp"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    action: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    origin: Mapped[str] = mapped_column(String(64), nullable=False)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    causation_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    authority_context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_context_json: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    turn_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    attempt_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    agent_run_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    tool_call_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    policy_decision_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    grant_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    delegation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    confirmation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    artifact_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

@@ -1,6 +1,7 @@
 """Core-owned authorization and safe Tool execution boundaries."""
 
 from sofias_assistant.execution.agents import AgentRegistry, AgentRuntime, RootAuthority
+from sofias_assistant.execution.audit import AuditEntry, AuditService, AuditStore
 from sofias_assistant.execution.dispatcher import ExecutionDispatcher
 from sofias_assistant.execution.models import (
     AgentDefinition,
@@ -40,6 +41,9 @@ __all__ = [
     "DecisionOutcome",
     "Delegation",
     "ExecutionRuntime",
+    "AuditEntry",
+    "AuditService",
+    "AuditStore",
     "ExecutionDispatcher",
     "TaskRuntime",
     "AgentRegistry",
