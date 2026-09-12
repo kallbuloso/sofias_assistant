@@ -16,10 +16,10 @@ registra execução, checkpoints, commits, CI e o próximo passo.
 
 **Slice:** SA-B009 — Realtime Voice / Gate I3
 **Slice status:** ACTIVE
-**Gate I3:** OPEN
-**Current implementation HEAD:** `1687c30907d6813d0ba2e4d64dbf619d35214f2f`
-**Current active block:** SA-B009.5d — Final Hardening / Gate Evidence
-**Current next micro-step:** SA-B009.5d.0 — Final Hardening / Gate Evidence Preflight
+**Gate I3:** CLOSURE READY — remote verification pending
+**Current implementation HEAD:** `1850d859285ee6db9f3446f8b10052ed34413e95`
+**Current active block:** Gate I3 closure / remote verification
+**Current next micro-step:** Remote CI evidence and formal Gate I3 closure
 
 ### Checkpoints concluídos
 
@@ -174,35 +174,51 @@ Decisões operacionais de 5c:
 6. Delivery failure não redefine lifecycle authority; `voice_transition` continua
    árbitro.
 
-### Deferred audit — SA-B009.5d
+### SA-B009.5d — Final Hardening / Gate Evidence
 
-#### Client session.close
+**Status:** DONE — LOCAL VERIFIED; remote CI pending.
 
-Client-initiated `session.close` continua ACK-less no boundary. O Core possui
-`RealtimeSessionClosed`, porém nesse fluxo o cliente não observa `session.closed`
-antes do WebSocket `1000`.
+- Client-initiated `session.close` agora encaminha `session.closed` antes do
+  WebSocket `1000`; o boundary aguarda o único sender já responsável pela ordem
+  FIFO, sem ACK paralelo ou novo wire contract.
+- A evidência determinística de Gate I3 confirma esse terminal tanto no boundary
+  isolado quanto na vertical SofiaCore/SQLite/Uvicorn/HTTP/WebSocket real.
+- O wording de backpressure foi alinhado à implementação: entrada é await-chain
+  e transport buffering, não application input queue.
 
-Reavaliar em `SA-B009.5d — Final Hardening / Gate Evidence`. Não é blocker de 5c.
+### SA-B009.6 — OpenAI Realtime Adapter
 
-#### Timeout / bounded shutdown policy
+**Status:** DONE — LOCAL VERIFIED; remote CI pending.
 
-Não existe timeout explícito para `provider.close()`, slow client ou global
-boundary shutdown. 5c deliberadamente não introduziu timeout arbitrário.
+**Checkpoint de código:** `1850d859285ee6db9f3446f8b10052ed34413e95` —
+`feat(realtime): finish realtime hardening and OpenAI adapter`
 
-Reavaliar necessidade/política em 5d e/ou no adapter real.
+- `OpenAIProviderAdapter` implementa `RealtimeProvider` sem vazar tipos ou IDs
+  nativos ao Core. A sessão OpenAI é descartável, sem retry/reconnect automático,
+  configurada para PCM16/24 kHz/mono e PTT manual (`turn_detection=None`).
+- O adapter normaliza append/commit, transcript, áudio do assistant, completion,
+  cancelamento e failure seguro; IDs nativos de item/response vivem apenas na
+  instância efêmera do adapter.
+- A credencial vem exclusivamente de
+  `SecretRef("providers/openai/api-key")` via `SecretService`. O smoke opt-in
+  `SOFIAS_ASSISTANT_RUN_OPENAI_REALTIME_TESTS=1` usa Windows Credential Store,
+  não lê `OPENAI_API_KEY` e passou localmente em 2026-09-11.
+- A suite determinística continua usando somente
+  `ScriptedFakeRealtimeProvider` como principal evidência de Gate.
+- Verificação local final: `527 collected`, `524 passed`, `3 skipped`, zero
+  failures e zero warnings; Gate I3, regressão realtime/client-boundary, Ruff,
+  format, mypy e `git diff --check` passaram.
 
-#### Input wording
+### Deferred hardening posterior ao Gate
 
-O texto antigo de backpressure menciona “filas de entrada e saída”, mas a
-implementação final usa input await-chain e transport buffering, sem application
-input queue. Revisar esse wording no hardening documental de 5d.
+Não há timeout explícito para `provider.close()`, slow client ou shutdown global.
+Não foi introduzido timeout arbitrário: o lifecycle cooperativo já cobre o Gate;
+uma política de deadline depende de requisito operacional do adapter/host real.
 
 ### Próximo bloco operacional
 
-`SA-B009.5d — Final Hardening / Gate Evidence` está ativo. O próximo micro-step
-é somente `SA-B009.5d.0 — Final Hardening / Gate Evidence Preflight`.
-
-`SA-B009.6 — OpenAI Realtime Adapter` permanece PLANNED / subsequent.
+Nenhum novo subpass de Slice 03 está autorizado antes da verificação remota e do
+fechamento formal do Gate I3. `SA-B009.6` não é mais subsequent.
 
 Regra do ledger: em cada checkpoint remoto relevante, atualizar o status do
 micro-step, registrar commit SHA, registrar CI quando aplicável, registrar nova
@@ -465,14 +481,21 @@ transformar cancelamento em sucesso.
 
 ## 15. Backpressure, limites e shutdown
 
-**PROPOSED.** As filas de entrada e saída são `asyncio.Queue` pequenas e
-limitadas por contagem e bytes; `max_frame_bytes`, frames pendentes e bytes
-pendentes são constantes/configuração validada no boundary. Não há fila
-infinita, concatenação de áudio em memória ou `sleep` em testes. Ao atingir
-limite de entrada o reader deixa de consumir até haver capacidade (TCP aplica
-backpressure); frame que viola limite encerra a sessão. Saída lenta aguarda o
-drain limitado; se a conexão some, cancela a entrega e aplica a semântica de
-desconexão da seção 7.
+**FROZEN.** A entrada não possui application queue: WebSocket →
+`runtime.send_audio()` → `provider.send_audio()` é uma await-chain e deixa de
+consumir frames quando o provider bloqueia, delegando a pressão ao transporte.
+Cada frame PCM16 realtime tem limite Core-owned de 64 KiB; frame wire inválido
+encerra a conexão, enquanto chamada direta inválida ao Core é rejeitada sem
+destruir a sessão.
+
+A saída possui uma única `asyncio.Queue` FIFO bounded em 128 itens. Limites
+Core-owned por evento restringem chunk de áudio, texto UTF-8 e transcript parcial
+acumulado; não há concatenação infinita, queue ponderada, segunda fila, eviction
+ou coalescing. Consumer lento aplica backpressure. Consumer abandonado sinaliza
+shutdown cooperativo para que producer, provider, lease e lifecycle concluam sem
+transformar a perda de delivery em falha do provider. Eventos terminais e `_END`
+aguardam capacidade quando o consumer vive, preservando FIFO; quando ele já
+sumiu, o Core não aguarda indefinidamente.
 
 `session.close`, shutdown do boundary e shutdown do Core são cooperativos:
 parar input, interromper provider, fechar iterators/tasks, terminalizar Turn
@@ -482,12 +505,12 @@ observabilidade futura usa IDs/estado/tamanho/erro seguro, sem transcript ou
 
 ## 16. Provider real OpenAI: pré-condições delimitadas
 
-**FROZEN.** OpenAI é o primeiro realtime provider da Slice 03. O adapter continua
-isolado e não decorre do adapter textual existente. Antes do subpass do adapter,
-validar somente as pré-condições externas: modelo realtime exato, mecanismo
-atual de SDK/API/transport e compatibilidade atual de acesso/custo. A validação
-também confirma que o adapter pode preservar PTT, cancelamento, transcript e
-SecretService sem vazar SDK ao Core. Referência técnica: [OpenAI Realtime API](https://platform.openai.com/docs/api-reference/realtime) e [eventos de cancelamento](https://platform.openai.com/docs/api-reference/realtime-client-events).
+**FROZEN.** OpenAI é o primeiro realtime provider da Slice 03. O adapter
+realtime compartilha somente o isolamento de credencial e a normalização de
+erros do módulo textual existente; sua sessão/eventos SDK permanecem inteiramente
+no adapter e não vazam ao Core. A validação confirmou o mecanismo atual de
+SDK/API WebSocket, PTT manual, PCM16/24 kHz/mono, transcript, cancelamento e
+SecretService. Referência técnica: [OpenAI Realtime API](https://platform.openai.com/docs/api-reference/realtime) e [eventos de cancelamento](https://platform.openai.com/docs/api-reference/realtime-client-events).
 
 Se a pré-condição não for satisfeita, não se adiciona dependência nem se troca o
 design por pipeline STT/LLM/TTS; a implementação para antes do adapter. Isso não
@@ -536,15 +559,14 @@ microfone, speaker, 0.0.0.0, porta fixa, browser ou provider externo.
 
 ## 20. Smoke real opt-in
 
-No subpass OpenAI, adicionar teste separado marcado por variável
-explícita, por exemplo `SOFIAS_ASSISTANT_RUN_OPENAI_REALTIME_TESTS=1`. Ele usa
+O subpass OpenAI possui teste separado marcado por
+`SOFIAS_ASSISTANT_RUN_OPENAI_REALTIME_TESTS=1`. Ele usa
 `SecretService`/Windows Credential Store, nunca CI padrão, não imprime chave e
-não substitui Gate determinístico. Um fixture PCM pequeno, versionado, não
-sensível e com licença/proveniência aprovada será introduzido somente nesse
-subpass; o teste pode validar connect → PTT → transcript/resposta → cancel/close
-sem device humano. Se a fixture/proveniência ainda exigir decisão, ela é o único
-item `OPEN`; modelo, SDK/API transport e acesso/custo são pré-condições
-`DEFERRED` da seção 16. O Gate I3 determinístico não é falsamente promovido a
+não substitui Gate determinístico. Um frame PCM16 sintético e curto evita
+distribuir gravação, device humano ou fixture sensível; o smoke valida connect,
+configuração, PTT append/commit, transcript, áudio do assistant, cancel e close.
+Modelo, SDK/API transport e acesso/custo são pré-condições externas, não
+autoridade arquitetural. O Gate I3 determinístico não é falsamente promovido a
 evidência externa.
 
 ## 21. Subpassos e commits
