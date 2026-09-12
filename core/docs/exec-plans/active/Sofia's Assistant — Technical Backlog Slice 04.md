@@ -1820,7 +1820,7 @@ Next Gate:
     Gate I4 — Sofia Can Act Safely
 
 Gate I4:
-    ACTIVE
+    CLOSURE READY — AWAITING REMOTE CI
 
 Gate I5:
     BLOCKED BY I4
@@ -1833,4 +1833,10 @@ Implementation baseline:
 
 Previous Gate:
     I3 — CLOSED — REMOTE VERIFIED
+
+Gate I4 execution checkpoint:
+    Feature SHA: 39569eb
+    Local pytest: 529 collected; 526 passed; 3 skipped; 0 failed; 0 warnings
+    Local quality: ruff check PASS; ruff format --check PASS; mypy PASS; diff-check PASS
+    Remote CI: awaiting GitHub Actions
 ```
