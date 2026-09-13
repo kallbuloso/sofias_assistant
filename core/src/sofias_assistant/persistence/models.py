@@ -27,6 +27,94 @@ class Base(DeclarativeBase):
     """Base class for future Operational Store models."""
 
 
+class EventRecord(Base):
+    """Selective durable delivery outbox, not historical domain state."""
+
+    __tablename__ = "runtime_events"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING','DISPATCHING','DELIVERED','FAILED','CANCELLED')"
+        ),
+        Index("ix_runtime_events_pending", "status", "available_at"),
+        Index("ix_runtime_events_cause_type", "causation_id", "type", "occurred_at"),
+    )
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    type: Mapped[str] = mapped_column(String(128))
+    source: Mapped[str] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    causation_id: Mapped[UUID | None] = mapped_column(Uuid)
+    payload_json: Mapped[str] = mapped_column(Text)
+    metadata_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING")
+    available_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    lease_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    owner: Mapped[UUID | None] = mapped_column(Uuid)
+    attempts: Mapped[int] = mapped_column(default=0)
+    completed_handlers_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class ScheduleRecord(Base):
+    """Timing intent and a durable continuation reference, never a callable."""
+
+    __tablename__ = "schedules"
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','COMPLETED','CANCELLED')"),
+        CheckConstraint("kind IN ('REMINDER','TASK_WAKEUP')"),
+        CheckConstraint("recurrence IN ('ONCE','INTERVAL','DAILY')"),
+        CheckConstraint(
+            "(recurrence = 'INTERVAL' AND interval_seconds IS NOT NULL "
+            "AND interval_seconds BETWEEN 1 AND 31622400) OR "
+            "(recurrence != 'INTERVAL' AND interval_seconds IS NULL)"
+        ),
+        Index("ix_schedules_due", "status", "next_run_at"),
+    )
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    subject: Mapped[str] = mapped_column(String(255))
+    reminder: Mapped[str] = mapped_column(String(1024))
+    timezone: Mapped[str] = mapped_column(String(128))
+    due_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    recurrence: Mapped[str] = mapped_column(String(32))
+    interval_seconds: Mapped[int | None]
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    task_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("tasks.id"))
+    tool_call_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("tool_calls.id"))
+    grant_id: Mapped[UUID | None] = mapped_column(Uuid)
+    last_event_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("runtime_events.id")
+    )
+
+
+class NotificationRecord(Base):
+    """Durable user attention; delivery is not acknowledgement or approval."""
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        CheckConstraint("state IN ('PENDING','ACKNOWLEDGED')"),
+        Index("ix_notifications_pending", "state", "created_at"),
+    )
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    event_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("runtime_events.id"), unique=True
+    )
+    type: Mapped[str] = mapped_column(String(128))
+    severity: Mapped[str] = mapped_column(String(32))
+    title: Mapped[str] = mapped_column(String(255))
+    summary: Mapped[str] = mapped_column(String(1024))
+    source: Mapped[str] = mapped_column(String(128))
+    action_reference: Mapped[UUID | None] = mapped_column(Uuid)
+    correlation_id: Mapped[UUID] = mapped_column(Uuid, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    state: Mapped[str] = mapped_column(String(32), default="PENDING")
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
 class RuntimeSessionStatus(StrEnum):
     """Lifecycle states persisted for a runtime session."""
 

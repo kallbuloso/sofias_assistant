@@ -11,6 +11,9 @@ from pydantic import BaseModel, field_validator
 
 from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
+from sofias_assistant.client_boundary.proactivity_http import (
+    register_proactivity_routes,
+)
 from sofias_assistant.client_boundary.realtime_ws import (
     RealtimeConversationApi,
     register_realtime_websocket,
@@ -44,6 +47,7 @@ from sofias_assistant.health.models import (
     HealthStatus,
     RuntimeHealthSnapshot,
 )
+from sofias_assistant.proactivity.runtime import ProactivityRuntime
 from sofias_assistant.secrets.models import SecretValue
 
 _AUTHENTICATION_FAILURE_DETAIL = "Local client authentication failed"
@@ -510,6 +514,7 @@ def create_local_http_app(
     realtime: RealtimeConversationApi | None = None,
     execution: ExecutionRuntime | None = None,
     tasks: TaskRuntime | None = None,
+    proactivity: ProactivityRuntime | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -548,6 +553,9 @@ def create_local_http_app(
         if session is None:
             raise _authentication_failure()
         return session
+
+    if proactivity is not None:
+        register_proactivity_routes(app, require_session, sessions, proactivity)
 
     @app.post(
         "/api/v1/client-sessions",

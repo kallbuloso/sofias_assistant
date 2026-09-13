@@ -21,6 +21,8 @@ from sofias_assistant.health.models import (
     RuntimeHealthSnapshot,
 )
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sofias_assistant.proactivity.models import Clock
+from sofias_assistant.proactivity.runtime import ProactivityRuntime
 from sofias_assistant.runtime.bootstrap import RuntimeResources, bootstrap_runtime
 from sofias_assistant.runtime.instance_ownership import (
     CoreInstanceOwnership,
@@ -57,6 +59,7 @@ class SofiaCore:
         ] = CoreInstanceOwnership,
         conversation_dependencies_factory: ConversationDependenciesFactory
         | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if not application_version.strip():
             raise ValueError("Application version must not be blank")
@@ -85,6 +88,8 @@ class SofiaCore:
             ConversationActivityCoordinator | None
         ) = None
         self._health = RuntimeHealthSnapshot(())
+        self._clock = clock
+        self._proactivity: ProactivityRuntime | None = None
 
     @property
     def state(self) -> CoreState:
@@ -104,7 +109,34 @@ class SofiaCore:
     def health(self) -> RuntimeHealthSnapshot:
         """Return the current transport-neutral foundation health snapshot."""
 
-        return self._health
+        components = self._proactivity.health if self._proactivity is not None else ()
+        names = {component.name for component in components}
+        return RuntimeHealthSnapshot(
+            tuple(
+                component
+                for component in self._health.components
+                if component.name not in names
+            )
+            + components
+        )
+
+    @property
+    def proactivity(self) -> ProactivityRuntime:
+        if self._state is not CoreState.RUNNING or self._proactivity is None:
+            raise RuntimeError("Proactivity is only available while Core is running")
+        return self._proactivity
+
+    async def update_health(self, component: ComponentHealth) -> None:
+        """Accept an explicit subsystem observation and project significant transitions."""
+        await self.proactivity.notifications.observe_health(component)
+        self._health = RuntimeHealthSnapshot(
+            tuple(
+                value
+                for value in self._health.components
+                if value.name != component.name
+            )
+            + (component,)
+        )
 
     @property
     def secret_service(self) -> SecretService:
@@ -198,6 +230,13 @@ class SofiaCore:
             self._task_runtime = TaskRuntime(self._execution_runtime)
             self._agent_runtime = AgentRuntime(self._execution_runtime)
             self._compose_conversation_runtime()
+            self._proactivity = ProactivityRuntime(
+                self._resources.session_factory,
+                self._execution_runtime.audit,
+                self._clock,
+            )
+            self._proactivity.bind_tasks(self._task_runtime)
+            await self._proactivity.start()
             self._health = RuntimeHealthSnapshot(
                 (
                     ComponentHealth("operational-store", HealthStatus.HEALTHY),
@@ -230,6 +269,11 @@ class SofiaCore:
 
         self._state = CoreState.STOPPING
         primary_error: BaseException | None = None
+        if self._proactivity is not None:
+            try:
+                await self._proactivity.stop()
+            except BaseException as error:
+                primary_error = error
         realtime_runtime = self._realtime_conversation_runtime
         if realtime_runtime is not None:
             try:
@@ -273,6 +317,12 @@ class SofiaCore:
         lifecycle = self._session_lifecycle
         resources = self._resources
 
+        if self._proactivity is not None:
+            try:
+                await self._proactivity.stop()
+            except BaseException:
+                pass
+
         if lifecycle is not None and lifecycle.active_session_id is not None:
             try:
                 await lifecycle.stop()
@@ -301,6 +351,7 @@ class SofiaCore:
             pass
 
     def _clear_owned_references(self) -> None:
+        self._proactivity = None
         self._conversation_runtime = None
         self._realtime_conversation_runtime = None
         self._conversation_activity_coordinator = None

@@ -28,8 +28,11 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0007_audit_traceability"
+HEAD_REVISION = "0008_proactivity"
 DOMAIN_TABLES = {
+    "runtime_events",
+    "schedules",
+    "notifications",
     "application_settings",
     "conversations",
     "runtime_sessions",
@@ -75,6 +78,28 @@ def test_upgrade_to_head_is_idempotent(tmp_path: Path) -> None:
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
     assert revision == HEAD_REVISION
+
+
+def test_proactivity_upgrade_preserves_existing_operational_state(
+    tmp_path: Path,
+) -> None:
+    url = database_url(tmp_path)
+    upgrade_to_revision(url, "0007_audit_traceability")
+    path = url.removeprefix("sqlite+aiosqlite:///")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO application_settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+            ("fixture", '"preserved"', "2030-01-01 00:00:00"),
+        )
+    upgrade_to_head(url)
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT value_json FROM application_settings WHERE key = 'fixture'"
+            ).fetchone()[0]
+            == '"preserved"'
+        )
+        assert {"runtime_events", "schedules", "notifications"} <= table_names(url)
 
 
 def test_downgrade_to_base_then_upgrade_to_head(tmp_path: Path) -> None:

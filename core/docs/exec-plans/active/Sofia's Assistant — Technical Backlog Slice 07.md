@@ -2051,11 +2051,11 @@ Não iniciar Gate I13 antes de I6.
 
 ---
 
-# 47. Estado inicial do Ledger
+# 47. Execution Ledger
 
 ```text
 Slice 07 status:
-    READY FOR APPROVAL
+    APPROVED — IN EXECUTION (I7 only)
 
 Execution order:
     ANTICIPATED BEFORE SLICE 05
@@ -2064,29 +2064,96 @@ Reason:
     Sofias Memory v0.7.0 still in development
 
 Implementation baseline:
-    31f283b40ced7d5313aced91d26ffcba6d581638
+    c82e74a86428b5224c0a9d70fbcf249cb1ad6003
+    main; clean worktree; aligned with origin/main at preflight
 
 Previous Slice:
     Slice 06 — CLOSED — REMOTE VERIFIED
 
 Current active Gate:
-    none
-
-Next Gate:
     I7 — Sofia Can React
 
+Next Gate:
+    I11 — NOT STARTED; outside this execution
+
 Gate I7:
-    READY
+    IMPLEMENTED — LOCAL VERIFIED — REMOTE CI PENDING
 
 Gate I11:
-    BLOCKED BY I7
+    NOT STARTED — awaiting I7 closure and a separate execution
 
 Slice 05 / Gate I6:
     DEFERRED — WAITING FOR SOFIAS MEMORY v0.7.0
 
 Potential next Gate if Memory remains unavailable:
-    I12 — Recovery Validated
+    I12 — Recovery Validated (not authorized in this execution)
 ```
+
+## I7 execution evidence / Resume Capsule
+
+```text
+GATE: I7 — Sofia Pode Reagir
+STATUS: IMPLEMENTED — LOCAL VERIFIED — REMOTE CI PENDING
+CURRENT CHECKPOINT: I7-D — vertical integration / closure
+
+COMPLETED:
+- I7-A: discriminated Event; explicit ephemeral/durable delivery; source fake;
+  bounded dispatch, per-subscriber progress, failure isolation and SA-B030 evidence.
+- I7-B: persistent Scheduler; ONCE/INTERVAL/DAILY; Clock; IANA/DST;
+  atomic occurrence/outbox/advancement; restart and missed-run coalescing;
+  existing TaskRuntime WAITING_SCHEDULE continuation and fresh Policy evaluation.
+- I7-C: durable pending/acknowledged Notifications for all four MVP flows;
+  authenticated Local Client Boundary query/ack/stream; disconnected recovery;
+  significant health transition deduplication; Core lifecycle composition.
+- Migration 0008_proactivity: runtime_events, schedules, notifications only.
+- Directed reference harvest/gap analysis documented in implementation note.
+
+REMAINING:
+- Commit/push; remote Windows CI;
+  record verified evidence and only then mark Gate CLOSED — REMOTE VERIFIED.
+
+FROZEN DECISIONS:
+- Event/Schedule/Notification/Client != authority; Operational Store authoritative.
+- ExecutionRuntime/Policy/TaskRuntime/SA-B030 reused, no parallel execution engine.
+- No Memory, I11/Desktop Client, I12 or other Slice started.
+
+KNOWN FINDINGS (corrected):
+- WAITING_SCHEDULE lacked a durable continuation/wakeup seam.
+- Retry-safe handlers needed per-handler progress; uncertain non-retry-safe
+  effects need explicit failure rather than blind replay.
+- Restart during RUNNING scheduled Tool requires PAUSED reconciliation.
+- Stream subscribe-before-sync and bounded queue overflow preserve durable state.
+- Repeated health samples and event replay require stable effect deduplication.
+- Migration revision/table expectations and Core health projections updated.
+
+DEFERRED (non-blocking):
+- Retention/compaction, terminal-event retry UX, comprehensive I12 recovery,
+  distributed coordination, broad calendar/attention policy.
+
+REAL BLOCKERS: none
+CURRENT HEAD: c82e74a86428b5224c0a9d70fbcf249cb1ad6003 (implementation uncommitted)
+NEXT ACTION: commit/push and verify remote CI.
+```
+
+Architecture, semantics, API behavior, concurrency decisions and reference comparison:
+[Gate I7 implementation note](../../implementation/gate-i7-proactivity.md).
+
+Local verification (2026-09-13):
+
+- Targeted unit/Gate/Core/HTTP/persistence/bootstrap regression: **68 passed**.
+- Expanded unit + Gate I7 vertical/adversarial set: **38 passed**.
+- Full `uv run pytest -q`: **583 passed, 3 skipped** (existing opt-in OpenAI,
+  Realtime and Windows Credential Manager smokes; no Gate correctness skipped).
+- `uv run ruff check .`: passed.
+- `uv run ruff format --check .`: 145 files already formatted.
+- `uv run mypy src tests`: no issues in 145 source files.
+- `git diff --check`: passed.
+- Real local HTTP stream and full Core restart covered by offline integration
+  tests; no external service/credentials or interactive desktop required.
+- First full regression exposed three stale migration/table expectations;
+  corrected before the final green regression. No open blocking findings.
+
+Remote verification is pending; I7 is not yet CLOSED — REMOTE VERIFIED.
 
 ---
 

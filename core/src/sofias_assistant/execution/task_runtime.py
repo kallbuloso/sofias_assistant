@@ -5,7 +5,21 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
+
+from sqlalchemy import select, text
+
+from sofias_assistant.persistence.models import (
+    EventRecord,
+    ScheduleRecord,
+    TaskRecord,
+    ToolCallRecord,
+)
+from sofias_assistant.proactivity.models import Event
+
+if TYPE_CHECKING:
+    from sofias_assistant.proactivity.scheduler import Scheduler
 
 from sofias_assistant.execution.models import (
     AuthorityContext,
@@ -22,7 +36,9 @@ from sofias_assistant.execution.runtime import ExecutionRuntime
 class TaskRuntime:
     """Single-Core queue/claim owner; no distributed worker is implied."""
 
-    def __init__(self, execution: ExecutionRuntime) -> None:
+    def __init__(
+        self, execution: ExecutionRuntime, *, scheduler: Scheduler | None = None
+    ) -> None:
         self.execution = execution
         self.store = execution.store
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -31,6 +47,7 @@ class TaskRuntime:
         self._lock = asyncio.Lock()
         self._owner = f"core-{uuid4()}"
         self._stopping = False
+        self.scheduler = scheduler
 
     async def create_task(
         self,
@@ -43,9 +60,23 @@ class TaskRuntime:
         delegation_id: UUID | None = None,
         execution_strategy: TaskExecutionStrategy = TaskExecutionStrategy.DIRECT_TOOL,
         grant_id: UUID | None = None,
+        wait_until: datetime | None = None,
+        timezone: str = "UTC",
     ) -> Task:
         if self._stopping:
             raise RuntimeError("Task runtime is stopping")
+        if wait_until is not None:
+            from sofias_assistant.proactivity.models import timezone as validate_zone
+            from sofias_assistant.proactivity.models import utc
+
+            if self.scheduler is None:
+                raise ValueError("Scheduler is not configured")
+            if subject != tool_call.subject or (
+                authority is not None and authority.subject != subject
+            ):
+                raise ValueError("Scheduled Task and continuation authority must match")
+            utc(wait_until)
+            validate_zone(timezone)
         task = Task(
             objective=objective,
             subject=subject,
@@ -72,7 +103,13 @@ class TaskRuntime:
         )
         self._cancel_events[task.id] = asyncio.Event()
         self._tasks[task.id] = asyncio.create_task(
-            self._run(task.id, tool_call, grant_id=grant_id)
+            self._run(
+                task.id,
+                tool_call,
+                grant_id=grant_id,
+                wait_until=wait_until,
+                timezone=timezone,
+            )
         )
         return task
 
@@ -273,7 +310,13 @@ class TaskRuntime:
         self._pending_confirmations.clear()
 
     async def _run(
-        self, task_id: UUID, tool_call: ToolCall, *, grant_id: UUID | None = None
+        self,
+        task_id: UUID,
+        tool_call: ToolCall,
+        *,
+        grant_id: UUID | None = None,
+        wait_until: datetime | None = None,
+        timezone: str = "UTC",
     ) -> None:
         claimed = await self.store.claim_task(task_id, self._owner)
         if claimed is None:
@@ -318,7 +361,22 @@ class TaskRuntime:
             if cancel_event.is_set():
                 await self._finish_cancelled(task_id)
                 return
-            result = await self.execution.invoke(tool_call, grant_id=grant_id)
+            if wait_until is not None:
+                assert self.scheduler is not None
+                await self.scheduler.wait_task(
+                    task_id, tool_call, wait_until, timezone, grant_id
+                )
+                await self.store.update_task_attempt(
+                    replace(
+                        attempt,
+                        status=TaskStatus.WAITING_SCHEDULE,
+                        finished_at=datetime.now(UTC),
+                    )
+                )
+                return
+            result = await self.execution.invoke(
+                tool_call, grant_id=grant_id, origin="TASK", task_id=task_id
+            )
             current = await self.store.get_task(task_id)
             if current is None:
                 return
@@ -400,6 +458,88 @@ class TaskRuntime:
                 )
         finally:
             self._tasks.pop(task_id, None)
+
+    async def resume_schedule(self, event: Event) -> None:
+        """Wake only the persisted occurrence/continuation selected by root."""
+        from sofias_assistant.proactivity.events import to_event
+
+        if self.scheduler is None or self._stopping:
+            raise RuntimeError("Scheduled Task runtime unavailable")
+        async with self.scheduler.sessions() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            schedule = await session.get(ScheduleRecord, event.causation_id)
+            stored = await session.get(EventRecord, event.id)
+            if (
+                schedule is None
+                or stored is None
+                or schedule.kind != "TASK_WAKEUP"
+                or schedule.last_event_id != event.id
+                or event.source != "scheduler"
+                or event.kind != "DOMAIN"
+                or stored.source != "scheduler"
+                or to_event(stored) != event
+                or event.type != "TaskScheduleDue"
+            ):
+                raise ValueError("Event is not the persisted Task schedule occurrence")
+            task = await session.get(TaskRecord, schedule.task_id)
+            if (
+                task is not None
+                and not task.cancellation_requested
+                and task.status == "WAITING_SCHEDULE"
+            ):
+                task.status, task.claimed_by = "QUEUED", None
+                task.updated_at = self.scheduler.clock.now()
+            await session.commit()
+        await self.recover_scheduled_tasks()
+
+    async def recover_scheduled_tasks(self, *, startup: bool = False) -> None:
+        """Recover queued continuations; uncertain running effects pause explicitly."""
+        if self.scheduler is None or self._stopping:
+            return
+        async with self._lock:
+            async with self.scheduler.sessions() as session:
+                await session.execute(text("BEGIN IMMEDIATE"))
+                pairs = (
+                    await session.execute(
+                        select(ScheduleRecord, TaskRecord)
+                        .join(TaskRecord, ScheduleRecord.task_id == TaskRecord.id)
+                        .where(
+                            ScheduleRecord.kind == "TASK_WAKEUP",
+                            ScheduleRecord.status == "COMPLETED",
+                            TaskRecord.status.in_(("QUEUED", "RUNNING")),
+                            TaskRecord.cancellation_requested.is_(False),
+                        )
+                        .limit(100)
+                    )
+                ).all()
+                eligible = []
+                for schedule, task in pairs:
+                    if task.id in self._tasks:
+                        continue
+                    if task.status == "RUNNING":
+                        if not startup:
+                            continue
+                        call = await session.get(ToolCallRecord, schedule.tool_call_id)
+                        if call is None or call.status == "RUNNING":
+                            task.status, task.error_code = (
+                                "PAUSED",
+                                "SCHEDULE_RECONCILIATION_REQUIRED",
+                            )
+                            task.error_message = (
+                                "Interrupted execution requires reconciliation"
+                            )
+                            continue
+                        task.status, task.claimed_by = "QUEUED", None
+                    eligible.append((task.id, schedule.tool_call_id, schedule.grant_id))
+                await session.commit()
+            for task_id, call_id, grant_id in eligible:
+                stored_call = await self.store.get_tool_call(call_id)
+                if stored_call is None:
+                    continue
+                self._cancel_events[task_id] = asyncio.Event()
+                self._tasks[task_id] = asyncio.create_task(
+                    self._run(task_id, stored_call[0], grant_id=grant_id)
+                )
 
     async def _finish_cancelled(self, task_id: UUID) -> None:
         task = await self.store.get_task(task_id)
