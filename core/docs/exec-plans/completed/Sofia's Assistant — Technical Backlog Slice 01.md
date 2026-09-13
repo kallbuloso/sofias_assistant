@@ -2,7 +2,7 @@
 
 **Scope:** SA-B001 → SA-B006  
 **Target Gate:** I1 — Core Alive  
-**Status:** Baseline para implementação  
+**Status:** COMPLETED  
 **Source:** Technical Backlog Map aprovado  
 **Architecture baseline:** PRD v0.1 + ADR-0001…ADR-0015 + Architecture Review Amendment 0001
 

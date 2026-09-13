@@ -2,7 +2,7 @@
 
 **Escopo:** SA-B011 → SA-B017 + SA-B030
 **Gates-alvo:** I4 — Sofia Pode Agir com Segurança; I5 — Sofia Pode Trabalhar; I10 — Sofia é Rastreável
-**Status:** ACTIVE
+**Status:** COMPLETED
 **Projeto:** Sofia's Assistant
 **Baseline de implementação:** `307b1032f0da6fa7c9f7c20263afafcdc389c18d`
 **Gate anterior:** I3 — Sofia Pode Falar — FECHADO / VERIFICADO REMOTAMENTE

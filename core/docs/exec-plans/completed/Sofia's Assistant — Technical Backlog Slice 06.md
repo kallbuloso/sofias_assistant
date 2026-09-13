@@ -3,7 +3,7 @@
 **Nome operacional:** Computer Capabilities & Real Agent  
 **Escopo:** SA-B024 → SA-B029  
 **Gates-alvo:** I8 — Sofia Pode Usar o Computador; I9 — Sofia Pode Delegar  
-**Status:** DRAFT — READY FOR APPROVAL  
+**Status:** COMPLETED  
 **Projeto:** Sofia's Assistant  
 **Baseline de implementação:** `c611f557fd1d4c9c23b92093c3de438962ca192c`  
 **Último Gate executado:** I10 — Sofia é Rastreável — FECHADO / VERIFICADO REMOTAMENTE  
