@@ -2077,7 +2077,7 @@ Next Gate:
     I11 — NOT STARTED; outside this execution
 
 Gate I7:
-    IMPLEMENTED — LOCAL VERIFIED — REMOTE CI PENDING
+    CLOSED — REMOTE VERIFIED
 
 Gate I11:
     NOT STARTED — awaiting I7 closure and a separate execution
@@ -2093,7 +2093,7 @@ Potential next Gate if Memory remains unavailable:
 
 ```text
 GATE: I7 — Sofia Pode Reagir
-STATUS: IMPLEMENTED — LOCAL VERIFIED — REMOTE CI PENDING
+STATUS: CLOSED — REMOTE VERIFIED
 CURRENT CHECKPOINT: I7-D — vertical integration / closure
 
 COMPLETED:
@@ -2109,7 +2109,7 @@ COMPLETED:
 - Directed reference harvest/gap analysis documented in implementation note.
 
 REMAINING:
-- Commit/push; remote Windows CI;
+- None for Gate I7.
   record verified evidence and only then mark Gate CLOSED — REMOTE VERIFIED.
 
 FROZEN DECISIONS:
@@ -2131,8 +2131,8 @@ DEFERRED (non-blocking):
   distributed coordination, broad calendar/attention policy.
 
 REAL BLOCKERS: none
-CURRENT HEAD: c82e74a86428b5224c0a9d70fbcf249cb1ad6003 (implementation uncommitted)
-NEXT ACTION: commit/push and verify remote CI.
+CURRENT HEAD: 90f9d9c40767d2c919c1385455bf4625f42ca761
+NEXT ACTION: keep I11 separate; do not start it in this execution.
 ```
 
 Architecture, semantics, API behavior, concurrency decisions and reference comparison:
@@ -2153,7 +2153,11 @@ Local verification (2026-09-13):
 - First full regression exposed three stale migration/table expectations;
   corrected before the final green regression. No open blocking findings.
 
-Remote verification is pending; I7 is not yet CLOSED — REMOTE VERIFIED.
+Remote verification: GitHub Actions `CI`, run `34789997097`, completed with
+`success` for commit `90f9d9c40767d2c919c1385455bf4625f42ca761`.
+
+Final Gate I7 status: **CLOSED — REMOTE VERIFIED**. Slice 07 remains open because
+Gate I11 and the later Slice 07 scope were explicitly not started in this execution.
 
 ---
 
