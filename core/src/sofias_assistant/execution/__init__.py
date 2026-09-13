@@ -2,9 +2,16 @@
 
 from sofias_assistant.execution.agents import AgentRegistry, AgentRuntime, RootAuthority
 from sofias_assistant.execution.audit import AuditEntry, AuditService, AuditStore
+from sofias_assistant.execution.development_analysis import (
+    DelegatedContext,
+    DevelopmentAnalysisAgent,
+    development_analysis_definition,
+    register_development_analysis,
+)
 from sofias_assistant.execution.dispatcher import ExecutionDispatcher
 from sofias_assistant.execution.models import (
     AgentDefinition,
+    AgentExecutionOutcome,
     AgentRun,
     AgentRunStatus,
     ArtifactRef,
@@ -53,6 +60,11 @@ __all__ = [
     "AgentDefinition",
     "AgentRun",
     "AgentRunStatus",
+    "AgentExecutionOutcome",
+    "DelegatedContext",
+    "DevelopmentAnalysisAgent",
+    "development_analysis_definition",
+    "register_development_analysis",
     "SpecializationRequest",
     "Task",
     "TaskAttempt",

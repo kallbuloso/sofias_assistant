@@ -2479,3 +2479,51 @@ REMOTE VERIFICATION:
     run 34780920053 — SUCCESS
     https://github.com/kallbuloso/sofias_assistant/actions/runs/34780920053
 ```
+
+## Execution Ledger — I9 local closure checkpoint
+
+```text
+GATE:
+    I9 — Sofia Pode Delegar
+STATUS:
+    ACTIVE — LOCAL IMPLEMENTATION COMPLETE
+CURRENT CHECKPOINT:
+    I9 — Development Analysis Agent vertical integration
+
+COMPLETED:
+- I9 preflight completed: plan, HEAD/worktree, AgentRuntime, TaskRuntime, AI Provider Framework, ToolCallProposal and Audit seams inspected.
+- Directed reference harvest completed for tool-driven loops and delegation; unsafe patterns were rejected.
+- SA-B029: Development Analysis Agent registered through the existing AgentRuntime.
+- Delegated context is reduced to objective, workspace, constraints, selected context and runtime limits.
+- AgentRun accepts an explicit Tool subset and rejects expansion beyond AgentDefinition.
+- Provider/model selection uses CapabilityRouter and TEXT_GENERATION + TOOL_CALLING requirements.
+- Loop is bounded by max_steps, max_tool_calls and max_duration; proposals remain inert until ExecutionRuntime.
+- TaskRuntime has explicit AGENT task creation/completion seams; Task remains distinct from AgentRun.
+- Audit correlation carries task_id and agent_run_id through provider metadata, ToolCall, PolicyDecision, ToolResult and Task result.
+- Deterministic FakeAgentProvider and six Gate I9 integration scenarios added.
+- No new tables, Memory, nested Agent, write/default desktop authority or autonomous coding path.
+
+REMAINING:
+- Commit/push and confirm GitHub Actions green.
+
+FROZEN DECISIONS:
+- AI proposes. Runtime authorizes. Executor acts.
+- Sofia/root creates AgentRuns; providers cannot execute Tools, authorize, widen subset/authority or create Agents.
+- Workspace narrows the operational universe but grants no permission.
+- Existing AgentRuntime, ExecutionRuntime, Policy and Audit remain authoritative.
+
+KNOWN FINDINGS:
+- None blocking. Live provider smoke remains opt-in and is not required for deterministic CI.
+
+DEFERRED:
+- Live AI provider smoke and broader Agent recovery hardening remain outside this Gate.
+
+REAL BLOCKERS:
+    none
+
+CURRENT HEAD:
+    e0599b72e2443100dc6dbe9f0636f9abcdd5250f (baseline before I9 changes)
+
+NEXT ACTION:
+    Commit, push and verify GitHub Actions before closing I9.
+```

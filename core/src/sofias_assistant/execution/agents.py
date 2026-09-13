@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sofias_assistant.execution.models import (
     AgentDefinition,
+    AgentExecutionOutcome,
     AgentRun,
     AgentRunStatus,
     AuthorityContext,
@@ -85,6 +86,9 @@ class AgentExecutionContext:
                 causation_id=self.run.id,
             ),
             grant_id=self._grants.get(name),
+            origin="AGENT_RUN",
+            task_id=self.run.task_id,
+            agent_run_id=self.run.id,
         )
 
     def request_specialization(
@@ -133,6 +137,8 @@ class AgentRuntime:
         definition: AgentDefinition,
         delegated_context: Mapping[str, Any],
         authority: AuthorityContext,
+        allowed_tools: frozenset[str] | None = None,
+        workspace: str | None = None,
     ) -> AgentRun:
         if root_authority is not self._root_authority:
             raise PermissionError("Only Sofia/root may create an AgentRun")
@@ -140,6 +146,13 @@ class AgentRuntime:
             raise ValueError("Agent definition is disabled")
         if not delegated_context:
             raise ValueError("Agent context must be explicitly narrowed")
+        selected_tools = (
+            definition.allowed_tools
+            if allowed_tools is None
+            else frozenset(allowed_tools)
+        )
+        if not selected_tools <= definition.allowed_tools:
+            raise PermissionError("AgentRun tool subset exceeds AgentDefinition")
         run = AgentRun(
             task_id=task.id,
             agent_definition_id=definition.id,
@@ -147,7 +160,8 @@ class AgentRuntime:
             objective=task.objective,
             delegated_context=dict(delegated_context),
             authority_scope=authority.subject,
-            allowed_tools=definition.allowed_tools,
+            allowed_tools=selected_tools,
+            workspace=workspace,
             provider_requirements=definition.provider_requirements,
             runtime_limits=definition.runtime_limits,
         )
@@ -167,6 +181,8 @@ class AgentRuntime:
                 "agent": definition.name,
                 "version": definition.version,
                 "allowed_tools": sorted(definition.allowed_tools),
+                "selected_tools": sorted(selected_tools),
+                "workspace": workspace,
             },
         )
         return run
@@ -178,6 +194,8 @@ class AgentRuntime:
         *,
         grants: Mapping[str, UUID] | None = None,
     ) -> AgentRun:
+        if authority.subject != run.authority_scope:
+            raise PermissionError("AgentRun authority cannot be widened or replaced")
         runner = self._runners.get(run.agent_definition_id)
         if runner is None:
             failed = replace(
@@ -239,9 +257,15 @@ class AgentRuntime:
                 agent_run_id=run.id,
             )
             raise
-        except Exception:
+        except Exception as error:
             failed = replace(
-                started, status=AgentRunStatus.FAILED, finished_at=datetime.now(UTC)
+                started,
+                status=AgentRunStatus.FAILED,
+                result={
+                    "error": "agent execution failed",
+                    "error_type": type(error).__name__,
+                },
+                finished_at=datetime.now(UTC),
             )
             await self.store.update_agent_run(failed)
             await self.execution.audit.record(
@@ -258,10 +282,14 @@ class AgentRuntime:
                 agent_run_id=run.id,
             )
             return failed
+        succeeded = not isinstance(result, AgentExecutionOutcome) or result.succeeded
+        normalized_result = (
+            result.result if isinstance(result, AgentExecutionOutcome) else result
+        )
         completed = replace(
             started,
-            status=AgentRunStatus.SUCCEEDED,
-            result=result,
+            status=AgentRunStatus.SUCCEEDED if succeeded else AgentRunStatus.FAILED,
+            result=normalized_result,
             finished_at=datetime.now(UTC),
         )
         await self.store.update_agent_run(completed)

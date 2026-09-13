@@ -152,8 +152,15 @@ class ExecutionRuntime:
         call: ToolCall,
         *,
         grant_id: UUID | None = None,
+        origin: str = "DIRECT_INVOCATION",
+        task_id: UUID | None = None,
+        agent_run_id: UUID | None = None,
     ) -> ToolResult:
         async with self._lock:
+            audit_refs: dict[str, Any] = {
+                "task_id": task_id,
+                "agent_run_id": agent_run_id,
+            }
             await self.audit.record(
                 event_type="TOOL_CALL_REQUESTED",
                 actor=call.subject,
@@ -161,11 +168,12 @@ class ExecutionRuntime:
                 action=call.name,
                 resource=call.name,
                 outcome="REQUESTED",
-                origin="DIRECT_INVOCATION",
+                origin=origin,
                 correlation_id=call.correlation_id,
                 causation_id=call.causation_id,
                 tool_call_id=call.id,
                 metadata={"argument_keys": sorted(call.arguments)},
+                **audit_refs,
             )
             existing = await self.store.get_tool_call(call.id)
             if existing is not None:
@@ -191,12 +199,16 @@ class ExecutionRuntime:
                     call, "UNREGISTERED_TOOL", "Tool is not registered"
                 )
                 await self.store.save_tool_call(call, status="DENIED", result=result)
-                await self._audit_result(call, result, None, call.name, None)
+                await self._audit_result(
+                    call, result, None, call.name, None, origin, audit_refs
+                )
                 return result
             if not spec.enabled:
                 result = self._error(call, "TOOL_DISABLED", "Tool is disabled")
                 await self.store.save_tool_call(call, status="DENIED", result=result)
-                await self._audit_result(call, result, None, call.name, None)
+                await self._audit_result(
+                    call, result, None, call.name, None, origin, audit_refs
+                )
                 return result
             try:
                 arguments = dict(call.arguments)
@@ -213,7 +225,9 @@ class ExecutionRuntime:
                     call, "INVALID_ARGUMENTS", "Tool arguments are invalid"
                 )
                 await self.store.save_tool_call(call, status="DENIED", result=result)
-                await self._audit_result(call, result, None, call.name, None)
+                await self._audit_result(
+                    call, result, None, call.name, None, origin, audit_refs
+                )
                 return result
             request = PolicyRequest(
                 subject=call.subject,
@@ -237,7 +251,7 @@ class ExecutionRuntime:
                 action=call.name,
                 resource=resource,
                 outcome=decision.outcome.value,
-                origin="DIRECT_INVOCATION",
+                origin=origin,
                 correlation_id=call.correlation_id,
                 causation_id=call.id,
                 tool_call_id=call.id,
@@ -248,6 +262,7 @@ class ExecutionRuntime:
                     "reason": decision.reason,
                     "policy_version": decision.policy_version,
                 },
+                **audit_refs,
             )
             if decision.outcome is DecisionOutcome.REQUIRE_CONFIRMATION:
                 confirmation = ConfirmationRequest(
@@ -280,12 +295,13 @@ class ExecutionRuntime:
                     action=call.name,
                     resource=resource,
                     outcome="WAITING_CONFIRMATION",
-                    origin="DIRECT_INVOCATION",
+                    origin=origin,
                     correlation_id=call.correlation_id,
                     causation_id=decision.id,
                     tool_call_id=call.id,
                     policy_decision_id=decision.id,
                     confirmation_id=confirmation.id,
+                    **audit_refs,
                 )
                 return result
             if decision.outcome is not DecisionOutcome.ALLOW:
@@ -298,7 +314,9 @@ class ExecutionRuntime:
                 await self.store.save_tool_call(
                     call, status="DENIED", result=result, decision_id=decision.id
                 )
-                await self._audit_result(call, result, decision, resource, None)
+                await self._audit_result(
+                    call, result, decision, resource, None, origin, audit_refs
+                )
                 return result
             if grant_id is not None:
                 grant = await self.store.get_grant(grant_id)
@@ -310,7 +328,9 @@ class ExecutionRuntime:
                         await self.store.save_tool_call(
                             call, status="DENIED", result=result
                         )
-                        await self._audit_result(call, result, decision, resource, None)
+                        await self._audit_result(
+                            call, result, decision, resource, None, origin, audit_refs
+                        )
                         return result
                     await self.audit.record(
                         event_type="GRANT_CONSUMED",
@@ -319,12 +339,13 @@ class ExecutionRuntime:
                         action=call.name,
                         resource=resource,
                         outcome="CONSUMED",
-                        origin="DIRECT_INVOCATION",
+                        origin=origin,
                         correlation_id=call.correlation_id,
                         causation_id=decision.id,
                         tool_call_id=call.id,
                         policy_decision_id=decision.id,
                         grant_id=grant_id,
+                        **audit_refs,
                     )
             await self.store.save_tool_call(
                 call, status="RUNNING", decision_id=decision.id
@@ -336,13 +357,14 @@ class ExecutionRuntime:
                 action=call.name,
                 resource=resource,
                 outcome="RUNNING",
-                origin="DIRECT_INVOCATION",
+                origin=origin,
                 correlation_id=call.correlation_id,
                 causation_id=decision.id,
                 tool_call_id=call.id,
                 policy_decision_id=decision.id,
                 grant_id=decision.grant_id,
                 execution_context={"mode": spec.execution_mode.value},
+                **audit_refs,
             )
             try:
                 execution_timeout = (
@@ -389,7 +411,13 @@ class ExecutionRuntime:
                     decision_id=decision.id,
                 )
                 await self._audit_result(
-                    call, result, decision, resource, spec.execution_mode.value
+                    call,
+                    result,
+                    decision,
+                    resource,
+                    spec.execution_mode.value,
+                    origin,
+                    audit_refs,
                 )
                 return result
             except TimeoutError:
@@ -404,7 +432,13 @@ class ExecutionRuntime:
                 call, status="FAILED", result=result, decision_id=decision.id
             )
             await self._audit_result(
-                call, result, decision, resource, spec.execution_mode.value
+                call,
+                result,
+                decision,
+                resource,
+                spec.execution_mode.value,
+                origin,
+                audit_refs,
             )
             return result
 
@@ -503,6 +537,8 @@ class ExecutionRuntime:
         decision: PolicyDecision | None,
         resource: str,
         mode: str | None,
+        origin: str = "DIRECT_INVOCATION",
+        audit_refs: Mapping[str, Any] | None = None,
     ) -> None:
         await self.audit.record(
             event_type=(
@@ -517,7 +553,7 @@ class ExecutionRuntime:
             action=call.name,
             resource=resource,
             outcome=result.status,
-            origin="DIRECT_INVOCATION",
+            origin=origin,
             correlation_id=call.correlation_id,
             causation_id=decision.id if decision else call.id,
             tool_call_id=call.id,
@@ -527,4 +563,5 @@ class ExecutionRuntime:
                 "error_code": result.error.code if result.error else None,
                 "artifact_count": len(result.artifact_refs),
             },
+            **(dict(audit_refs or {})),
         )

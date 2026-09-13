@@ -85,6 +85,14 @@ class AgentRunStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+@dataclass(frozen=True, slots=True)
+class AgentExecutionOutcome:
+    """Explicit runner outcome used by bounded Agent specializations."""
+
+    result: Any
+    succeeded: bool = True
+
+
 class ToolSideEffect(StrEnum):
     """Coarse side-effect classification used by policy defaults."""
 

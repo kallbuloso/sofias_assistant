@@ -79,6 +79,78 @@ class TaskRuntime:
     async def get_task(self, task_id: UUID) -> Task | None:
         return await self.store.get_task(task_id)
 
+    async def create_agent_task(
+        self,
+        *,
+        objective: str,
+        subject: str,
+        authority: AuthorityContext,
+        conversation_id: UUID | None = None,
+        delegation_id: UUID | None = None,
+    ) -> Task:
+        """Create durable work for Sofia/root to delegate to an AgentRun."""
+
+        if self._stopping:
+            raise RuntimeError("Task runtime is stopping")
+        task = Task(
+            objective=objective,
+            subject=subject,
+            origin="TASK",
+            authority=authority,
+            conversation_id=conversation_id,
+            delegation_id=delegation_id,
+            execution_strategy=TaskExecutionStrategy.AGENT,
+        )
+        await self.store.save_task(task)
+        await self.execution.audit.record(
+            event_type="TASK_CREATED",
+            actor=subject,
+            subject=subject,
+            action="task.create",
+            resource=str(task.id),
+            outcome=task.status.value,
+            origin="TASK",
+            correlation_id=task.correlation_id,
+            task_id=task.id,
+            metadata={"objective_summary": objective[:160], "strategy": "AGENT"},
+        )
+        self._cancel_events[task.id] = asyncio.Event()
+        return task
+
+    async def complete_agent_task(
+        self, task_id: UUID, *, result: object, succeeded: bool, agent_run_id: UUID
+    ) -> Task:
+        """Project an Agent result back onto its parent Task; never replace it."""
+
+        task = await self.store.get_task(task_id)
+        if task is None:
+            raise KeyError("Task not found")
+        status = TaskStatus.SUCCEEDED if succeeded else TaskStatus.FAILED
+        updated = replace(
+            task,
+            status=status,
+            result=result,
+            error=None if succeeded else ToolError("AGENT_FAILED", "AgentRun failed"),
+            updated_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        await self.store.update_task(updated)
+        await self.execution.audit.record(
+            event_type="TASK_STATE_CHANGED",
+            actor=task.subject,
+            subject=task.subject,
+            action="task.transition",
+            resource=str(task.id),
+            outcome=status.value,
+            origin="TASK",
+            correlation_id=task.correlation_id,
+            causation_id=agent_run_id,
+            task_id=task.id,
+            agent_run_id=agent_run_id,
+            metadata={"strategy": "AGENT"},
+        )
+        return updated
+
     def pending_confirmation(self, task_id: UUID) -> UUID | None:
         return self._pending_confirmations.get(task_id)
 

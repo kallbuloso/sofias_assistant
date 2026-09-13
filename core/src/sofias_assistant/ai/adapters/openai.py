@@ -51,6 +51,7 @@ from sofias_assistant.ai.contracts import (
     StructuredOutputSpec,
     TextDelta,
     TextResponse,
+    ToolCallProposal,
     UsageMetadata,
     UserTranscriptFinal,
     UserTranscriptPartial,
@@ -91,6 +92,7 @@ class OpenAIProviderAdapter:
         return TextResponse(
             text=response.output_text,
             metadata=_metadata(request, model, response),
+            tool_calls=_tool_calls(response),
             usage=_usage(response),
         )
 
@@ -236,6 +238,7 @@ class OpenAIProviderAdapter:
                     await client.responses.create(
                         model=model.model_id,
                         input=_input_messages(request),
+                        **_tool_parameters(request),
                         store=False,
                         truncation="disabled",
                     ),
@@ -245,6 +248,7 @@ class OpenAIProviderAdapter:
                 await client.responses.create(
                     model=model.model_id,
                     input=_input_messages(request),
+                    **_tool_parameters(request),
                     text=text,
                     store=False,
                     truncation="disabled",
@@ -644,6 +648,60 @@ def _input_messages(request: AIRequest) -> list[EasyInputMessageParam]:
         {"role": role_map[message.role], "content": message.text}
         for message in request.messages
     ]
+
+
+def _tool_parameters(request: AIRequest) -> dict[str, object]:
+    if not request.tools:
+        return {}
+    return {
+        "tools": [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+            for tool in request.tools
+        ]
+    }
+
+
+def _tool_calls(response: Response) -> tuple[ToolCallProposal, ...]:
+    proposals: list[ToolCallProposal] = []
+    for item in getattr(response, "output", ()) or ():
+        if getattr(item, "type", None) != "function_call":
+            continue
+        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+        name = getattr(item, "name", None)
+        raw_arguments = getattr(item, "arguments", None)
+        if not isinstance(call_id, str) or not isinstance(name, str):
+            raise ProviderInvocationError(
+                ProviderError(
+                    ProviderErrorCategory.INVALID_REQUEST,
+                    "OpenAI returned an invalid tool proposal",
+                    False,
+                )
+            )
+        if not isinstance(raw_arguments, str):
+            raise ProviderInvocationError(
+                ProviderError(
+                    ProviderErrorCategory.INVALID_REQUEST,
+                    "OpenAI returned invalid tool arguments",
+                    False,
+                )
+            )
+        try:
+            arguments = json.loads(raw_arguments)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ProviderInvocationError(
+                ProviderError(
+                    ProviderErrorCategory.INVALID_REQUEST,
+                    "OpenAI returned invalid tool arguments",
+                    False,
+                )
+            ) from error
+        proposals.append(ToolCallProposal(call_id, name, arguments))
+    return tuple(proposals)
 
 
 def _metadata(

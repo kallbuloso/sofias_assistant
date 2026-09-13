@@ -173,11 +173,26 @@ class AIMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class AIToolDefinition:
+    """Provider-neutral description of one tool available to an inference."""
+
+    name: str
+    description: str
+    parameters: JsonObject
+
+    def __post_init__(self) -> None:
+        _require_non_blank(self.name, "name")
+        _require_non_blank(self.description, "description")
+        _require_json_value(self.parameters, "parameters")
+
+
+@dataclass(frozen=True, slots=True)
 class AIRequest:
     """Core-owned textual inference request without provider-native objects."""
 
     request_id: UUID
     messages: tuple[AIMessage, ...]
+    tools: tuple[AIToolDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.request_id, UUID):
@@ -186,6 +201,10 @@ class AIRequest:
             isinstance(message, AIMessage) for message in self.messages
         ):
             raise ValueError("messages must be a tuple of AIMessage values")
+        if not isinstance(self.tools, tuple) or not all(
+            isinstance(tool, AIToolDefinition) for tool in self.tools
+        ):
+            raise ValueError("tools must be a tuple of AIToolDefinition values")
 
 
 @dataclass(frozen=True, slots=True)
