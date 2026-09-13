@@ -41,6 +41,9 @@ from sofias_assistant.ai.contracts import (
     UsageUpdated,
     UserTranscriptFinal,
     UserTranscriptPartial,
+    VisionImageInput,
+    VisionRequest,
+    VisionResponse,
     is_terminal_realtime_event,
     is_terminal_stream_event,
 )
@@ -50,6 +53,7 @@ from sofias_assistant.ai.providers import (
     StructuredOutputProvider,
     TextGenerationProvider,
     TextStreamingProvider,
+    VisionProvider,
 )
 from sofias_assistant.ai.registry import (
     ModelAlreadyRegisteredError,
@@ -122,6 +126,10 @@ __all__ = [
     "UsageUpdated",
     "UserTranscriptFinal",
     "UserTranscriptPartial",
+    "VisionImageInput",
+    "VisionRequest",
+    "VisionResponse",
+    "VisionProvider",
     "IncompatibleModelOverrideError",
     "NoCompatibleModelError",
     "RegistryError",

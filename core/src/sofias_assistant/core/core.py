@@ -5,6 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
+from sofias_assistant.capabilities.registration import register_builtin_capabilities
 from sofias_assistant.config.models import RuntimeConfig
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
 from sofias_assistant.conversation.realtime_runtime import RealtimeConversationRuntime
@@ -193,6 +194,7 @@ class SofiaCore:
                 self._resources.session_factory,
                 artifact_root=self._config.paths.data_dir / "artifacts",
             )
+            register_builtin_capabilities(self._execution_runtime)
             self._task_runtime = TaskRuntime(self._execution_runtime)
             self._agent_runtime = AgentRuntime(self._execution_runtime)
             self._compose_conversation_runtime()

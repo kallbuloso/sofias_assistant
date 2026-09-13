@@ -24,6 +24,7 @@ from sofias_assistant.execution.models import (
     PermissionGrant,
     PolicyDecision,
     PolicyRequest,
+    SubprocessInvocation,
     ToolCall,
     ToolError,
     ToolResult,
@@ -201,6 +202,9 @@ class ExecutionRuntime:
                 arguments = dict(call.arguments)
                 if spec.input_validator is not None:
                     arguments = dict(spec.input_validator(arguments))
+                subprocess_invocation: SubprocessInvocation | None = None
+                if spec.subprocess_resolver is not None:
+                    subprocess_invocation = spec.subprocess_resolver(arguments)
                 resource = spec.resource_resolver(arguments)
                 if not resource.strip():
                     raise ValueError("resource resolver returned a blank resource")
@@ -341,9 +345,18 @@ class ExecutionRuntime:
                 execution_context={"mode": spec.execution_mode.value},
             )
             try:
-                async with asyncio.timeout(spec.timeout_seconds):
+                execution_timeout = (
+                    subprocess_invocation.timeout_seconds
+                    if subprocess_invocation is not None
+                    and subprocess_invocation.timeout_seconds is not None
+                    else spec.timeout_seconds
+                )
+                async with asyncio.timeout(execution_timeout):
                     dispatched = await self.dispatcher.dispatch(
-                        spec, arguments, call_id=call.id
+                        spec,
+                        arguments,
+                        call_id=call.id,
+                        subprocess_invocation=subprocess_invocation,
                     )
                 if dispatched.status != "SUCCEEDED":
                     result = ToolResult(
@@ -355,7 +368,7 @@ class ExecutionRuntime:
                     )
                 elif isinstance(dispatched.value, ToolResult):
                     result = ToolResult(
-                        status="SUCCEEDED",
+                        status=dispatched.value.status,
                         call_id=call.id,
                         value=dispatched.value.value,
                         error=dispatched.value.error,
@@ -370,7 +383,10 @@ class ExecutionRuntime:
                         decision=decision,
                     )
                 await self.store.save_tool_call(
-                    call, status="SUCCEEDED", result=result, decision_id=decision.id
+                    call,
+                    status="SUCCEEDED" if result.status == "SUCCEEDED" else "FAILED",
+                    result=result,
+                    decision_id=decision.id,
                 )
                 await self._audit_result(
                     call, result, decision, resource, spec.execution_mode.value

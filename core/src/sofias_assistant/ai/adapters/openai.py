@@ -54,6 +54,8 @@ from sofias_assistant.ai.contracts import (
     UsageMetadata,
     UserTranscriptFinal,
     UserTranscriptPartial,
+    VisionRequest,
+    VisionResponse,
 )
 from sofias_assistant.secrets.models import SecretRef
 from sofias_assistant.secrets.service import SecretService
@@ -90,6 +92,45 @@ class OpenAIProviderAdapter:
             text=response.output_text,
             metadata=_metadata(request, model, response),
             usage=_usage(response),
+        )
+
+    async def generate_vision(
+        self, *, model: ModelIdentity, request: VisionRequest
+    ) -> VisionResponse:
+        """Encode the Core image only at the provider adapter boundary."""
+
+        self._require_openai_model(model)
+        client = self._client()
+        encoded = base64.b64encode(request.image.data).decode("ascii")
+        try:
+            response = await client.responses.create(
+                model=model.model_id,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": request.prompt},
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    f"data:{request.image.media_type};base64,{encoded}"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+                store=False,
+                truncation="disabled",
+            )
+        except _OPENAI_ERRORS as error:
+            raise _normalize_error(error) from error
+        finally:
+            await client.close()
+        if response.status != "completed":
+            raise _terminal_failure(response.status)
+        return VisionResponse(
+            text=response.output_text,
+            metadata=_metadata(request, model, response),
         )
 
     def stream_text(
@@ -606,7 +647,7 @@ def _input_messages(request: AIRequest) -> list[EasyInputMessageParam]:
 
 
 def _metadata(
-    request: AIRequest, model: ModelIdentity, response: Response
+    request: AIRequest | VisionRequest, model: ModelIdentity, response: Response
 ) -> ProviderResponseMetadata:
     return ProviderResponseMetadata(
         request.request_id, model, getattr(response, "_request_id", None), None

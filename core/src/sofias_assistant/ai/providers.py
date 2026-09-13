@@ -14,6 +14,8 @@ from sofias_assistant.ai.contracts import (
     StructuredOutputResult,
     StructuredOutputSpec,
     TextResponse,
+    VisionRequest,
+    VisionResponse,
 )
 
 
@@ -73,3 +75,11 @@ class StructuredOutputProvider(Protocol):
         request: AIRequest,
         spec: StructuredOutputSpec,
     ) -> StructuredOutputResult: ...
+
+
+class VisionProvider(Protocol):
+    """Provider-neutral image inference boundary."""
+
+    async def generate_vision(
+        self, *, model: ModelIdentity, request: VisionRequest
+    ) -> VisionResponse: ...

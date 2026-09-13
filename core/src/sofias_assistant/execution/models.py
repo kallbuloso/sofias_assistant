@@ -240,6 +240,41 @@ class ConfirmationRequest:
 ToolHandler = Callable[[Mapping[str, Any]], Any | Awaitable[Any]]
 ResourceResolver = Callable[[Mapping[str, Any]], str]
 InputValidator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+SubprocessResolver = Callable[[Mapping[str, Any]], "SubprocessInvocation"]
+
+
+@dataclass(frozen=True, slots=True)
+class SubprocessInvocation:
+    """Canonical process invocation handed to the execution isolation boundary."""
+
+    executable: str
+    argv: tuple[str, ...] = ()
+    cwd: str | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
+    stdin: bytes | None = None
+    expect_json_output: bool = False
+    timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.executable.strip():
+            raise ValueError("subprocess executable must not be blank")
+        if any(not isinstance(argument, str) for argument in self.argv):
+            raise ValueError("subprocess argv must contain strings")
+        if self.cwd is not None and not self.cwd.strip():
+            raise ValueError("subprocess cwd must not be blank when provided")
+        if any(
+            not isinstance(key, str) or not key.strip() or not isinstance(value, str)
+            for key, value in self.environment.items()
+        ):
+            raise ValueError("subprocess environment must contain string pairs")
+        if self.stdin is not None and not isinstance(self.stdin, bytes):
+            raise ValueError("subprocess stdin must be bytes when provided")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("subprocess timeout must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +299,7 @@ class ToolSpec:
     subprocess_command: tuple[str, ...] | None = None
     subprocess_cwd: str | None = None
     subprocess_environment: Mapping[str, str] = field(default_factory=dict)
+    subprocess_resolver: SubprocessResolver | None = None
     subprocess_output_limit_bytes: int = 64 * 1024
 
     def __post_init__(self) -> None:
@@ -282,8 +318,11 @@ class ToolSpec:
         if (
             self.execution_mode is ToolExecutionMode.SUBPROCESS
             and not self.subprocess_command
+            and self.subprocess_resolver is None
         ):
-            raise ValueError("SUBPROCESS tools require subprocess_command")
+            raise ValueError(
+                "SUBPROCESS tools require subprocess_command or subprocess_resolver"
+            )
 
 
 @dataclass(frozen=True, slots=True)

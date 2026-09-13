@@ -9,6 +9,7 @@ from sofias_assistant.ai.providers import (
     StructuredOutputProvider,
     TextGenerationProvider,
     TextStreamingProvider,
+    VisionProvider,
 )
 
 
@@ -39,6 +40,7 @@ class ProviderBinding:
     text_streaming: TextStreamingProvider | None = field(default=None, repr=False)
     structured_output: StructuredOutputProvider | None = field(default=None, repr=False)
     realtime: RealtimeProvider | None = field(default=None, repr=False)
+    vision: VisionProvider | None = field(default=None, repr=False)
 
 
 def _identity_label(identity: ModelIdentity) -> str:
@@ -62,6 +64,8 @@ def _validate_binding(descriptor: ModelDescriptor, binding: ProviderBinding) -> 
         raise ValueError("TOOL_CALLING requires a text generation or streaming binding")
     if Capability.REALTIME in capabilities and binding.realtime is None:
         raise ValueError("REALTIME requires a realtime binding")
+    if Capability.IMAGE_INPUT in capabilities and binding.vision is None:
+        raise ValueError("IMAGE_INPUT requires a vision binding")
 
 
 @dataclass(frozen=True, slots=True)

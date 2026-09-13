@@ -68,6 +68,7 @@ def test_capability_baseline_contains_text_and_realtime_capabilities() -> None:
         Capability.REALTIME,
         Capability.AUDIO_INPUT,
         Capability.AUDIO_OUTPUT,
+        Capability.IMAGE_INPUT,
     }
 
 

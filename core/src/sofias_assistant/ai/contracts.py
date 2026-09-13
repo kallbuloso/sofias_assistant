@@ -1,5 +1,7 @@
 """Provider-independent contracts for AI inference boundaries."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
@@ -17,6 +19,7 @@ class Capability(StrEnum):
     REALTIME = "realtime"
     AUDIO_INPUT = "audio_input"
     AUDIO_OUTPUT = "audio_output"
+    IMAGE_INPUT = "image_input"
 
 
 class DataLocality(StrEnum):
@@ -183,6 +186,52 @@ class AIRequest:
             isinstance(message, AIMessage) for message in self.messages
         ):
             raise ValueError("messages must be a tuple of AIMessage values")
+
+
+@dataclass(frozen=True, slots=True)
+class VisionImageInput:
+    """Provider-neutral image bytes; adapters own encoding and transport shape."""
+
+    artifact_id: UUID
+    media_type: str
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, UUID):
+            raise ValueError("artifact_id must be a UUID")
+        _require_non_blank(self.media_type, "media_type")
+        if not isinstance(self.data, bytes) or not self.data:
+            raise ValueError("data must be non-empty bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class VisionRequest:
+    """Small specialized request for one bounded image observation."""
+
+    request_id: UUID
+    prompt: str
+    image: VisionImageInput
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_id, UUID):
+            raise ValueError("request_id must be a UUID")
+        _require_non_blank(self.prompt, "prompt")
+        if not isinstance(self.image, VisionImageInput):
+            raise ValueError("image must be a VisionImageInput")
+
+
+@dataclass(frozen=True, slots=True)
+class VisionResponse:
+    """Normalized provider-neutral observation text."""
+
+    text: str
+    metadata: ProviderResponseMetadata
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str):
+            raise ValueError("text must be a string")
+        if not isinstance(self.metadata, ProviderResponseMetadata):
+            raise ValueError("metadata must be ProviderResponseMetadata")
 
 
 class AudioEncoding(StrEnum):
