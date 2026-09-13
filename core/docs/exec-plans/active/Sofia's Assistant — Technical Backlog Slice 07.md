@@ -3,7 +3,7 @@
 **Nome operacional:** Proactivity & Product Interface  
 **Escopo:** SA-B021 → SA-B023 + SA-B031  
 **Gates-alvo:** I7 — Sofia Pode Reagir; I11 — Interface de Produto  
-**Status:** READY FOR APPROVAL  
+**Status:** APPROVED  
 **Projeto:** Sofia's Assistant  
 **Baseline de implementação:** `31f283b40ced7d5313aced91d26ffcba6d581638`  
 **Último Slice concluído:** Slice 06 — Computer Capabilities & Real Agent — CONCLUÍDO / VERIFICADO REMOTAMENTE  
