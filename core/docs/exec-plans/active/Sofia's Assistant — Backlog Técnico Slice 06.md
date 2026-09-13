@@ -2437,9 +2437,9 @@ NEXT ACTION:
 GATE:
     I8 — Sofia Pode Usar o Computador
 STATUS:
-    CLOSURE READY — LOCAL VERIFIED
+    CLOSED — REMOTE VERIFIED
 CURRENT CHECKPOINT:
-    I8 — vertical integration complete; awaiting remote verification
+    I8 — vertical integration and remote verification complete
 
 COMPLETED:
 - SA-B024: filesystem.read/write/list com canonicalização Windows-first, bounds, atomic write e scope via Policy.
@@ -2452,7 +2452,7 @@ COMPLETED:
 - Smoke Windows local: active_window e captura GDI/BMP real passaram.
 
 REMAINING:
-- Criar commits coesos, push e confirmar GitHub Actions windows-latest verde.
+- Nenhum requisito do Gate I8 restante.
 
 FROZEN DECISIONS:
 - Gate I9 não foi iniciado.
@@ -2470,8 +2470,12 @@ REAL BLOCKERS:
     none
 
 CURRENT HEAD:
-    c611f557fd1d4c9c23b92093c3de438962ca192c
+    e2e9175f08d1309a80b6edae618750d8c6bdce73
 
 NEXT ACTION:
-    Commitar I8, fazer push e aguardar GitHub Actions.
+    Não iniciar Gate I9 nesta execução; próxima unidade é I9 após novo planejamento.
+
+REMOTE VERIFICATION:
+    run 34780645322 — SUCCESS
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/34780645322
 ```
