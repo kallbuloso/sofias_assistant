@@ -3312,3 +3312,203 @@ none
 PLAN STATUS:
 CLOSED
 ```
+
+---
+
+# 105. Post-closure hardening
+
+Applied after Gate I6 closed, against baseline `000d3564801b189c70ee74a26ea0338aaf9c594a`.
+A targeted patch, not a reopening of the Slice or the Gate: no discovery,
+no architecture change, no new backlog item.
+
+## 105.1 Finding
+
+`MemoryCandidate` correctly persisted `cloud_context_eligible`/`memory_id`
+after a successful Remember/Supersede handoff to Sofias Memory, but
+`MemoryOrchestrator.recall_for_turn()` hardcoded
+`cloud_context_eligible=False` for every recalled `MemoryContextItem`,
+regardless of the Assistant-owned local policy on record. Consequence:
+Recall worked, Memory reached LOCAL models, but Memory the Assistant itself
+had explicitly marked `cloud_context_eligible=True` was silently excluded
+from every CLOUD-execution model request — contradicting the frozen Slice 05
+rule (Memory created by the Assistant uses its persisted local policy; only
+a Memory with no known local policy fails closed).
+
+## 105.2 Root cause
+
+`recall_for_turn()` never consulted `MemoryStore` for the recalled item's
+`memory_id`; it unconditionally set the field to `False` (previously a
+deliberate fail-closed placeholder, since no lookup existed yet).
+
+## 105.3 Correction
+
+- `MemoryStore.get_cloud_context_eligibility(memory_id) -> bool | None`
+  resolves the Assistant-owned policy from the `SUCCEEDED` `MemoryCandidate`
+  that produced that `memory_id` (most recently persisted one wins on the
+  rare multi-match path); `None` means no local policy is known. No new
+  migration: the existing `memory_candidates` table already carries
+  `memory_id` and `cloud_context_eligible`; a table scan is adequate at MVP
+  scale, so none was added purely for the lookup.
+- `MemoryOrchestrator.recall_for_turn()` now resolves this per recalled item
+  after the HTTP recall response is received (never inside a SQLite UoW,
+  preserving Amendment 0002 §7) and sets `cloud_context_eligible=bool(...)`:
+  known `True` → included for CLOUD; known `False` or unknown → excluded for
+  CLOUD; unknown remains usable for LOCAL, since eligibility only gates
+  `ContextBuilder`'s CLOUD-target filtering.
+- Never inferred from `MemoryType`, `scope`, `origin_kind`, relevance, or any
+  Sofias Memory-provided field. Sofias Memory remains not an authority on
+  cloud locality.
+
+## 105.4 Cloud-policy tests
+
+Four new Gate I6 vertical tests in
+`tests/integration/gate/test_gate_i6_memory.py`, exercising a real
+`ExecutionLocation.CLOUD` model end to end (`cloud_core`/`cloud_provider`
+fixtures added alongside the existing LOCAL-model `core`/`provider`):
+
+- **true**: `test_vertical_l_recall_preserves_true_local_cloud_policy_for_cloud_model`
+  — Remember with `cloud_context_eligible=True`, Recall, follow-up Turn on a
+  CLOUD model; content and `memory_id` are present in the provider request.
+- **false**: `test_vertical_m_recall_excludes_false_local_cloud_policy_for_cloud_model`
+  — Remember with `cloud_context_eligible=False`; a second, fresh
+  Conversation's CLOUD follow-up never contains the content or `memory_id`
+  (isolated from the unrelated, already-correct historical-Turn inclusion
+  rule via a fresh Conversation, the same pattern vertical A already used).
+- **unknown/CLOUD**: `test_vertical_n_recall_excludes_unknown_local_policy_for_cloud_model`
+  — a Memory created directly through `FakeMemoryProvider` (bypassing the
+  Orchestrator, so no local `MemoryCandidate` exists) is excluded from a
+  CLOUD follow-up.
+- **unknown/LOCAL**: `test_vertical_o_recall_unknown_local_policy_remains_usable_for_local_model`
+  — the same unknown-policy Memory remains usable for a LOCAL model.
+
+Plus `test_get_cloud_context_eligibility_resolves_by_memory_id` in
+`tests/integration/persistence/test_memory_store.py` (True/False/unknown,
+including a PENDING/FAILED candidate that must never leak an eligibility
+value), and the existing malicious/untrusted-Memory vertical
+(`test_vertical_j_malicious_recalled_memory_gains_no_authority`) was left
+unchanged and still passes.
+
+## 105.5 Local dev setup (`.env` / Secret CLI)
+
+Formalizes local setup for real Sofias Memory testing, without changing
+production defaults:
+
+- `config.loader` gains `resolve_environment()` /
+  `load_runtime_config(..., env_file=Path | None)`: a minimal `KEY=VALUE`
+  parser (comments, optional `export `, one layer of quotes; no shell
+  expansion, no interpolation) that overlays non-secret values from an
+  explicit file, with the real environment always taking precedence.
+  Without `env_file`, behavior is byte-for-byte unchanged; nothing is ever
+  discovered implicitly. No new dependency — `python-dotenv` was not needed
+  for a format this small.
+- `core/.env.example` (committed) documents the non-secret configuration;
+  `core/.env` (git-ignored, confirmed via `git check-ignore`) holds the real
+  local values, including the opt-in
+  `SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS` gate.
+- A new Secret CLI, `python -m sofias_assistant.secrets {set,exists,delete}`
+  (`core/src/sofias_assistant/secrets/__main__.py`), administers SecretRefs
+  through the real `WindowsCredentialStore`. `set` reads the value with
+  `getpass.getpass` so it never appears in argv, terminal echo, or shell
+  history. No `show`/`get`/`reveal` command exists. Unit-tested against an
+  in-memory fake store (`tests/unit/secrets/test_cli.py`); the real Windows
+  Credential Manager is never touched by the default suite.
+- `tests/integration/memory/test_memory_live_smoke.py` now loads
+  `core/.env` explicitly through this same mechanism (present only locally;
+  CI has no `.env`, so its opt-in gate keeps resolving from the real
+  environment exactly as before). The Sofias Memory API key still comes
+  exclusively from `SecretService`/`WindowsCredentialStore` — the smoke was
+  not changed to read a secret from the environment.
+- README gained a short "Development configuration (Sofias Memory)" section
+  documenting: copy `.env.example` → `.env`, store the API key via the
+  Secret CLI, run the opt-in smoke.
+
+## 105.6 Real Sofias Memory smoke
+
+```text
+Target:
+https://pefil-sofias-memory.q8cqqr.easypanel.host
+
+SecretRef:
+integrations/sofias-memory/api-key (stored via the new Secret CLI;
+value never seen, logged, or recorded by this session)
+
+Command:
+uv run pytest tests/integration/memory/test_memory_live_smoke.py -v
+
+Result (before the SecretRef existed):
+1 failed — pytest.fail on the missing API key, exactly as designed;
+proves the opt-in gate and .env loading work end to end without ever
+falling back to a false pass.
+
+Result (after the SecretRef was stored):
+1 passed in 14.39s — executed for real, not SKIPPED.
+
+Coverage exercised by the single smoke test:
+/api/v1/info handshake (supports_cognitive_memory asserted),
+PROFILE Create, SEMANTIC Create, same-key Create replay (identical
+memory_id), typed Recall, atomic Supersede, historical Recall at the
+pre-Supersede instant (is_current_truth), precise Forget, repeated
+Forget with a new Idempotency-Key (still FORGOTTEN, not an error).
+
+Cleanup:
+best-effort Forget of every created memory_id in a finally block;
+no leftover live-instance state expected from this run.
+```
+
+## 105.7 Regression
+
+```text
+uv run ruff check .            PASS
+uv run ruff format --check .   PASS (172 files already formatted)
+uv run mypy src tests          PASS (172 source files, no issues)
+uv run pytest -q                651 passed, 3 skipped
+  (skips: OpenAI live, OpenAI Realtime live, Windows Credential Manager
+  live — pre-existing opt-in smokes, unrelated to this patch; no Gate
+  correctness skipped)
+uv lock --check                PASS
+git diff --check                PASS
+Desktop packaging baseline:
+  uv run python -m PyInstaller --noconfirm client/SofiaAssistant.spec
+  → succeeded; dist/SofiaAssistant.exe --smoke → exit code 0
+```
+
+## 105.8 Commits
+
+```text
+cea060f feat(memory): preserve local cloud eligibility on recall
+55f936f feat(dev): add local env and secret setup for memory smoke
+```
+
+## 105.9 Remote verification
+
+```text
+Pushed to origin/main: 000d356..55f936f
+GitHub Actions CI, run 34874120733, commit 55f936f: success
+  (confirmed green in the Actions UI; this session's own polling via
+  the unauthenticated api.github.com REST endpoint hit that API's
+  60-requests/hour rate limit mid-verification and could not also
+  fetch machine-readable run JSON before this record was written)
+```
+
+## 105.10 Deferred / blockers
+
+```text
+Deferred:
+- Per-memory_id local cloud-eligibility policy for recalled items whose
+  origin predates this patch remains unknown -> fail-closed, as already
+  documented in §102; this patch does not change that default, only
+  makes the *known* case actually reach CLOUD.
+- SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS-gated smoke stays opt-in
+  for CI, unchanged.
+
+Blockers:
+none.
+```
+
+## 105.11 Status
+
+```text
+SLICE 05 STATUS: DONE — REMOTE VERIFIED (unchanged; not reopened)
+GATE I6 STATUS: CLOSED — REMOTE VERIFIED (unchanged; not reopened)
+POST-CLOSURE HARDENING STATUS: APPLIED — REMOTE VERIFIED
+```
