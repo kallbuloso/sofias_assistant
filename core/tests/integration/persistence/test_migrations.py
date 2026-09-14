@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0009_cognitive_memory_runtime"
+HEAD_REVISION = "0010_task_attempt_grant"
 DOMAIN_TABLES = {
     "runtime_events",
     "schedules",

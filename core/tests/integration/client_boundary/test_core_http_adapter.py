@@ -134,6 +134,7 @@ async def test_real_core_is_exposed_only_to_authenticated_loopback_session(
                         "status": "unknown",
                         "detail": "Memory is not configured",
                     },
+                    {"name": "recovery", "status": "healthy", "detail": None},
                     {"name": "event-runtime", "status": "healthy", "detail": None},
                     {"name": "scheduler", "status": "healthy", "detail": None},
                     {"name": "notifications", "status": "healthy", "detail": None},

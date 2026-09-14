@@ -10,7 +10,7 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.persistence.database import SQLITE_BUSY_TIMEOUT_MS
 from sofias_assistant.runtime import bootstrap_runtime
 
-HEAD_REVISION = "0009_cognitive_memory_runtime"
+HEAD_REVISION = "0010_task_attempt_grant"
 EXPECTED_TABLES = {
     "alembic_version",
     "application_settings",
