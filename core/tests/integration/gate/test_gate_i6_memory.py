@@ -78,6 +78,8 @@ class FakeOwnership:
 
 def _dependencies_factory(
     provider: ScriptedFakeProvider,
+    *,
+    execution_location: ExecutionLocation = ExecutionLocation.LOCAL,
 ) -> Callable[[SecretService], ConversationRuntimeDependencies]:
     def factory(_: SecretService) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
@@ -86,7 +88,7 @@ def _dependencies_factory(
                 descriptor=ModelDescriptor(
                     identity=ModelIdentity("fake", "gate-i6-model"),
                     capabilities=frozenset({Capability.TEXT_GENERATION}),
-                    execution_location=ExecutionLocation.LOCAL,
+                    execution_location=execution_location,
                     context_window=8_000,
                 ),
                 binding=ProviderBinding(text_generation=provider),
@@ -109,6 +111,8 @@ def _core(
     data_dir: Path,
     provider: ScriptedFakeProvider,
     memory_provider: FakeMemoryProvider,
+    *,
+    execution_location: ExecutionLocation = ExecutionLocation.LOCAL,
 ) -> SofiaCore:
     def memory_factory(_: SecretService) -> FakeMemoryProvider:
         return memory_provider
@@ -126,7 +130,9 @@ def _core(
         application_version="0.1.0.dev0",
         secret_store_factory=FakeSecretStore,
         instance_ownership_factory=lambda _: FakeOwnership(),
-        conversation_dependencies_factory=_dependencies_factory(provider),
+        conversation_dependencies_factory=_dependencies_factory(
+            provider, execution_location=execution_location
+        ),
         memory_provider_factory=memory_factory,
     )
 
@@ -194,6 +200,30 @@ def memory_provider() -> FakeMemoryProvider:
 @pytest_asyncio.fixture
 async def core(tmp_path: Path, provider: ScriptedFakeProvider, memory_provider):
     instance = _core(tmp_path, provider, memory_provider)
+    await instance.start()
+    try:
+        yield instance
+    finally:
+        await instance.stop()
+
+
+@pytest.fixture
+def cloud_provider() -> ScriptedFakeProvider:
+    return ScriptedFakeProvider(text_scripts=[FakeTextSuccess("ok") for _ in range(20)])
+
+
+@pytest_asyncio.fixture
+async def cloud_core(
+    tmp_path: Path, cloud_provider: ScriptedFakeProvider, memory_provider
+):
+    """A second Core wired to a CLOUD-execution model, isolated from `core`."""
+
+    instance = _core(
+        tmp_path,
+        cloud_provider,
+        memory_provider,
+        execution_location=ExecutionLocation.CLOUD,
+    )
     await instance.start()
     try:
         yield instance
@@ -471,3 +501,120 @@ async def test_vertical_k_voice_turn_provenance_has_no_provider_identity(
     assert item.provenance.turn_uuid == voice_turn.id
     assert not hasattr(item.provenance, "provider_session_id")
     assert not hasattr(item.provenance, "provider_request_id")
+
+
+@pytest.mark.asyncio
+async def test_vertical_l_recall_preserves_true_local_cloud_policy_for_cloud_model(
+    cloud_core: SofiaCore, cloud_provider: ScriptedFakeProvider
+) -> None:
+    """Post-closure finding: known True local policy must reach a CLOUD model."""
+
+    conversation = await cloud_core.conversation_runtime.create_conversation()
+    result = await _send(cloud_core, conversation.id, "Prefiro Quasar no frontend.")
+    remembered = await _orchestrator(cloud_core).remember(
+        conversation_id=conversation.id,
+        turn_id=result.turn.id,
+        memory_type=MemoryType.PROFILE,
+        scope="global",
+        cloud_context_eligible=True,
+    )
+    assert remembered.success and remembered.memory_id is not None
+
+    follow_up = await _send(cloud_core, conversation.id, "O que eu prefiro?")
+    assert follow_up.turn.status is TurnStatus.COMPLETED
+    last_request = cloud_provider.invocations()[-1].request
+    serialized = " ".join(message.text for message in last_request.messages)
+    assert "Prefiro Quasar no frontend." in serialized
+    assert str(remembered.memory_id) in serialized
+
+
+@pytest.mark.asyncio
+async def test_vertical_m_recall_excludes_false_local_cloud_policy_for_cloud_model(
+    cloud_core: SofiaCore, cloud_provider: ScriptedFakeProvider
+) -> None:
+    """Known False local policy must never reach a CLOUD model.
+
+    Uses a fresh second Conversation for the follow-up (as vertical A does)
+    so the assertion isolates Memory recall from the unrelated fact that the
+    original Turn's own raw text can also re-enter CLOUD context as ordinary
+    conversation history when that Turn itself is cloud-eligible.
+    """
+
+    conversation_a = await cloud_core.conversation_runtime.create_conversation()
+    result = await _send(cloud_core, conversation_a.id, "Meu CPF e 000.000.000-00.")
+    remembered = await _orchestrator(cloud_core).remember(
+        conversation_id=conversation_a.id,
+        turn_id=result.turn.id,
+        memory_type=MemoryType.PROFILE,
+        scope="global",
+        cloud_context_eligible=False,
+    )
+    assert remembered.success and remembered.memory_id is not None
+
+    conversation_b = await cloud_core.conversation_runtime.create_conversation()
+    follow_up = await _send(cloud_core, conversation_b.id, "Qual e o meu CPF?")
+    assert follow_up.turn.status is TurnStatus.COMPLETED
+    last_request = cloud_provider.invocations()[-1].request
+    serialized = " ".join(message.text for message in last_request.messages)
+    assert "000.000.000-00" not in serialized
+    assert str(remembered.memory_id) not in serialized
+
+
+@pytest.mark.asyncio
+async def test_vertical_n_recall_excludes_unknown_local_policy_for_cloud_model(
+    cloud_core: SofiaCore,
+    cloud_provider: ScriptedFakeProvider,
+    memory_provider: FakeMemoryProvider,
+) -> None:
+    """A Memory with no locally known policy must fail closed for CLOUD."""
+
+    item = await memory_provider.create_memory(
+        CreateMemoryRequest(
+            memory_type=MemoryType.PROFILE,
+            scope="global",
+            content="Fato importado sem policy local conhecida.",
+            provenance=MemoryProvenance(
+                origin_kind=MemoryOriginKind.IMPORTED,
+                source_ref="external-import-tool",
+            ),
+        ),
+        idempotency_key="post-closure-import-cloud",
+    )
+
+    conversation = await cloud_core.conversation_runtime.create_conversation()
+    follow_up = await _send(cloud_core, conversation.id, "O que voce sabe sobre mim?")
+    assert follow_up.turn.status is TurnStatus.COMPLETED
+    last_request = cloud_provider.invocations()[-1].request
+    serialized = " ".join(message.text for message in last_request.messages)
+    assert "Fato importado sem policy local conhecida." not in serialized
+    assert str(item.memory_id) not in serialized
+
+
+@pytest.mark.asyncio
+async def test_vertical_o_recall_unknown_local_policy_remains_usable_for_local_model(
+    core: SofiaCore,
+    provider: ScriptedFakeProvider,
+    memory_provider: FakeMemoryProvider,
+) -> None:
+    """Unknown local policy still fails closed only for CLOUD, not for LOCAL."""
+
+    item = await memory_provider.create_memory(
+        CreateMemoryRequest(
+            memory_type=MemoryType.PROFILE,
+            scope="global",
+            content="Fato importado sem policy local conhecida.",
+            provenance=MemoryProvenance(
+                origin_kind=MemoryOriginKind.IMPORTED,
+                source_ref="external-import-tool",
+            ),
+        ),
+        idempotency_key="post-closure-import-local",
+    )
+
+    conversation = await core.conversation_runtime.create_conversation()
+    follow_up = await _send(core, conversation.id, "O que voce sabe sobre mim?")
+    assert follow_up.turn.status is TurnStatus.COMPLETED
+    last_request = provider.invocations()[-1].request
+    serialized = " ".join(message.text for message in last_request.messages)
+    assert "Fato importado sem policy local conhecida." in serialized
+    assert str(item.memory_id) in serialized

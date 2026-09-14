@@ -115,6 +115,61 @@ async def test_operation_persists_and_reloads_after_simulated_restart(
 
 
 @pytest.mark.asyncio
+async def test_get_cloud_context_eligibility_resolves_by_memory_id(
+    tmp_path: Path,
+) -> None:
+    url = _database_url(tmp_path)
+    await to_thread(upgrade_to_head, url)
+    now = datetime.now(UTC)
+    store = MemoryStore(_session_factory(url))
+
+    eligible_memory_id = uuid4()
+    ineligible_memory_id = uuid4()
+    pending_memory_id = uuid4()
+
+    async def _succeeded_candidate(memory_id, cloud_context_eligible: bool) -> None:
+        candidate = MemoryCandidate(
+            id=uuid4(),
+            memory_type=MemoryType.PROFILE,
+            scope="global",
+            origin_kind=MemoryOriginKind.USER_ASSERTED,
+            decision_status=MemoryCandidateDecisionStatus.APPROVED,
+            persistence_status=MemoryCandidatePersistenceStatus.SUCCEEDED,
+            created_at=now,
+            updated_at=now,
+            cloud_context_eligible=cloud_context_eligible,
+            memory_id=memory_id,
+            persisted_at=now,
+        )
+        await store.save_candidate(candidate)
+
+    await _succeeded_candidate(eligible_memory_id, True)
+    await _succeeded_candidate(ineligible_memory_id, False)
+
+    # A PENDING/FAILED persistence attempt is not Assistant-owned truth for
+    # this memory_id yet; it must never leak an eligibility value.
+    await store.save_candidate(
+        MemoryCandidate(
+            id=uuid4(),
+            memory_type=MemoryType.PROFILE,
+            scope="global",
+            origin_kind=MemoryOriginKind.USER_ASSERTED,
+            decision_status=MemoryCandidateDecisionStatus.APPROVED,
+            persistence_status=MemoryCandidatePersistenceStatus.PENDING,
+            created_at=now,
+            updated_at=now,
+            cloud_context_eligible=True,
+            memory_id=pending_memory_id,
+        )
+    )
+
+    assert await store.get_cloud_context_eligibility(eligible_memory_id) is True
+    assert await store.get_cloud_context_eligibility(ineligible_memory_id) is False
+    assert await store.get_cloud_context_eligibility(pending_memory_id) is None
+    assert await store.get_cloud_context_eligibility(uuid4()) is None
+
+
+@pytest.mark.asyncio
 async def test_get_missing_candidate_and_operation_return_none(
     tmp_path: Path,
 ) -> None:

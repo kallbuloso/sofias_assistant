@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sofias_assistant.memory.models import (
@@ -72,6 +73,26 @@ class MemoryStore:
             for key, value in _operation_record_values(operation).items():
                 setattr(record, key, value)
             await session.commit()
+
+    async def get_cloud_context_eligibility(self, memory_id: UUID) -> bool | None:
+        """Return the Assistant-owned local cloud policy for one `memory_id`.
+
+        Only a `SUCCEEDED` MemoryCandidate is Assistant-owned truth for this
+        `memory_id`; `None` means no local policy is known (caller must fail
+        closed, never infer eligibility from Sofias Memory-provided fields).
+        """
+        async with self._session_factory() as session:
+            statement = (
+                select(MemoryCandidateRecord.cloud_context_eligible)
+                .where(
+                    MemoryCandidateRecord.memory_id == memory_id,
+                    MemoryCandidateRecord.persistence_status
+                    == MemoryCandidatePersistenceStatus.SUCCEEDED.value,
+                )
+                .order_by(MemoryCandidateRecord.persisted_at.desc())
+                .limit(1)
+            )
+            return (await session.execute(statement)).scalars().first()
 
 
 def _candidate_record(candidate: MemoryCandidate) -> MemoryCandidateRecord:

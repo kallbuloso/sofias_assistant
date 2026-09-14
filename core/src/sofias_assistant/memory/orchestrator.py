@@ -155,22 +155,28 @@ class MemoryOrchestrator:
             turn_id=turn.id,
             metadata={"count": len(result.items)},
         )
-        return tuple(
-            MemoryContextItem(
-                memory_id=item.memory.memory_id,
-                memory_type=item.memory.memory_type,
-                scope=item.memory.scope or "",
-                content=item.memory.content or "",
-                relevance=item.relevance,
-                is_current_truth=item.is_current_truth,
-                lifecycle=item.memory.lifecycle,
-                origin_kind=item.memory.provenance.origin_kind,
-                # Unknown local cloud policy for a recalled item fails closed;
-                # never inferred from type/scope/origin/relevance (Slice §46).
-                cloud_context_eligible=False,
+        context_items = []
+        for item in result.items:
+            # Assistant-owned local policy by memory_id, resolved after the
+            # HTTP response (never inside a SQLite UoW). Unknown -> fail
+            # closed; never inferred from type/scope/origin/relevance.
+            local_eligibility = await self._store.get_cloud_context_eligibility(
+                item.memory.memory_id
             )
-            for item in result.items
-        )
+            context_items.append(
+                MemoryContextItem(
+                    memory_id=item.memory.memory_id,
+                    memory_type=item.memory.memory_type,
+                    scope=item.memory.scope or "",
+                    content=item.memory.content or "",
+                    relevance=item.relevance,
+                    is_current_truth=item.is_current_truth,
+                    lifecycle=item.memory.lifecycle,
+                    origin_kind=item.memory.provenance.origin_kind,
+                    cloud_context_eligible=bool(local_eligibility),
+                )
+            )
+        return tuple(context_items)
 
     async def remember(
         self,
