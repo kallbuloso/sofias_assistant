@@ -116,6 +116,9 @@ class TaskRuntime:
     async def get_task(self, task_id: UUID) -> Task | None:
         return await self.store.get_task(task_id)
 
+    async def list_tasks(self, subject: str, *, limit: int = 50) -> tuple[Task, ...]:
+        return await self.store.list_tasks(subject, limit=limit)
+
     async def create_agent_task(
         self,
         *,

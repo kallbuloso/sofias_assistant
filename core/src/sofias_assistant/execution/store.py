@@ -261,6 +261,18 @@ class ExecutionStore:
             record = await session.get(TaskRecord, task_id)
             return _task_from_record(record) if record is not None else None
 
+    async def list_tasks(self, subject: str, *, limit: int = 50) -> tuple[Task, ...]:
+        if not subject.strip() or not 1 <= limit <= 100:
+            raise ValueError("Task listing must be bounded and scoped")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(TaskRecord)
+                .where(TaskRecord.subject == subject)
+                .order_by(TaskRecord.updated_at.desc(), TaskRecord.id)
+                .limit(limit)
+            )
+            return tuple(_task_from_record(row) for row in result.scalars())
+
     async def update_task(self, task: Task) -> None:
         async with self._session_factory() as session:
             record = await session.get(TaskRecord, task.id)

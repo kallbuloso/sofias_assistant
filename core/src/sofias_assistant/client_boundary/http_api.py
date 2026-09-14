@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal, Protocol, assert_never
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
@@ -870,6 +870,16 @@ def create_local_http_app(
             if task is None or task.subject != f"client:{session.id}":
                 raise HTTPException(status_code=404, detail="Task not found")
             return _task_response(task)
+
+        @app.get("/api/v1/tasks", response_model=list[TaskResponse])
+        async def list_tasks(
+            session: Annotated[ClientSession, Depends(require_session)],
+            limit: Annotated[int, Query(ge=1, le=100)] = 50,
+        ) -> list[TaskResponse]:
+            return [
+                _task_response(task)
+                for task in await tasks.list_tasks(f"client:{session.id}", limit=limit)
+            ]
 
         @app.post("/api/v1/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
         async def cancel_task(

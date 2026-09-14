@@ -5,7 +5,7 @@
 **Gates-alvo:** I7 — Sofia Pode Reagir; I11 — Interface de Produto  
 **Status:** APPROVED  
 **Projeto:** Sofia's Assistant  
-**Baseline de implementação:** `31f283b40ced7d5313aced91d26ffcba6d581638`  
+**Baseline de implementação:** `e572f1db229ec5ed18414afd81b8d161e34031f5`
 **Último Slice concluído:** Slice 06 — Computer Capabilities & Real Agent — CONCLUÍDO / VERIFICADO REMOTAMENTE  
 **Slice 05:** adiado até disponibilidade do Sofias Memory v0.7.0  
 **Estratégia de execução:** autonomia por Gate, checkpoints retomáveis, reference harvest dirigido e integração vertical  
@@ -2055,7 +2055,7 @@ Não iniciar Gate I13 antes de I6.
 
 ```text
 Slice 07 status:
-    APPROVED — IN EXECUTION (I7 only)
+    APPROVED — IN EXECUTION (I11 closure pending remote verification)
 
 Execution order:
     ANTICIPATED BEFORE SLICE 05
@@ -2064,23 +2064,23 @@ Reason:
     Sofias Memory v0.7.0 still in development
 
 Implementation baseline:
-    c82e74a86428b5224c0a9d70fbcf249cb1ad6003
-    main; clean worktree; aligned with origin/main at preflight
+    e572f1db229ec5ed18414afd81b8d161e34031f5
+    main; clean worktree; aligned with origin/main at I11 preflight
 
 Previous Slice:
     Slice 06 — CLOSED — REMOTE VERIFIED
 
 Current active Gate:
-    I7 — Sofia Can React
+    I11 — Product Interface
 
 Next Gate:
-    I11 — NOT STARTED; outside this execution
+    I12 — NOT AUTHORIZED in this execution
 
 Gate I7:
     CLOSED — REMOTE VERIFIED
 
 Gate I11:
-    NOT STARTED — awaiting I7 closure and a separate execution
+    IMPLEMENTED — awaiting remote verification
 
 Slice 05 / Gate I6:
     DEFERRED — WAITING FOR SOFIAS MEMORY v0.7.0
@@ -2131,8 +2131,8 @@ DEFERRED (non-blocking):
   distributed coordination, broad calendar/attention policy.
 
 REAL BLOCKERS: none
-CURRENT HEAD: 90f9d9c40767d2c919c1385455bf4625f42ca761
-NEXT ACTION: keep I11 separate; do not start it in this execution.
+CURRENT HEAD: e572f1db229ec5ed18414afd81b8d161e34031f5
+NEXT ACTION: run final staged quality gates, commit/push I11 and verify CI.
 ```
 
 Architecture, semantics, API behavior, concurrency decisions and reference comparison:
@@ -2157,7 +2157,54 @@ Remote verification: GitHub Actions `CI`, run `34789997097`, completed with
 `success` for commit `90f9d9c40767d2c919c1385455bf4625f42ca761`.
 
 Final Gate I7 status: **CLOSED — REMOTE VERIFIED**. Slice 07 remains open because
-Gate I11 and the later Slice 07 scope were explicitly not started in this execution.
+Gate I11 is being completed in the current execution.
+
+## I11 execution evidence / Resume Capsule
+
+```text
+GATE: I11 — Interface de Produto / SA-B031
+STATUS: IMPLEMENTED — awaiting remote verification
+CURRENT CHECKPOINT: I11 — packaging and final verification
+
+COMPLETED:
+- Technology Selection recorded as TDR-0011; PySide6/Qt Widgets selected over
+  Tauri and Electron for the Windows-first Python Core seam.
+- Separate Desktop Client package with authenticated CoreApiClient,
+  ClientApplicationService, Qt Widgets UI, QSystemTrayIcon and PyInstaller
+  Windows executable baseline.
+- Chat streaming, reconnect state, realtime voice controls, confirmation
+  approve/deny, Task listing/cancel, notification sync/ack/native presentation,
+  health projection and supported basic settings.
+- No direct SQLite, repository, Policy, Tool, provider or SecretStore access.
+- Client-only bounded task-list API extension and deterministic client tests.
+
+REMAINING:
+- Final commit/push and remote CI verification.
+- No Gate I12, Slice 05 or other Slice work is authorized.
+
+FROZEN DECISIONS:
+- Core != Desktop Client; Client != authority; localhost != trusted.
+- Local Client Boundary remains the only Core integration boundary.
+- Core owns Conversation, Task, Notification, Confirmation, Grant and Health.
+- Memory remains unavailable/not configured and is not integrated.
+
+KNOWN FINDINGS (corrected):
+- Full pytest exposed a test module basename collision; the new client model
+  test was renamed so the entire suite collects deterministically.
+- Voice start state update had unreachable code; corrected before final gates.
+- Deny confirmation now validates the Core response status/body.
+
+DEFERRED (non-blocking):
+- Real microphone capture/provider audio smoke requiring hardware or credentials.
+- Code signing, commercial installer UX, auto-start and auto-update.
+
+REAL BLOCKERS: none
+CURRENT HEAD: e572f1db229ec5ed18414afd81b8d161e34031f5
+NEXT ACTION: final quality gates, commit/push and remote CI verification.
+```
+
+Architecture and technology comparison: [TDR-0011](../../decisions/TDR-0011-desktop-client-technology.md).
+Implementation details: [Gate I11 implementation note](../../implementation/gate-i11-desktop-client.md).
 
 ---
 
