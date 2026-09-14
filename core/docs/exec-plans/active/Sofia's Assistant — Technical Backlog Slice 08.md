@@ -2849,15 +2849,19 @@ one landed):
 Hardening commits:
 68b459b fix(recovery): close Gate I12 hardening findings 1-4
 e8ea0ba test(recovery): harden gate i12 edge cases for findings 1-4
+b3d59e8 docs(plan): record gate i12 hardening closure and remote verification
 
 Closure commit:
-(recorded after this commit lands)
+b3d59e8920396f4d6344e945ebc5ece5c9dc23b4
 
 Final Gate HEAD:
-(recorded after push, see "New CI run" below)
+b3d59e8920396f4d6344e945ebc5ece5c9dc23b4
 
-CI run:
-(recorded after remote verification of the hardening commits)
+New CI run:
+run 34907927476 — conclusion: success — HEAD
+b3d59e8920396f4d6344e945ebc5ece5c9dc23b4
+(Ruff PASS, Format PASS, Mypy PASS, Pytest 664 passed/4 skipped,
+PyInstaller PASS)
 
 Recovery architecture:
 StartupRecoveryCoordinator (core/src/sofias_assistant/runtime/recovery.py),
@@ -3045,5 +3049,5 @@ scope for I12):
 
 Real blockers: none.
 
-Gate I12 — CLOSED — REMOTE VERIFIED (pending new CI confirmation above)
+Gate I12 — CLOSED — REMOTE VERIFIED
 ```
