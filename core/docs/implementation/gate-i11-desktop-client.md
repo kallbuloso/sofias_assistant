@@ -1,6 +1,6 @@
 # Gate I11 — Desktop Client implementation note
 
-Status: implementation complete; awaiting remote verification
+Status: CLOSED — REMOTE VERIFIED
 
 ## Architecture
 

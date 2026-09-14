@@ -3,7 +3,7 @@
 **Nome operacional:** Proactivity & Product Interface  
 **Escopo:** SA-B021 → SA-B023 + SA-B031  
 **Gates-alvo:** I7 — Sofia Pode Reagir; I11 — Interface de Produto  
-**Status:** APPROVED  
+**Status:** COMPLETED — REMOTE VERIFIED
 **Projeto:** Sofia's Assistant  
 **Baseline de implementação:** `e572f1db229ec5ed18414afd81b8d161e34031f5`
 **Último Slice concluído:** Slice 06 — Computer Capabilities & Real Agent — CONCLUÍDO / VERIFICADO REMOTAMENTE  
@@ -2055,7 +2055,7 @@ Não iniciar Gate I13 antes de I6.
 
 ```text
 Slice 07 status:
-    APPROVED — IN EXECUTION (I11 closure pending remote verification)
+    COMPLETED — REMOTE VERIFIED
 
 Execution order:
     ANTICIPATED BEFORE SLICE 05
@@ -2071,7 +2071,7 @@ Previous Slice:
     Slice 06 — CLOSED — REMOTE VERIFIED
 
 Current active Gate:
-    I11 — Product Interface
+    none — Slice 07 complete
 
 Next Gate:
     I12 — NOT AUTHORIZED in this execution
@@ -2080,7 +2080,7 @@ Gate I7:
     CLOSED — REMOTE VERIFIED
 
 Gate I11:
-    IMPLEMENTED — awaiting remote verification
+    CLOSED — REMOTE VERIFIED
 
 Slice 05 / Gate I6:
     DEFERRED — WAITING FOR SOFIAS MEMORY v0.7.0
@@ -2157,14 +2157,14 @@ Remote verification: GitHub Actions `CI`, run `34789997097`, completed with
 `success` for commit `90f9d9c40767d2c919c1385455bf4625f42ca761`.
 
 Final Gate I7 status: **CLOSED — REMOTE VERIFIED**. Slice 07 remains open because
-Gate I11 is being completed in the current execution.
+Gate I11 was completed in the current execution.
 
 ## I11 execution evidence / Resume Capsule
 
 ```text
 GATE: I11 — Interface de Produto / SA-B031
-STATUS: IMPLEMENTED — awaiting remote verification
-CURRENT CHECKPOINT: I11 — packaging and final verification
+STATUS: CLOSED — REMOTE VERIFIED
+CURRENT CHECKPOINT: I11-D — remote verification complete
 
 COMPLETED:
 - Technology Selection recorded as TDR-0011; PySide6/Qt Widgets selected over
@@ -2179,8 +2179,8 @@ COMPLETED:
 - Client-only bounded task-list API extension and deterministic client tests.
 
 REMAINING:
-- Final commit/push and remote CI verification.
-- No Gate I12, Slice 05 or other Slice work is authorized.
+- None for Gate I11 or Slice 07.
+- Gate I12, Slice 05 and other Slice work remain outside this execution.
 
 FROZEN DECISIONS:
 - Core != Desktop Client; Client != authority; localhost != trusted.
@@ -2199,12 +2199,35 @@ DEFERRED (non-blocking):
 - Code signing, commercial installer UX, auto-start and auto-update.
 
 REAL BLOCKERS: none
-CURRENT HEAD: e572f1db229ec5ed18414afd81b8d161e34031f5
-NEXT ACTION: final quality gates, commit/push and remote CI verification.
+CURRENT HEAD: 31a507548f4aed5afc635a71835fe9940554f5f1
+NEXT ACTION: stop; do not start Gate I12, Slice 05 or another Slice.
 ```
 
 Architecture and technology comparison: [TDR-0011](../../decisions/TDR-0011-desktop-client-technology.md).
 Implementation details: [Gate I11 implementation note](../../implementation/gate-i11-desktop-client.md).
+
+Local verification (2026-09-13):
+
+- Targeted client unit/integration/UI tests: **12 passed**.
+- Full `uv run pytest -q`: **595 passed, 3 skipped** (existing opt-in
+  OpenAI, Realtime and Windows Credential Manager smokes; no Gate correctness
+  skipped).
+- `uv run ruff check src tests`: passed.
+- `uv run ruff format --check src tests`: 155 files already formatted.
+- `uv run mypy src tests`: no issues in 155 source files.
+- `git diff --check`: passed.
+- `uv lock --check`: passed.
+- PySide6 offscreen startup smoke: passed.
+- PyInstaller Windows package baseline: `dist/SofiaAssistant.exe` built.
+- Packaged `SofiaAssistant.exe --smoke`: exit code 0.
+- Real authenticated Local Client Boundary integration: connect, snapshot,
+  Conversation creation and wrong-credential rejection passed offline.
+
+Remote verification: GitHub Actions `CI`, run `34794557233`, completed with
+`success` for commit `31a507548f4aed5afc635a71835fe9940554f5f1`.
+
+Final Gate I11 status: **CLOSED — REMOTE VERIFIED**.
+Final Slice 07 status: **COMPLETED — REMOTE VERIFIED**.
 
 ---
 
