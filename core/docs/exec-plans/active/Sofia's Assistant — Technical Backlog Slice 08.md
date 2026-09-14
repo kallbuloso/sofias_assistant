@@ -2808,3 +2808,135 @@ Real external blocker
 ```
 
 Nenhuma implementação deve começar antes da revisão/aprovação deste Slice.
+
+---
+
+# 86. Gate I12 Closure Ledger
+
+```text
+Baseline:
+436bcf4a4d4ce179e8667da24ef62005e8fc0e2c
+
+Feature commits:
+ae4e2d3 feat(recovery): add startup recovery coordinator and durable Task intent
+4ce1749 test(recovery): close Gate I12 crash scenarios
+
+Closure commit:
+(recorded after this commit lands)
+
+Final Gate HEAD:
+4ce1749fbf11aa9cd2a497f275a7232fd9fea0f2
+
+CI run:
+(recorded after remote verification)
+
+Recovery architecture:
+StartupRecoveryCoordinator (core/src/sofias_assistant/runtime/recovery.py),
+composed in SofiaCore.start() after ExecutionRuntime/TaskRuntime/
+AgentRuntime/Memory and before ProactivityRuntime.start(). It owns no
+recovery logic itself; it calls TaskRuntime.recover_stale_work() and
+MemoryOrchestrator.recover_pending_operations() and wraps the whole pass
+with RECOVERY_PASS_STARTED/RECOVERY_PASS_COMPLETED audit. Reference
+harvest: no external Brahma/Mark LI clone was available in this
+environment (same finding as Slice 05); implementation is clean-room
+from ADR-0010 and the existing runtime.
+
+Migration:
+0010_task_attempt_grant — adds task_attempts.grant_id (nullable UUID).
+No other schema change was needed; every other recovery signal reuses
+existing TaskRecord/TaskAttemptRecord/ToolCallRecord/AgentRunRecord
+fields (status strings, error_code/message, process_id).
+
+Task recovery:
+TaskRuntime.create_task() now persists the ToolCall (status QUEUED) and
+attempt_number=1 (status QUEUED) synchronously, before scheduling any
+in-memory runner — closing the Gap A crash window. recover_stale_work()
+reconciles every non-WAITING_SCHEDULE non-terminal Task: QUEUED
+reconstructs and re-claims when durable intent exists; RUNNING never
+blind-resumes (reconciles from a completed ToolCall's durable evidence,
+retries when idempotent/NONE-side-effect and uncertain, pauses
+otherwise); WAITING_CONFIRMATION is validated for a single coherent
+PENDING confirmation; CANCELLING reconciles to CANCELLED or pauses.
+WAITING_SCHEDULE Tasks are explicitly skipped, left to the existing
+specialized recover_scheduled_tasks() path.
+
+ToolCall uncertainty:
+A ToolCall left RUNNING by a lost runtime session is classified, never
+left as ordinary DUPLICATE_IN_FLIGHT indefinitely: retry-safe
+(idempotent AND side_effect NONE) resets it to QUEUED and requeues the
+Task; otherwise its status becomes "RECOVERY_REQUIRED" and the Task
+pauses.
+
+Subprocess recovery:
+ExecutionDispatcher.dispatch()/_subprocess() gained an
+on_process_started callback invoked right after the child process
+starts; TaskRuntime._run() persists the PID into
+TaskAttempt.process_id via this callback. Recovery reads process_id
+only as evidence — it never adopts or kills a process by PID alone.
+
+AgentRun recovery:
+A stale RUNNING AgentRun is marked FAILED with a structured
+{"error": "runtime_interruption", "recovery_required": True} result;
+its parent Task is paused (REQUIRES_USER_DECISION) instead of
+resuming hidden provider reasoning or restarting the Agent silently.
+
+Confirmation recovery:
+WAITING_CONFIRMATION Tasks are reconciled against the durable
+ConfirmationRequest: still PENDING survives untouched; missing or
+already-resolved-but-unobserved fails closed to PAUSED/
+RECOVERY_REQUIRED rather than auto-approving or duplicating.
+
+Memory operation recovery:
+MemoryOrchestrator.recover_pending_operations() detects APPROVED
+candidates and operations left PENDING/FAILED. Auto-replay (via the
+existing idempotent retry_pending_candidate()/retry_pending_operation())
+is limited to never-attempted work and to transport-interruption
+failures (safe_failure_code == UNAVAILABLE); every other failure
+category is only ever surfaced as durable evidence
+(RECOVERY_MEMORY_OPERATION_DETECTED), never auto-replayed.
+
+Authority recalculation:
+No recovery path bypasses PolicyEngine. Every resumed/retried
+execution re-enters ExecutionRuntime.invoke(), which always evaluates
+Policy fresh. TaskAttempt.grant_id (migration 0010) lets a
+reconstructed/retried attempt reference the grant it originally used,
+but that reference is always re-validated live (ACTIVE/expiry/
+revocation/scope) at the moment of use — never a cached decision, and
+never invented when none is known.
+
+Scheduler regression:
+recover_scheduled_tasks() and its existing test coverage
+(test_gate_i7_proactivity.py) are unchanged and green; the new general
+recovery pass explicitly excludes any Task tied to a TASK_WAKEUP
+schedule so the two passes never race on the same Task (proven by
+Window G).
+
+Crash tests:
+tests/integration/gate/test_gate_i12_recovery.py — 10 passed. Windows
+A–H from Slice §38 plus a durable-evidence reconciliation case and a
+recovery-notification case, all using deterministic direct-persistence
+fixtures (no real process kills, no sleeps).
+
+Full pytest:
+660 passed, 4 skipped (pre-existing opt-in OpenAI/OpenAI Realtime/
+Sofias Memory live/Windows Credential Manager smokes; no Gate
+correctness skipped).
+
+Ruff:      PASS (uv run ruff check .)
+Format:    PASS (uv run ruff format --check . — 175 files already formatted)
+Mypy:      PASS (uv run mypy src tests — 175 source files, no issues)
+Packaging: PASS (uv run python -m PyInstaller --noconfirm client/SofiaAssistant.spec;
+           dist/SofiaAssistant.exe --smoke → exit code 0)
+
+Deferred findings:
+- Fine-grained per-ToolCall side-effect analysis for AgentRun recovery
+  (proving zero side effects before offering auto-resume) remains
+  future work, per Slice §27.1's explicit minimal-safe-behavior
+  allowance; MVP always pauses a stale AgentRun for human decision.
+- Recovery evidence age/retention and any UI-level surfacing beyond the
+  existing Notification boundary remain out of scope for I12.
+
+Real blockers: none.
+
+Gate I12 — CLOSED — REMOTE VERIFIED (pending final CI confirmation below)
+```
