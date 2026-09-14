@@ -264,6 +264,43 @@ class ExecutionStore:
             session.add(_task_record(task))
             await session.commit()
 
+    async def save_task_with_intent(
+        self, task: Task, tool_call: ToolCall, attempt: TaskAttempt
+    ) -> None:
+        """Persist a Task with its initial ToolCall/Attempt in one transaction.
+
+        Closes the Gate I12 Finding 1 crash window: a crash before commit
+        leaves no partially-created Task, and a crash after commit leaves
+        Task + ToolCall(QUEUED) + TaskAttempt(QUEUED) durable together, so
+        the execution intent can always be reconstructed on restart.
+        """
+
+        async with self._session_factory() as session:
+            # No ORM relationship() links these tables, so the unit of work
+            # has no FK-aware insert ordering of its own: flush parent rows
+            # (Task, ToolCall) before the TaskAttempt row that references
+            # both, all still inside this one uncommitted transaction.
+            session.add(_task_record(task))
+            session.add(
+                ToolCallRecord(
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    subject=tool_call.subject,
+                    session_id=tool_call.session_id,
+                    arguments_json=_encode(tool_call.arguments),
+                    status="QUEUED",
+                    result_json=None,
+                    decision_id=None,
+                    confirmation_id=None,
+                    correlation_id=tool_call.correlation_id,
+                    causation_id=tool_call.causation_id,
+                    created_at=datetime.now(call_created_timezone()),
+                )
+            )
+            await session.flush()
+            session.add(_task_attempt_record(attempt))
+            await session.commit()
+
     async def get_task(self, task_id: UUID) -> Task | None:
         async with self._session_factory() as session:
             record = await session.get(TaskRecord, task_id)

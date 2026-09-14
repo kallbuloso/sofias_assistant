@@ -125,7 +125,23 @@ class TaskRuntime:
             correlation_id=tool_call.correlation_id,
             causation_id=tool_call.causation_id,
         )
-        await self.store.save_task(task)
+        # Durable execution intent, atomic with the Task itself (Gap A,
+        # ADR-0010 §83, Gate I12 Finding 1): Task + ToolCall(QUEUED) +
+        # TaskAttempt(QUEUED) land in one SQLite transaction, before any
+        # runner is scheduled. A crash before commit leaves no partially
+        # created Task; a crash after commit leaves all three durable
+        # together, so the intent can always be reconstructed on restart.
+        initial_attempt = TaskAttempt(
+            task_id=task.id,
+            attempt_number=1,
+            tool_call_id=tool_call.id,
+            execution_mode=self._resolve_execution_mode(tool_call.name),
+            grant_id=grant_id,
+            status=TaskStatus.QUEUED,
+            correlation_id=task.correlation_id,
+            causation_id=task.id,
+        )
+        await self.store.save_task_with_intent(task, tool_call, initial_attempt)
         await self.execution.audit.record(
             event_type="TASK_CREATED",
             actor=subject,
@@ -137,23 +153,6 @@ class TaskRuntime:
             correlation_id=task.correlation_id,
             task_id=task.id,
             metadata={"objective_summary": objective[:160]},
-        )
-        # Durable execution intent before any runner is scheduled (Gap A,
-        # ADR-0010 §83): a crash between here and the first ToolCall
-        # persistence inside invoke() must still leave enough evidence to
-        # reconstruct what was intended, not just that a Task existed.
-        await self.store.save_tool_call(tool_call, status="QUEUED")
-        await self.store.save_task_attempt(
-            TaskAttempt(
-                task_id=task.id,
-                attempt_number=1,
-                tool_call_id=tool_call.id,
-                execution_mode=self._resolve_execution_mode(tool_call.name),
-                grant_id=grant_id,
-                status=TaskStatus.QUEUED,
-                correlation_id=task.correlation_id,
-                causation_id=task.id,
-            )
         )
         self._cancel_events[task.id] = asyncio.Event()
         self._tasks[task.id] = asyncio.create_task(
@@ -670,9 +669,15 @@ class TaskRuntime:
         return await self._reconcile_cancelling(task)
 
     async def _reconcile_queued(self, task: Task) -> RecoveryClassification:
+        if task.execution_strategy is TaskExecutionStrategy.AGENT:
+            # The real AgentRuntime.run() lifecycle never promotes the parent
+            # Task to RUNNING (Gate I12 Finding 3): a Task stays QUEUED while
+            # its AgentRun is durably RUNNING, so a stale AgentRun must be
+            # reconciled here too, not only when the Task itself is RUNNING.
+            return await self._reconcile_agent_task(task)
         if task.execution_strategy is not TaskExecutionStrategy.DIRECT_TOOL:
-            # AGENT/WORKFLOW Tasks have no in-process runner to restart here;
-            # they remain QUEUED for their normal external driver.
+            # WORKFLOW Tasks have no in-process runner to restart here; they
+            # remain QUEUED for their normal external driver.
             await self._audit_recovery(
                 task,
                 event_type="RECOVERY_TASK_CLASSIFIED",
@@ -707,7 +712,7 @@ class TaskRuntime:
 
     async def _reconcile_running(self, task: Task) -> RecoveryClassification:
         if task.execution_strategy is TaskExecutionStrategy.AGENT:
-            return await self._reconcile_running_agent(task)
+            return await self._reconcile_agent_task(task)
         attempt = await self._latest_attempt(task.id)
         if attempt is None or attempt.tool_call_id is None:
             return await self._pause_for_reconciliation(
@@ -785,30 +790,46 @@ class TaskRuntime:
             tool_call=call,
         )
 
-    async def _reconcile_running_agent(self, task: Task) -> RecoveryClassification:
+    async def _reconcile_agent_task(self, task: Task) -> RecoveryClassification:
+        """Reconcile an AGENT-strategy Task regardless of its own status.
+
+        AgentRuntime.run() never promotes the parent Task to RUNNING, so a
+        real interrupted AgentRun is observed with Task QUEUED (Gate I12
+        Finding 3). Only a durably RUNNING AgentRun is stale/interrupted
+        evidence; anything else (no run yet, or already terminal) leaves the
+        Task queued for its normal external driver.
+        """
+
         runs = await self.store.list_agent_runs_by_task(task.id)
         latest_run = runs[-1] if runs else None
-        if latest_run is not None and latest_run.status is AgentRunStatus.RUNNING:
-            interrupted = replace(
-                latest_run,
-                status=AgentRunStatus.FAILED,
-                result={"error": "runtime_interruption", "recovery_required": True},
-                finished_at=datetime.now(UTC),
+        if latest_run is None or latest_run.status is not AgentRunStatus.RUNNING:
+            await self._audit_recovery(
+                task,
+                event_type="RECOVERY_TASK_CLASSIFIED",
+                outcome=RecoveryClassification.SAFE_TO_RESUME.value,
+                metadata={"reason": "no in-process runner required"},
             )
-            await self.store.update_agent_run(interrupted)
-            await self.execution.audit.record(
-                event_type="RECOVERY_AGENT_INTERRUPTED",
-                actor="sofias-assistant",
-                subject=task.subject,
-                action="agent.run.recover",
-                resource=str(latest_run.id),
-                outcome="INTERRUPTED",
-                origin="RECOVERY",
-                correlation_id=task.correlation_id,
-                causation_id=task.id,
-                task_id=task.id,
-                agent_run_id=latest_run.id,
-            )
+            return RecoveryClassification.SAFE_TO_RESUME
+        interrupted = replace(
+            latest_run,
+            status=AgentRunStatus.FAILED,
+            result={"error": "runtime_interruption", "recovery_required": True},
+            finished_at=datetime.now(UTC),
+        )
+        await self.store.update_agent_run(interrupted)
+        await self.execution.audit.record(
+            event_type="RECOVERY_AGENT_INTERRUPTED",
+            actor="sofias-assistant",
+            subject=task.subject,
+            action="agent.run.recover",
+            resource=str(latest_run.id),
+            outcome="INTERRUPTED",
+            origin="RECOVERY",
+            correlation_id=task.correlation_id,
+            causation_id=task.id,
+            task_id=task.id,
+            agent_run_id=latest_run.id,
+        )
         return await self._pause_for_reconciliation(
             task,
             reason="stale AgentRun requires an explicit replan/resume decision",
@@ -850,6 +871,7 @@ class TaskRuntime:
 
     async def _reconcile_cancelling(self, task: Task) -> RecoveryClassification:
         attempt = await self._latest_attempt(task.id)
+        stale_call: ToolCall | None = None
         if attempt is not None and attempt.tool_call_id is not None:
             stored_call = await self.store.get_tool_call(attempt.tool_call_id)
             if stored_call is not None and stored_call[2] == "RUNNING":
@@ -869,7 +891,26 @@ class TaskRuntime:
                         ),
                         tool_call=call,
                     )
+                stale_call = call
         await self._finish_cancelled(task.id)
+        if stale_call is not None:
+            # A stale RUNNING read-only/idempotent ToolCall must not keep
+            # looking like ordinary in-flight work once the Task is
+            # cancelled (Gate I12 Finding 4): completion was never
+            # observed, so it is reconciled to a terminal, fail-closed
+            # outcome — never reported as SUCCEEDED.
+            await self.store.save_tool_call(
+                stale_call,
+                status="FAILED",
+                result=ToolResult(
+                    status="FAILED",
+                    call_id=stale_call.id,
+                    error=ToolError(
+                        "CANCELLED_DURING_RECOVERY",
+                        "Task was cancelled while ToolCall outcome was unknown",
+                    ),
+                ),
+            )
         await self._audit_recovery(
             task,
             event_type="RECOVERY_TASK_CLASSIFIED",

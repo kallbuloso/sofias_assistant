@@ -257,6 +257,17 @@ class SofiaCore:
             self._agent_runtime = AgentRuntime(self._execution_runtime)
             memory_health = await self._compose_memory_orchestrator()
             self._compose_conversation_runtime()
+            self._proactivity = ProactivityRuntime(
+                self._resources.session_factory,
+                self._execution_runtime.audit,
+                self._clock,
+            )
+            # Bind the Scheduler onto TaskRuntime before recovery runs, so
+            # general recovery can see which stale Tasks belong to the
+            # specialized Scheduler recovery path (Gate I12 Finding 2) —
+            # bind_tasks() only wires the reference, it starts no Event or
+            # Scheduler processing yet.
+            self._proactivity.bind_tasks(self._task_runtime)
             # Gate I12: reconcile stale durable work from a lost runtime
             # session before Scheduler/Event processing may act on it again.
             recovery = await StartupRecoveryCoordinator(
@@ -265,12 +276,6 @@ class SofiaCore:
                 audit=self._execution_runtime.audit,
                 runtime_session_id=self._session_lifecycle.active_session_id,
             ).run()
-            self._proactivity = ProactivityRuntime(
-                self._resources.session_factory,
-                self._execution_runtime.audit,
-                self._clock,
-            )
-            self._proactivity.bind_tasks(self._task_runtime)
             await self._proactivity.start()
             self._health = RuntimeHealthSnapshot(
                 (

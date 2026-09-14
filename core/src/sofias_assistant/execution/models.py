@@ -383,7 +383,6 @@ class Task:
     finished_at: datetime | None = None
     correlation_id: UUID = field(default_factory=uuid4)
     causation_id: UUID | None = None
-    tool_call_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
