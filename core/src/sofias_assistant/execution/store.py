@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sofias_assistant.execution.models import (
     AgentDefinition,
     AgentRun,
+    AgentRunStatus,
     ArtifactRef,
     ArtifactRetention,
     AuthorityContext,
@@ -219,6 +220,13 @@ class ExecutionStore:
             )
             return call, _decode_result(record.result_json), record.status
 
+    async def get_tool_call_confirmation(self, call_id: UUID) -> UUID | None:
+        """Return the confirmation_id linked to one ToolCall, when any."""
+
+        async with self._session_factory() as session:
+            record = await session.get(ToolCallRecord, call_id)
+            return record.confirmation_id if record is not None else None
+
     async def save_artifact(self, ref: ArtifactRef, relative_path: str) -> None:
         async with self._session_factory() as session:
             session.add(
@@ -269,6 +277,24 @@ class ExecutionStore:
                 select(TaskRecord)
                 .where(TaskRecord.subject == subject)
                 .order_by(TaskRecord.updated_at.desc(), TaskRecord.id)
+                .limit(limit)
+            )
+            return tuple(_task_from_record(row) for row in result.scalars())
+
+    async def list_tasks_by_status(
+        self, statuses: Sequence[TaskStatus], *, limit: int = 500
+    ) -> tuple[Task, ...]:
+        """Return non-terminal Tasks across all subjects for startup recovery."""
+
+        if not statuses or not 1 <= limit <= 1000:
+            raise ValueError("Task recovery listing must be bounded and scoped")
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(TaskRecord)
+                .where(
+                    TaskRecord.status.in_(tuple(status.value for status in statuses))
+                )
+                .order_by(TaskRecord.updated_at, TaskRecord.id)
                 .limit(limit)
             )
             return tuple(_task_from_record(row) for row in result.scalars())
@@ -350,6 +376,15 @@ class ExecutionStore:
             for key, value in _agent_run_record_values(run).items():
                 setattr(record, key, value)
             await session.commit()
+
+    async def list_agent_runs_by_task(self, task_id: UUID) -> tuple[AgentRun, ...]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(AgentRunRecord)
+                .where(AgentRunRecord.task_id == task_id)
+                .order_by(AgentRunRecord.created_at, AgentRunRecord.id)
+            )
+            return tuple(_agent_run_from_record(row) for row in result.scalars())
 
 
 def call_created_timezone() -> Any:
@@ -589,6 +624,7 @@ def _task_attempt_record_values(attempt: TaskAttempt) -> dict[str, Any]:
         if attempt.execution_mode
         else None,
         "process_id": attempt.process_id,
+        "grant_id": attempt.grant_id,
         "result_json": json.dumps(attempt.result, default=_json_default)
         if attempt.result is not None
         else None,
@@ -612,6 +648,7 @@ def _task_attempt_from_record(record: TaskAttemptRecord) -> TaskAttempt:
             ToolExecutionMode(record.execution_mode) if record.execution_mode else None
         ),
         process_id=record.process_id,
+        grant_id=record.grant_id,
         result=json.loads(record.result_json) if record.result_json else None,
         error=(
             ToolError(record.error_code, record.error_message or "Task failed")
@@ -684,3 +721,25 @@ def _agent_run_record_values(run: AgentRun) -> dict[str, Any]:
         "started_at": run.started_at,
         "finished_at": run.finished_at,
     }
+
+
+def _agent_run_from_record(record: AgentRunRecord) -> AgentRun:
+    return AgentRun(
+        id=record.id,
+        task_id=record.task_id,
+        agent_definition_id=record.agent_definition_id,
+        agent_definition_version=record.agent_definition_version,
+        objective=record.objective,
+        delegated_context=json.loads(record.delegated_context_json),
+        authority_scope=record.authority_scope,
+        allowed_tools=frozenset(json.loads(record.allowed_tools_json)["values"]),
+        status=AgentRunStatus(record.status),
+        workspace=record.workspace,
+        provider_requirements=json.loads(record.provider_requirements_json),
+        runtime_limits=json.loads(record.runtime_limits_json),
+        result=json.loads(record.result_json) if record.result_json else None,
+        correlation_id=record.correlation_id,
+        created_at=record.created_at,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )

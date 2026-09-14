@@ -373,6 +373,7 @@ class TaskAttemptRecord(Base):
     tool_call_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     execution_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     process_id: Mapped[int | None] = mapped_column(nullable=True)
+    grant_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

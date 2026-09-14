@@ -28,7 +28,10 @@ NOTIFICATION_TYPES = {
     "ReminderDue": "Reminder due",
     "PermissionRequested": "Permission requested",
     "SubsystemDegraded": "Subsystem degraded",
+    "TaskRecoveryRequired": "Recovery attention required",
 }
+
+_RECOVERY_PAUSE_ERROR_CODES = ("RECOVERY_REQUIRED", "SCHEDULE_RECONCILIATION_REQUIRED")
 
 
 class NotificationService:
@@ -61,6 +64,10 @@ class NotificationService:
                 summary = schedule.reminder
                 if event.payload.get("late") == "true":
                     summary = ("Overdue: " + summary)[:1024]
+            if event.type == "TaskRecoveryRequired":
+                summary = (
+                    "Task paused: " + event.payload.get("reason", "recovery required")
+                )[:1024]
             notification = await session.scalar(
                 select(NotificationRecord).where(
                     NotificationRecord.event_id == event.id
@@ -72,7 +79,12 @@ class NotificationService:
                     event_id=event.id,
                     type=event.type,
                     severity="warning"
-                    if event.type in {"PermissionRequested", "SubsystemDegraded"}
+                    if event.type
+                    in {
+                        "PermissionRequested",
+                        "SubsystemDegraded",
+                        "TaskRecoveryRequired",
+                    }
                     else "info",
                     title=NOTIFICATION_TYPES[event.type],
                     summary=summary,
@@ -94,7 +106,9 @@ class NotificationService:
             origin="NOTIFICATION",
             correlation_id=event.correlation_id,
             causation_id=event.id,
-            task_id=action_reference if event.type == "TaskCompleted" else None,
+            task_id=action_reference
+            if event.type in {"TaskCompleted", "TaskRecoveryRequired"}
+            else None,
             confirmation_id=action_reference
             if event.type == "PermissionRequested"
             else None,
@@ -217,6 +231,43 @@ class NotificationService:
                             causation_id=task.id,
                             durability=Durability.DURABLE,
                             payload={"task_id": str(task.id), "status": task.status},
+                        ),
+                        available_at=self.clock.now(),
+                    )
+                )
+            paused_tasks = await session.scalars(
+                select(TaskRecord)
+                .where(
+                    TaskRecord.status == "PAUSED",
+                    TaskRecord.error_code.in_(_RECOVERY_PAUSE_ERROR_CODES),
+                    ~exists(
+                        select(EventRecord.id).where(
+                            EventRecord.causation_id == TaskRecord.id,
+                            EventRecord.type == "TaskRecoveryRequired",
+                            EventRecord.occurred_at == TaskRecord.updated_at,
+                        )
+                    ),
+                )
+                .limit(100)
+            )
+            for task in paused_tasks:
+                session.add(
+                    event_record(
+                        Event(
+                            id=uuid5(
+                                task.id,
+                                "TaskRecoveryRequired:" + task.updated_at.isoformat(),
+                            ),
+                            type="TaskRecoveryRequired",
+                            source="task-runtime",
+                            occurred_at=task.updated_at,
+                            correlation_id=task.correlation_id,
+                            causation_id=task.id,
+                            durability=Durability.DURABLE,
+                            payload={
+                                "task_id": str(task.id),
+                                "reason": task.error_code or "",
+                            },
                         ),
                         available_at=self.clock.now(),
                     )

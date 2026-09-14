@@ -74,6 +74,55 @@ class MemoryStore:
                 setattr(record, key, value)
             await session.commit()
 
+    async def list_pending_or_failed_candidates(
+        self, *, limit: int = 200
+    ) -> tuple[MemoryCandidate, ...]:
+        """Return APPROVED candidates whose Memory persistence never confirmed.
+
+        Startup recovery evidence only; auto-replay eligibility is decided by
+        the caller from `safe_failure_code` (Slice 08 §32).
+        """
+        async with self._session_factory() as session:
+            statement = (
+                select(MemoryCandidateRecord)
+                .where(
+                    MemoryCandidateRecord.decision_status
+                    == MemoryCandidateDecisionStatus.APPROVED.value,
+                    MemoryCandidateRecord.persistence_status.in_(
+                        (
+                            MemoryCandidatePersistenceStatus.PENDING.value,
+                            MemoryCandidatePersistenceStatus.FAILED.value,
+                        )
+                    ),
+                )
+                .order_by(MemoryCandidateRecord.created_at, MemoryCandidateRecord.id)
+                .limit(limit)
+            )
+            result = await session.execute(statement)
+            return tuple(_candidate_from_record(row) for row in result.scalars())
+
+    async def list_pending_or_failed_operations(
+        self, *, limit: int = 200
+    ) -> tuple[MemoryOperation, ...]:
+        """Return Supersede/Forget operations never confirmed as SUCCEEDED."""
+
+        async with self._session_factory() as session:
+            statement = (
+                select(MemoryOperationRecord)
+                .where(
+                    MemoryOperationRecord.status.in_(
+                        (
+                            MemoryOperationStatus.PENDING.value,
+                            MemoryOperationStatus.FAILED.value,
+                        )
+                    )
+                )
+                .order_by(MemoryOperationRecord.created_at, MemoryOperationRecord.id)
+                .limit(limit)
+            )
+            result = await session.execute(statement)
+            return tuple(_operation_from_record(row) for row in result.scalars())
+
     async def get_cloud_context_eligibility(self, memory_id: UUID) -> bool | None:
         """Return the Assistant-owned local cloud policy for one `memory_id`.
 

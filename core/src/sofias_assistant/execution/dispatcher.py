@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from sofias_assistant.execution.models import (
@@ -28,6 +28,7 @@ class ExecutionDispatcher:
         *,
         call_id: Any,
         subprocess_invocation: SubprocessInvocation | None = None,
+        on_process_started: Callable[[int], Awaitable[None]] | None = None,
     ) -> ToolResult:
         if spec.execution_mode is ToolExecutionMode.IN_PROCESS:
             value = spec.handler(arguments)
@@ -36,7 +37,11 @@ class ExecutionDispatcher:
             return ToolResult(status="SUCCEEDED", call_id=call_id, value=value)
         if spec.execution_mode is ToolExecutionMode.SUBPROCESS:
             return await self._subprocess(
-                spec, arguments, call_id=call_id, invocation=subprocess_invocation
+                spec,
+                arguments,
+                call_id=call_id,
+                invocation=subprocess_invocation,
+                on_process_started=on_process_started,
             )
         return ToolResult(
             status="FAILED",
@@ -51,6 +56,7 @@ class ExecutionDispatcher:
         *,
         call_id: Any,
         invocation: SubprocessInvocation | None,
+        on_process_started: Callable[[int], Awaitable[None]] | None = None,
     ) -> ToolResult:
         if invocation is None:
             command = spec.subprocess_command
@@ -88,6 +94,13 @@ class ExecutionDispatcher:
                 stderr=asyncio.subprocess.PIPE,
                 limit=spec.subprocess_output_limit_bytes + 1,
             )
+            if on_process_started is not None:
+                try:
+                    await on_process_started(process.pid)
+                except Exception:
+                    # PID evidence is best-effort durability, not authority;
+                    # a persistence failure must never block the subprocess.
+                    pass
             if process.stdin is not None:
                 if invocation.stdin is not None:
                     process.stdin.write(invocation.stdin)

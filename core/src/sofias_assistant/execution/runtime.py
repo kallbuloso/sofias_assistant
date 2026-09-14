@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -155,6 +155,7 @@ class ExecutionRuntime:
         origin: str = "DIRECT_INVOCATION",
         task_id: UUID | None = None,
         agent_run_id: UUID | None = None,
+        on_process_started: Callable[[int], Awaitable[None]] | None = None,
     ) -> ToolResult:
         async with self._lock:
             audit_refs: dict[str, Any] = {
@@ -379,6 +380,7 @@ class ExecutionRuntime:
                         arguments,
                         call_id=call.id,
                         subprocess_invocation=subprocess_invocation,
+                        on_process_started=on_process_started,
                     )
                 if dispatched.status != "SUCCEEDED":
                     result = ToolResult(

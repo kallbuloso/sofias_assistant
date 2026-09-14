@@ -114,21 +114,30 @@ class Scheduler:
                 raise ValueError(
                     "Continuation must preserve Task subject and correlation"
                 )
-            if await session.get(ToolCallRecord, call.id) is not None:
-                raise ValueError("Continuation ToolCall must not have been executed")
-            session.add(
-                ToolCallRecord(
-                    id=call.id,
-                    name=call.name,
-                    subject=call.subject,
-                    session_id=call.session_id,
-                    arguments_json=json.dumps(dict(call.arguments)),
-                    status="SCHEDULED",
-                    correlation_id=call.correlation_id,
-                    causation_id=call.causation_id,
-                    created_at=self.clock.now(),
+            existing_call = await session.get(ToolCallRecord, call.id)
+            if existing_call is not None:
+                if existing_call.status != "QUEUED":
+                    raise ValueError(
+                        "Continuation ToolCall must not have been executed"
+                    )
+                # Durable pre-execution intent (Gap A) already persisted this
+                # ToolCall when the Task was created; mark it scheduled in
+                # place instead of rejecting an id that was never executed.
+                existing_call.status = "SCHEDULED"
+            else:
+                session.add(
+                    ToolCallRecord(
+                        id=call.id,
+                        name=call.name,
+                        subject=call.subject,
+                        session_id=call.session_id,
+                        arguments_json=json.dumps(dict(call.arguments)),
+                        status="SCHEDULED",
+                        correlation_id=call.correlation_id,
+                        causation_id=call.causation_id,
+                        created_at=self.clock.now(),
+                    )
                 )
-            )
             await session.flush()
             task.status, task.claimed_by = "WAITING_SCHEDULE", None
             task.updated_at = self.clock.now()

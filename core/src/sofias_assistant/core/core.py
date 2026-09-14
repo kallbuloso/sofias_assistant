@@ -36,6 +36,7 @@ from sofias_assistant.runtime.instance_ownership import (
     CoreInstanceOwnership,
     InstanceOwnership,
 )
+from sofias_assistant.runtime.recovery import StartupRecoveryCoordinator
 from sofias_assistant.runtime.session_lifecycle import RuntimeSessionLifecycle
 from sofias_assistant.secrets.models import SecretRef
 from sofias_assistant.secrets.service import SecretService
@@ -249,10 +250,21 @@ class SofiaCore:
                 artifact_root=self._config.paths.data_dir / "artifacts",
             )
             register_builtin_capabilities(self._execution_runtime)
-            self._task_runtime = TaskRuntime(self._execution_runtime)
+            self._task_runtime = TaskRuntime(
+                self._execution_runtime,
+                owner=f"runtime:{self._session_lifecycle.active_session_id}",
+            )
             self._agent_runtime = AgentRuntime(self._execution_runtime)
             memory_health = await self._compose_memory_orchestrator()
             self._compose_conversation_runtime()
+            # Gate I12: reconcile stale durable work from a lost runtime
+            # session before Scheduler/Event processing may act on it again.
+            recovery = await StartupRecoveryCoordinator(
+                task_runtime=self._task_runtime,
+                memory_orchestrator=self._memory_orchestrator,
+                audit=self._execution_runtime.audit,
+                runtime_session_id=self._session_lifecycle.active_session_id,
+            ).run()
             self._proactivity = ProactivityRuntime(
                 self._resources.session_factory,
                 self._execution_runtime.audit,
@@ -269,6 +281,7 @@ class SofiaCore:
                         "Backend configured; no active probe performed",
                     ),
                     memory_health,
+                    recovery.health,
                 )
             )
             self._state = CoreState.RUNNING

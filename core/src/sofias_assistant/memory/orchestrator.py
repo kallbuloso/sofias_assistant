@@ -24,6 +24,7 @@ from sofias_assistant.memory.models import (
     MemoryCandidateDecisionStatus,
     MemoryCandidatePersistenceStatus,
     MemoryCapabilities,
+    MemoryErrorCategory,
     MemoryInvocationError,
     MemoryItem,
     MemoryOperation,
@@ -80,6 +81,14 @@ class ForgetOutcome:
     success: bool
     memory_id: UUID | None = None
     safe_failure_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryRecoveryReport:
+    """Small, auditable summary of one startup Memory recovery pass."""
+
+    auto_replayed: int = 0
+    evidence_only: int = 0
 
 
 class MemoryOrchestrator:
@@ -753,6 +762,86 @@ class MemoryOrchestrator:
         return ForgetOutcome(
             operation_id=operation.id, success=True, memory_id=tombstone.memory_id
         )
+
+    async def recover_pending_operations(self) -> MemoryRecoveryReport:
+        """Startup pass over durable Memory work left PENDING/FAILED.
+
+        Auto-replay is conservative and reuses the existing idempotent retry
+        methods: a candidate never confirmed (`PENDING`) or one that failed
+        purely from a transport interruption (`safe_failure_code ==
+        UNAVAILABLE`) converges safely on the same Idempotency-Key. Every
+        other failure category (validation, policy rejection, idempotency
+        conflict, lifecycle conflict, auth/configuration) is only surfaced as
+        durable evidence, never auto-replayed (Slice 08 §32).
+        """
+
+        auto_replayed = 0
+        evidence_only = 0
+        for candidate in await self._store.list_pending_or_failed_candidates():
+            never_attempted = (
+                candidate.persistence_status is MemoryCandidatePersistenceStatus.PENDING
+            )
+            if self._safe_to_auto_replay(never_attempted, candidate.safe_failure_code):
+                try:
+                    await self.retry_pending_candidate(candidate.id)
+                    auto_replayed += 1
+                    continue
+                except (MemoryCandidateNotRetryableError, KeyError):
+                    pass
+            evidence_only += 1
+            await self._audit.record(
+                event_type="RECOVERY_MEMORY_OPERATION_DETECTED",
+                actor=_SOURCE_SYSTEM,
+                subject=str(candidate.conversation_id or _SOURCE_SYSTEM),
+                action="recover_candidate",
+                resource="memory_candidate",
+                outcome="evidence_only",
+                origin="RECOVERY",
+                correlation_id=candidate.id,
+                memory_candidate_id=candidate.id,
+                metadata={
+                    "persistence_status": candidate.persistence_status.value,
+                    "safe_failure_code": candidate.safe_failure_code,
+                    "auto_replayed": False,
+                },
+            )
+        for operation in await self._store.list_pending_or_failed_operations():
+            never_attempted = operation.status is MemoryOperationStatus.PENDING
+            if self._safe_to_auto_replay(never_attempted, operation.safe_failure_code):
+                try:
+                    await self.retry_pending_operation(operation.id)
+                    auto_replayed += 1
+                    continue
+                except (MemoryCandidateNotRetryableError, KeyError):
+                    pass
+            evidence_only += 1
+            await self._audit.record(
+                event_type="RECOVERY_MEMORY_OPERATION_DETECTED",
+                actor=_SOURCE_SYSTEM,
+                subject=_SOURCE_SYSTEM,
+                action="recover_operation",
+                resource="memory_operation",
+                outcome="evidence_only",
+                origin="RECOVERY",
+                correlation_id=operation.id,
+                memory_operation_id=operation.id,
+                metadata={
+                    "status": operation.status.value,
+                    "safe_failure_code": operation.safe_failure_code,
+                    "auto_replayed": False,
+                },
+            )
+        return MemoryRecoveryReport(
+            auto_replayed=auto_replayed, evidence_only=evidence_only
+        )
+
+    @staticmethod
+    def _safe_to_auto_replay(
+        never_attempted: bool, safe_failure_code: str | None
+    ) -> bool:
+        if never_attempted:
+            return True
+        return safe_failure_code == MemoryErrorCategory.UNAVAILABLE.value
 
     async def _load_turn(self, conversation_id: UUID, turn_id: UUID) -> Turn:
         async with self._uow_factory() as unit_of_work:

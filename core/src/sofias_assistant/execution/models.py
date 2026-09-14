@@ -74,6 +74,20 @@ class TaskExecutionStrategy(StrEnum):
     AGENT = "AGENT"
 
 
+class RecoveryClassification(StrEnum):
+    """Deterministic, auditable outcome of one startup recovery decision.
+
+    Never LLM-authoritative: evidence and runtime rules decide, not
+    interpretation (ADR-0010 §69, Slice 08 §11/§17).
+    """
+
+    SAFE_TO_RETRY = "SAFE_TO_RETRY"
+    SAFE_TO_RESUME = "SAFE_TO_RESUME"
+    REQUIRES_RECONCILIATION = "REQUIRES_RECONCILIATION"
+    REQUIRES_USER_DECISION = "REQUIRES_USER_DECISION"
+    FAILED_BY_INTERRUPTION = "FAILED_BY_INTERRUPTION"
+
+
 class AgentRunStatus(StrEnum):
     """Lifecycle of one concrete Agent execution."""
 
@@ -369,6 +383,7 @@ class Task:
     finished_at: datetime | None = None
     correlation_id: UUID = field(default_factory=uuid4)
     causation_id: UUID | None = None
+    tool_call_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
@@ -386,6 +401,7 @@ class TaskAttempt:
     tool_call_id: UUID | None = None
     execution_mode: ToolExecutionMode | None = None
     process_id: int | None = None
+    grant_id: UUID | None = None
     result: Any = None
     error: ToolError | None = None
     started_at: datetime | None = None
