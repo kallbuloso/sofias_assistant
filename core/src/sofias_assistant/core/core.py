@@ -13,6 +13,7 @@ from sofias_assistant.conversation.runtime import TextConversationRuntime
 from sofias_assistant.core.composition import (
     ConversationDependenciesFactory,
     ConversationRuntimeDependencies,
+    MemoryProviderFactory,
 )
 from sofias_assistant.execution import AgentRuntime, ExecutionRuntime, TaskRuntime
 from sofias_assistant.health.models import (
@@ -20,6 +21,13 @@ from sofias_assistant.health.models import (
     HealthStatus,
     RuntimeHealthSnapshot,
 )
+from sofias_assistant.memory.adapter import SofiasMemoryAdapter
+from sofias_assistant.memory.contracts import MemoryProvider
+from sofias_assistant.memory.extraction import PassthroughMemoryCandidateExtractor
+from sofias_assistant.memory.models import MemoryInvocationError
+from sofias_assistant.memory.orchestrator import MemoryOrchestrator
+from sofias_assistant.memory.policy import MemoryPolicy
+from sofias_assistant.memory.store import MemoryStore
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 from sofias_assistant.proactivity.models import Clock
 from sofias_assistant.proactivity.runtime import ProactivityRuntime
@@ -29,6 +37,7 @@ from sofias_assistant.runtime.instance_ownership import (
     InstanceOwnership,
 )
 from sofias_assistant.runtime.session_lifecycle import RuntimeSessionLifecycle
+from sofias_assistant.secrets.models import SecretRef
 from sofias_assistant.secrets.service import SecretService
 from sofias_assistant.secrets.store import SecretStore
 from sofias_assistant.secrets.windows_store import WindowsCredentialStore
@@ -59,6 +68,7 @@ class SofiaCore:
         ] = CoreInstanceOwnership,
         conversation_dependencies_factory: ConversationDependenciesFactory
         | None = None,
+        memory_provider_factory: MemoryProviderFactory | None = None,
         clock: Clock | None = None,
     ) -> None:
         if not application_version.strip():
@@ -73,6 +83,8 @@ class SofiaCore:
         self._secret_store_factory = secret_store_factory
         self._instance_ownership_factory = instance_ownership_factory
         self._conversation_dependencies_factory = conversation_dependencies_factory
+        self._memory_provider_factory = memory_provider_factory
+        self._memory_orchestrator: MemoryOrchestrator | None = None
         self._state = CoreState.CREATED
         self._resources: RuntimeResources | None = None
         self._session_lifecycle: RuntimeSessionLifecycle | None = None
@@ -191,6 +203,16 @@ class SofiaCore:
         return self._conversation_runtime
 
     @property
+    def memory_orchestrator(self) -> MemoryOrchestrator | None:
+        """Return the composed MemoryOrchestrator, or None when disabled."""
+
+        if self._state is not CoreState.RUNNING:
+            raise RuntimeError(
+                "Memory Orchestrator is only available while SofiaCore is running"
+            )
+        return self._memory_orchestrator
+
+    @property
     def realtime_conversation_runtime(self) -> RealtimeConversationRuntime:
         """Return the composed realtime runtime only while SofiaCore is running."""
 
@@ -229,6 +251,7 @@ class SofiaCore:
             register_builtin_capabilities(self._execution_runtime)
             self._task_runtime = TaskRuntime(self._execution_runtime)
             self._agent_runtime = AgentRuntime(self._execution_runtime)
+            memory_health = await self._compose_memory_orchestrator()
             self._compose_conversation_runtime()
             self._proactivity = ProactivityRuntime(
                 self._resources.session_factory,
@@ -245,6 +268,7 @@ class SofiaCore:
                         HealthStatus.UNKNOWN,
                         "Backend configured; no active probe performed",
                     ),
+                    memory_health,
                 )
             )
             self._state = CoreState.RUNNING
@@ -355,6 +379,7 @@ class SofiaCore:
         self._conversation_runtime = None
         self._realtime_conversation_runtime = None
         self._conversation_activity_coordinator = None
+        self._memory_orchestrator = None
         self._resources = None
         self._session_lifecycle = None
         self._secret_service = None
@@ -364,6 +389,60 @@ class SofiaCore:
         self._instance_ownership = None
         self._instance_ownership_acquired = False
         self._health = RuntimeHealthSnapshot(())
+
+    async def _compose_memory_orchestrator(self) -> ComponentHealth:
+        """Compose Cognitive Memory when configured; fail closed on incompatibility.
+
+        Memory is never a hard startup dependency: any failure here disables
+        only the Memory subsystem and is reflected as DEGRADED health.
+        """
+
+        resources = self._resources
+        secret_service = self._secret_service
+        execution_runtime = self._execution_runtime
+        if resources is None or secret_service is None or execution_runtime is None:
+            raise RuntimeError("SofiaCore is missing composition resources")
+        memory_config = self._config.memory
+        if not memory_config.enabled or memory_config.base_url is None:
+            self._memory_orchestrator = None
+            return ComponentHealth(
+                "sofias-memory", HealthStatus.UNKNOWN, "Memory is not configured"
+            )
+        provider: MemoryProvider = (
+            self._memory_provider_factory(secret_service)
+            if self._memory_provider_factory is not None
+            else SofiasMemoryAdapter(
+                base_url=memory_config.base_url,
+                secret_service=secret_service,
+                api_key_ref=SecretRef("integrations/sofias-memory/api-key"),
+                timeout_seconds=memory_config.timeout_seconds,
+            )
+        )
+        orchestrator = MemoryOrchestrator(
+            store=MemoryStore(resources.session_factory),
+            provider=provider,
+            policy=MemoryPolicy(),
+            extractor=PassthroughMemoryCandidateExtractor(),
+            audit=execution_runtime.audit,
+            uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
+            recall_top_k=memory_config.recall_limit,
+        )
+        try:
+            capabilities = await orchestrator.probe()
+        except MemoryInvocationError as error:
+            self._memory_orchestrator = None
+            return ComponentHealth(
+                "sofias-memory", HealthStatus.DEGRADED, error.error.safe_message
+            )
+        if not capabilities.supports_cognitive_memory:
+            self._memory_orchestrator = None
+            return ComponentHealth(
+                "sofias-memory",
+                HealthStatus.DEGRADED,
+                "Memory contract is incompatible with required capabilities",
+            )
+        self._memory_orchestrator = orchestrator
+        return ComponentHealth("sofias-memory", HealthStatus.HEALTHY)
 
     def _compose_conversation_runtime(self) -> None:
         factory = self._conversation_dependencies_factory
@@ -387,6 +466,7 @@ class SofiaCore:
             router=dependencies.router,
             context_builder=dependencies.context_builder,
             activity_coordinator=self._conversation_activity_coordinator,
+            memory_orchestrator=self._memory_orchestrator,
         )
         self._realtime_conversation_runtime = RealtimeConversationRuntime(
             uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),

@@ -414,6 +414,7 @@ async def test_running_health_snapshot_is_ordered_and_unknown(tmp_path: Path) ->
                 HealthStatus.UNKNOWN,
                 "Backend configured; no active probe performed",
             ),
+            ("sofias-memory", HealthStatus.UNKNOWN, "Memory is not configured"),
             ("event-runtime", HealthStatus.HEALTHY, None),
             ("scheduler", HealthStatus.HEALTHY, None),
             ("notifications", HealthStatus.HEALTHY, None),

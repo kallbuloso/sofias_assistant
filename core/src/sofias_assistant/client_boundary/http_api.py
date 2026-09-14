@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 
 from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
+from sofias_assistant.client_boundary.memory_http import register_memory_routes
 from sofias_assistant.client_boundary.proactivity_http import (
     register_proactivity_routes,
 )
@@ -47,6 +48,7 @@ from sofias_assistant.health.models import (
     HealthStatus,
     RuntimeHealthSnapshot,
 )
+from sofias_assistant.memory.orchestrator import MemoryOrchestrator
 from sofias_assistant.proactivity.runtime import ProactivityRuntime
 from sofias_assistant.secrets.models import SecretValue
 
@@ -515,6 +517,7 @@ def create_local_http_app(
     execution: ExecutionRuntime | None = None,
     tasks: TaskRuntime | None = None,
     proactivity: ProactivityRuntime | None = None,
+    memory: MemoryOrchestrator | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -556,6 +559,9 @@ def create_local_http_app(
 
     if proactivity is not None:
         register_proactivity_routes(app, require_session, sessions, proactivity)
+
+    if memory is not None:
+        register_memory_routes(app, require_session, memory)
 
     @app.post(
         "/api/v1/client-sessions",

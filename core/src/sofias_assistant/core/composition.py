@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from sofias_assistant.ai.routing import CapabilityRouter
 from sofias_assistant.context.builder import ContextBuilder
+from sofias_assistant.memory.contracts import MemoryProvider
 from sofias_assistant.secrets.service import SecretService
 
 
@@ -25,3 +26,5 @@ class ConversationRuntimeDependencies:
 type ConversationDependenciesFactory = Callable[
     [SecretService], ConversationRuntimeDependencies
 ]
+
+type MemoryProviderFactory = Callable[[SecretService], MemoryProvider]
