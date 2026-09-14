@@ -17,14 +17,41 @@ _DEFAULT_MEMORY_TIMEOUT_SECONDS = 8.0
 _DEFAULT_MEMORY_RECALL_LIMIT = 10
 
 
+def resolve_environment(
+    *,
+    environment: Mapping[str, str] | None = None,
+    env_file: Path | None = None,
+) -> Mapping[str, str]:
+    """Return the effective environment, optionally overlaid with an env file.
+
+    `env_file` is opt-in and explicit: nothing here ever discovers a `.env`
+    file on its own. When given, its non-secret values are merged first and
+    the real `environment` always takes precedence over the file, so an
+    operator's actual environment can still override local development
+    defaults without editing the file. Never a place for secrets: callers
+    that need a credential must keep using `SecretService`.
+    """
+
+    base_environment = os.environ if environment is None else environment
+    if env_file is None:
+        return base_environment
+    merged = _parse_env_file(env_file)
+    merged.update(base_environment)
+    return merged
+
+
 def load_runtime_config(
     *,
     environment: Mapping[str, str] | None = None,
     platform_name: str | None = None,
+    env_file: Path | None = None,
 ) -> RuntimeConfig:
-    """Resolve pure runtime configuration without creating filesystem resources."""
+    """Resolve pure runtime configuration without creating filesystem resources.
 
-    source_environment = os.environ if environment is None else environment
+    See `resolve_environment` for `env_file` semantics.
+    """
+
+    source_environment = resolve_environment(environment=environment, env_file=env_file)
     source_platform_name = os.name if platform_name is None else platform_name
     data_dir = _resolve_data_dir(source_environment, source_platform_name)
     return RuntimeConfig(
@@ -85,3 +112,31 @@ def _resolve_data_dir(environment: Mapping[str, str], platform_name: str) -> Pat
             "default data directory"
         )
     return Path(local_app_data).expanduser() / "SofiasAssistant"
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a minimal `KEY=VALUE` env file; not a shell/Bash parser.
+
+    Supports blank lines, `#` comments, an optional leading `export `, and
+    one layer of matching single/double quotes around the value. No variable
+    interpolation, no multi-line values, no shell expansion.
+    """
+
+    if not path.is_file():
+        raise FileNotFoundError(f"env_file not found: {path}")
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError(f"invalid env_file line in {path}: {raw_line!r}")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        values[key] = value
+    return values

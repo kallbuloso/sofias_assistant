@@ -26,6 +26,36 @@ cd core
 uv run python -m sofias_assistant
 ```
 
+## Development configuration (Sofias Memory)
+
+Local, non-secret configuration lives in `core/.env` (git-ignored):
+
+```powershell
+cd core
+copy .env.example .env
+# edit .env if your Sofias Memory URL/timeouts differ from the defaults
+```
+
+The Sofias Memory API key is never stored in `.env`. Store it via the
+Secret CLI, which prompts interactively and never echoes or logs the value:
+
+```powershell
+uv run python -m sofias_assistant.secrets set integrations/sofias-memory/api-key
+uv run python -m sofias_assistant.secrets exists integrations/sofias-memory/api-key
+uv run python -m sofias_assistant.secrets delete integrations/sofias-memory/api-key
+```
+
+With `.env` configured and the key stored, the opt-in live Sofias Memory
+smoke can run against a real instance:
+
+```powershell
+uv run pytest tests/integration/memory/test_memory_live_smoke.py -v
+```
+
+It stays SKIPPED by default (including in CI) unless
+`SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS=1` is set in `.env` or the
+real environment.
+
 ## Quality commands
 
 ```powershell

@@ -6,13 +6,13 @@ Recall, same-key Create replay, Supersede, historical Recall, Forget, and
 new-key repeated Forget. Cleans up the created items via Forget when safe.
 """
 
-import os
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from sofias_assistant.config.loader import load_runtime_config
+from sofias_assistant.config.loader import load_runtime_config, resolve_environment
 from sofias_assistant.memory.adapter import SofiasMemoryAdapter
 from sofias_assistant.memory.models import (
     CreateMemoryRequest,
@@ -29,8 +29,22 @@ from sofias_assistant.secrets.windows_store import WindowsCredentialStore
 
 _API_KEY_REF = SecretRef("integrations/sofias-memory/api-key")
 
+# `core/.env`: explicit, well-known local dev file. Never read implicitly by
+# production; only this opt-in smoke consults it, and only when present, so
+# CI (which has no `.env`) keeps resolving the opt-in gate from the real
+# environment exactly as before.
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
+
+def _local_env_file() -> Path | None:
+    return _ENV_FILE if _ENV_FILE.is_file() else None
+
+
 pytestmark = pytest.mark.skipif(
-    os.getenv("SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS") != "1",
+    resolve_environment(env_file=_local_env_file()).get(
+        "SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS"
+    )
+    != "1",
     reason="requires explicit Sofias Memory integration smoke opt-in",
 )
 
@@ -39,7 +53,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_sofias_memory_v070_live_contract_smoke() -> None:
-    config = load_runtime_config()
+    config = load_runtime_config(env_file=_local_env_file())
     if not config.memory.enabled or config.memory.base_url is None:
         pytest.fail(
             "SOFIAS_ASSISTANT_MEMORY_BASE_URL must be configured for this smoke"
