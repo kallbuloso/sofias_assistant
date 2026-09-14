@@ -2821,14 +2821,43 @@ Feature commits:
 ae4e2d3 feat(recovery): add startup recovery coordinator and durable Task intent
 4ce1749 test(recovery): close Gate I12 crash scenarios
 
+First closure commit:
+efaa78a2693446542643d2ca7a354bddaeaee7f2
+
+First remote CI:
+run 34898467719 — conclusion: success — HEAD
+efaa78a2693446542643d2ca7a354bddaeaee7f2
+(Ruff PASS, Format PASS, Mypy PASS, Pytest 660 passed/4 skipped,
+PyInstaller PASS)
+
+Independent review — four hardening findings raised against the first
+closure (see per-finding notes below for the correction and tests each
+one landed):
+
+  Finding 1 — durable Task intent was not atomic across Task/ToolCall/
+  Attempt (three separate commits, not one transaction).
+  Finding 2 — general recovery had no Scheduler awareness at Core
+  startup: bind_tasks() ran after StartupRecoveryCoordinator, so
+  TaskRuntime.scheduler was still None during recover_stale_work().
+  Finding 3 — AgentRun recovery only reconciled a Task already RUNNING,
+  but the real AgentRuntime.run() lifecycle leaves the Task QUEUED while
+  its AgentRun is durably RUNNING.
+  Finding 4 — CANCELLING recovery for a read-only/idempotent stale
+  RUNNING ToolCall cancelled the Task but left the ToolCall itself
+  looking like ordinary in-flight RUNNING work forever.
+
+Hardening commits:
+68b459b fix(recovery): close Gate I12 hardening findings 1-4
+e8ea0ba test(recovery): harden gate i12 edge cases for findings 1-4
+
 Closure commit:
 (recorded after this commit lands)
 
 Final Gate HEAD:
-4ce1749fbf11aa9cd2a497f275a7232fd9fea0f2
+(recorded after push, see "New CI run" below)
 
 CI run:
-(recorded after remote verification)
+(recorded after remote verification of the hardening commits)
 
 Recovery architecture:
 StartupRecoveryCoordinator (core/src/sofias_assistant/runtime/recovery.py),
@@ -2843,29 +2872,40 @@ from ADR-0010 and the existing runtime.
 
 Migration:
 0010_task_attempt_grant — adds task_attempts.grant_id (nullable UUID).
-No other schema change was needed; every other recovery signal reuses
+No other schema change was needed for the original I12 implementation
+or for the four hardening findings below; every recovery signal reuses
 existing TaskRecord/TaskAttemptRecord/ToolCallRecord/AgentRunRecord
 fields (status strings, error_code/message, process_id).
 
 Task recovery:
-TaskRuntime.create_task() now persists the ToolCall (status QUEUED) and
-attempt_number=1 (status QUEUED) synchronously, before scheduling any
-in-memory runner — closing the Gap A crash window. recover_stale_work()
+TaskRuntime.create_task() persists the Task, its initial ToolCall
+(status QUEUED) and attempt_number=1 (status QUEUED) in one SQLite
+transaction via the new ExecutionStore.save_task_with_intent() (Finding
+1 — see below), before scheduling any in-memory runner — closing the
+Gap A crash window rigorously, not just partially. recover_stale_work()
 reconciles every non-WAITING_SCHEDULE non-terminal Task: QUEUED
-reconstructs and re-claims when durable intent exists; RUNNING never
-blind-resumes (reconciles from a completed ToolCall's durable evidence,
-retries when idempotent/NONE-side-effect and uncertain, pauses
-otherwise); WAITING_CONFIRMATION is validated for a single coherent
-PENDING confirmation; CANCELLING reconciles to CANCELLED or pauses.
-WAITING_SCHEDULE Tasks are explicitly skipped, left to the existing
-specialized recover_scheduled_tasks() path.
+reconstructs and re-claims when durable intent exists (and, for an
+AGENT-strategy Task, first checks for a stale RUNNING AgentRun —
+Finding 3); RUNNING never blind-resumes (reconciles from a completed
+ToolCall's durable evidence, retries when idempotent/NONE-side-effect
+and uncertain, pauses otherwise); WAITING_CONFIRMATION is validated for
+a single coherent PENDING confirmation; CANCELLING reconciles to
+CANCELLED or pauses, and now also reconciles a stale RUNNING ToolCall
+left behind by a safe cancellation (Finding 4). WAITING_SCHEDULE Tasks
+are explicitly skipped, left to the existing specialized
+recover_scheduled_tasks() path — now correctly, because TaskRuntime.
+scheduler is bound before general recovery runs (Finding 2).
 
 ToolCall uncertainty:
 A ToolCall left RUNNING by a lost runtime session is classified, never
 left as ordinary DUPLICATE_IN_FLIGHT indefinitely: retry-safe
 (idempotent AND side_effect NONE) resets it to QUEUED and requeues the
 Task; otherwise its status becomes "RECOVERY_REQUIRED" and the Task
-pauses.
+pauses. The same rule now also applies when a Task is CANCELLING and
+its last ToolCall is still RUNNING (Finding 4): a retry-safe call is
+reconciled to a terminal FAILED/"CANCELLED_DURING_RECOVERY" outcome
+instead of being left RUNNING forever, and a non-retry-safe call still
+pauses the Task for reconciliation exactly as before.
 
 Subprocess recovery:
 ExecutionDispatcher.dispatch()/_subprocess() gained an
@@ -2874,11 +2914,20 @@ starts; TaskRuntime._run() persists the PID into
 TaskAttempt.process_id via this callback. Recovery reads process_id
 only as evidence — it never adopts or kills a process by PID alone.
 
-AgentRun recovery:
-A stale RUNNING AgentRun is marked FAILED with a structured
-{"error": "runtime_interruption", "recovery_required": True} result;
-its parent Task is paused (REQUIRES_USER_DECISION) instead of
-resuming hidden provider reasoning or restarting the Agent silently.
+AgentRun recovery (Finding 3):
+The real AgentRuntime.run() lifecycle never promotes the parent Task to
+RUNNING — a Task stays QUEUED for the entire AgentRun execution, so the
+original I12 implementation's Task.RUNNING-only reconciliation
+(_reconcile_running_agent) could never see a real interrupted AgentRun.
+_reconcile_agent_task() now runs for an AGENT-strategy Task regardless
+of whether the Task itself is QUEUED or RUNNING: it inspects the latest
+durable AgentRun, and only a genuinely stale RUNNING run is marked
+FAILED with a structured {"error": "runtime_interruption",
+"recovery_required": True} result, with its parent Task paused
+(REQUIRES_USER_DECISION) — never resuming hidden provider reasoning or
+restarting the Agent silently. A Task with no AgentRun yet, or one
+already terminal, is left SAFE_TO_RESUME for its normal external
+driver, unchanged from before.
 
 Confirmation recovery:
 WAITING_CONFIRMATION Tasks are reconciled against the durable
@@ -2906,29 +2955,87 @@ never invented when none is known.
 
 Scheduler regression:
 recover_scheduled_tasks() and its existing test coverage
-(test_gate_i7_proactivity.py) are unchanged and green; the new general
-recovery pass explicitly excludes any Task tied to a TASK_WAKEUP
-schedule so the two passes never race on the same Task (proven by
-Window G).
+(test_gate_i7_proactivity.py) are unchanged and green; the general
+recovery pass still explicitly excludes any Task tied to a TASK_WAKEUP
+schedule so the two passes never race on the same Task (Window G).
+Finding 2 fixed *when* TaskRuntime learns about the Scheduler:
+SofiaCore.start() now calls ProactivityRuntime.bind_tasks() (which only
+wires TaskRuntime.scheduler and an event subscription — it starts no
+Event/Scheduler processing) before StartupRecoveryCoordinator.run(),
+and only calls ProactivityRuntime.start() (specialized Scheduler
+recovery + the tick loop) after. Before this fix, TaskRuntime.scheduler
+was still None during recover_stale_work(), so its scheduled_task_ids
+exclusion set was always empty and a scheduled Task's stale RUNNING
+ToolCall could be reclassified by general recovery itself — proven
+regressed by test_general_recovery_leaves_scheduled_task_to_specialized_
+recovery in tests/integration/core/test_core.py, which builds two real
+SofiaCore instances against the same on-disk database and asserts the
+Task ends PAUSED/SCHEDULE_RECONCILIATION_REQUIRED (the specialized
+path's error code), not general recovery's RECOVERY_REQUIRED.
+
+Atomic durable Task intent (Finding 1):
+ExecutionStore.save_task_with_intent(task, tool_call, attempt) persists
+TaskRecord + ToolCallRecord(QUEUED) + TaskAttemptRecord(QUEUED) in one
+SQLite session/transaction (flushing the Task/ToolCall parent rows
+before the TaskAttempt child row, since no ORM relationship() links
+these tables for automatic FK-aware ordering), replacing the three
+separate commits TaskRuntime.create_task() used before. A crash before
+commit now leaves no partially-created Task at all; a crash after
+commit leaves all three durable together. Proven by
+test_save_task_with_intent_is_atomic_on_partial_failure, which forces
+an IntegrityError partway through (a colliding pre-existing ToolCall
+row) and asserts neither the Task nor the Attempt row was left behind.
+
+Model cleanup:
+Task.tool_call_id (execution/models.py) was a dataclass field that was
+never constructed, never persisted on TaskRecord, and never read
+anywhere — removed rather than kept as a misleading, unpersisted
+duplicate of TaskAttempt.tool_call_id (the actual durable relationship).
 
 Crash tests:
-tests/integration/gate/test_gate_i12_recovery.py — 10 passed. Windows
-A–H from Slice §38 plus a durable-evidence reconciliation case and a
-recovery-notification case, all using deterministic direct-persistence
-fixtures (no real process kills, no sleeps).
+tests/integration/gate/test_gate_i12_recovery.py — 13 passed. Windows
+A–H from Slice §38, the Finding 1 atomicity test, the rewritten Window
+E (real AgentRuntime.run() lifecycle: Task QUEUED + AgentRun RUNNING),
+two new Finding 4 CANCELLING cases (read-only reconciles the stale
+ToolCall / mutating never retries), a durable-evidence reconciliation
+case, and a recovery-notification case — all deterministic
+direct-persistence fixtures (no real process kills, no sleeps). Finding
+2's regression lives in tests/integration/core/test_core.py instead,
+since it is a SofiaCore startup-ordering property, not a TaskRuntime-
+level crash window (Slice §16.5/§78 guidance: keep the Gate file
+focused, not a dumping ground for every finding).
 
 Full pytest:
-660 passed, 4 skipped (pre-existing opt-in OpenAI/OpenAI Realtime/
+664 passed, 4 skipped (pre-existing opt-in OpenAI/OpenAI Realtime/
 Sofias Memory live/Windows Credential Manager smokes; no Gate
-correctness skipped).
+correctness skipped). +4 over the first closure: the atomicity test and
+the two Finding 4 CANCELLING tests in the Gate file, plus the Finding 2
+SofiaCore-ordering test in test_core.py.
 
 Ruff:      PASS (uv run ruff check .)
 Format:    PASS (uv run ruff format --check . — 175 files already formatted)
 Mypy:      PASS (uv run mypy src tests — 175 source files, no issues)
-Packaging: PASS (uv run python -m PyInstaller --noconfirm client/SofiaAssistant.spec;
-           dist/SofiaAssistant.exe --smoke → exit code 0)
+Packaging: PASS (uv run python -m PyInstaller --noconfirm client/SofiaAssistant.spec)
+Packaged smoke: NOT independently re-verified in this hardening session
+— this local sandbox has no interactive Windows desktop session, and
+the onefile SofiaAssistant.exe (a PySide6 GUI app) either hung with no
+output or failed importing _ssl inside the bundle depending on the
+build cache state, consistent with a headless/display-less sandbox
+rather than a code regression (no code touched by these findings is on
+the ssl/websockets/Qt import path, and dist/SofiaAssistant.exe --smoke
+is not part of the CI workflow — only the PyInstaller build step is).
+The PyInstaller build itself succeeded both times, including a fully
+clean --clean rebuild. This is a local environment limitation, not a
+claimed pass; it should be re-verified on a machine with an interactive
+desktop session before relying on it, and remote CI (which does not run
+the packaged exe) is the actual gating signal for this closure.
 
-Deferred findings:
+Independent review findings 1–4: all resolved by the hardening commits
+above (atomic Task intent, Scheduler-aware startup ordering, real
+AgentRun-lifecycle reconciliation, CANCELLING ToolCall reconciliation).
+
+Deferred findings (unchanged from the first closure, still out of
+scope for I12):
 - Fine-grained per-ToolCall side-effect analysis for AgentRun recovery
   (proving zero side effects before offering auto-resume) remains
   future work, per Slice §27.1's explicit minimal-safe-behavior
@@ -2938,5 +3045,5 @@ Deferred findings:
 
 Real blockers: none.
 
-Gate I12 — CLOSED — REMOTE VERIFIED (pending final CI confirmation below)
+Gate I12 — CLOSED — REMOTE VERIFIED (pending new CI confirmation above)
 ```
