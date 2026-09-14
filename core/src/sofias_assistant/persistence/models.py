@@ -473,3 +473,79 @@ class AuditEntryRecord(Base):
         Uuid(as_uuid=True), nullable=True
     )
     artifact_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    memory_candidate_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    memory_operation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    memory_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+
+class MemoryCandidateRecord(Base):
+    """Assistant-owned durable MemoryCandidate; never a MemoryItem replica."""
+
+    __tablename__ = "memory_candidates"
+    __table_args__ = (
+        CheckConstraint("memory_type IN ('profile','semantic')"),
+        CheckConstraint(
+            "origin_kind IN ('user_asserted','tool_observed','imported',"
+            "'inferred','assistant_generated')"
+        ),
+        CheckConstraint("decision_status IN ('PENDING','APPROVED','REJECTED')"),
+        CheckConstraint(
+            "persistence_status IN ('NOT_REQUESTED','PENDING','SUCCEEDED','FAILED')"
+        ),
+        Index("ix_memory_candidates_conversation_id", "conversation_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    memory_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    origin_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    decision_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    persistence_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    turn_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    task_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    confirmation_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    valid_until: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    cloud_context_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    safe_failure_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    persisted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class MemoryOperationRecord(Base):
+    """Assistant-owned durable identity for one Supersede/Forget mutation."""
+
+    __tablename__ = "memory_operations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('SUPERSEDE','FORGET')"),
+        CheckConstraint("status IN ('PENDING','SUCCEEDED','FAILED')"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_memory_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    replacement_candidate_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    replacement_memory_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    safe_failure_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

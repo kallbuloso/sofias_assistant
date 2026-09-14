@@ -52,6 +52,9 @@ class AuditEntry:
     delegation_id: UUID | None = None
     confirmation_id: UUID | None = None
     artifact_id: UUID | None = None
+    memory_candidate_id: UUID | None = None
+    memory_operation_id: UUID | None = None
+    memory_id: UUID | None = None
     id: UUID = field(default_factory=uuid4)
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -187,6 +190,9 @@ class AuditService:
             delegation_id=references.get("delegation_id"),
             confirmation_id=references.get("confirmation_id"),
             artifact_id=references.get("artifact_id"),
+            memory_candidate_id=references.get("memory_candidate_id"),
+            memory_operation_id=references.get("memory_operation_id"),
+            memory_id=references.get("memory_id"),
         )
         return await self.store.append(entry)
 
@@ -249,6 +255,9 @@ def _record(entry: AuditEntry) -> AuditEntryRecord:
         delegation_id=entry.delegation_id,
         confirmation_id=entry.confirmation_id,
         artifact_id=entry.artifact_id,
+        memory_candidate_id=entry.memory_candidate_id,
+        memory_operation_id=entry.memory_operation_id,
+        memory_id=entry.memory_id,
     )
 
 
@@ -279,4 +288,7 @@ def _entry(record: AuditEntryRecord) -> AuditEntry:
         delegation_id=record.delegation_id,
         confirmation_id=record.confirmation_id,
         artifact_id=record.artifact_id,
+        memory_candidate_id=record.memory_candidate_id,
+        memory_operation_id=record.memory_operation_id,
+        memory_id=record.memory_id,
     )

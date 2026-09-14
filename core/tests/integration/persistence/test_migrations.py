@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0008_proactivity"
+HEAD_REVISION = "0009_cognitive_memory_runtime"
 DOMAIN_TABLES = {
     "runtime_events",
     "schedules",
@@ -42,6 +42,8 @@ DOMAIN_TABLES = {
     "agent_definitions",
     "agent_runs",
     "audit_entries",
+    "memory_candidates",
+    "memory_operations",
 }
 
 
@@ -156,6 +158,35 @@ def test_upgrade_from_0002_backfills_turn_cloud_context_eligibility(
         ).fetchone()[0]
     assert "cloud_context_eligible" in column_names
     assert eligible == 0
+
+
+def test_upgrade_from_0008_adds_cognitive_memory_runtime_state(
+    tmp_path: Path,
+) -> None:
+    url = database_url(tmp_path)
+    upgrade_to_revision(url, "0008_proactivity")
+    path = url.removeprefix("sqlite+aiosqlite:///")
+    with sqlite3.connect(path) as connection:
+        audit_columns_before = {
+            row[1] for row in connection.execute("PRAGMA table_info(audit_entries)")
+        }
+    assert "memory_candidate_id" not in audit_columns_before
+
+    upgrade_to_head(url)
+
+    with sqlite3.connect(path) as connection:
+        assert {"memory_candidates", "memory_operations"} <= table_names(url)
+        audit_columns_after = {
+            row[1] for row in connection.execute("PRAGMA table_info(audit_entries)")
+        }
+        candidate_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(memory_candidates)")
+        }
+    assert {"memory_candidate_id", "memory_operation_id", "memory_id"} <= (
+        audit_columns_after
+    )
+    assert "memory_session_id" not in candidate_columns
+    assert "memory_session_id" not in audit_columns_after
 
 
 @pytest.mark.asyncio

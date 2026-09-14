@@ -49,6 +49,8 @@ def test_base_metadata_contains_mapped_operational_tables() -> None:
         "runtime_events",
         "schedules",
         "notifications",
+        "memory_candidates",
+        "memory_operations",
     }
 
 
