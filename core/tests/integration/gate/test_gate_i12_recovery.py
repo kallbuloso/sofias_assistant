@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from sofias_assistant.capabilities.shell import ShellCapability
@@ -28,6 +29,8 @@ from sofias_assistant.execution import (
     ExecutionRuntime,
     GrantLifetime,
     RecoveryClassification,
+    Task,
+    TaskAttempt,
     TaskRuntime,
     ToolCall,
     ToolSpec,
@@ -182,6 +185,63 @@ async def test_window_a_durable_intent_survives_crash_before_execution(
     finally:
         await tasks2.stop()
         await engine2.dispose()
+
+
+@pytest.mark.asyncio
+async def test_save_task_with_intent_is_atomic_on_partial_failure(
+    db: tuple[Path, str],
+) -> None:
+    """Gate I12 Finding 1: Task + ToolCall + Attempt commit as one unit."""
+
+    tmp_path, url = db
+    await asyncio.to_thread(upgrade_to_head, url)
+    execution, engine = await _new_execution(tmp_path, url)
+    try:
+        call = ToolCall(name="gate.i12.read", arguments={"value": "ok"}, subject="root")
+        # Pre-create a colliding ToolCallRecord so the atomic insert fails
+        # partway through the same transaction as the Task/Attempt.
+        async with execution.store._session_factory() as session:  # noqa: SLF001
+            session.add(
+                ToolCallRecord(
+                    id=call.id,
+                    name=call.name,
+                    subject=call.subject,
+                    session_id=call.session_id,
+                    arguments_json="{}",
+                    status="QUEUED",
+                    correlation_id=call.correlation_id,
+                    causation_id=call.causation_id,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+        task = Task(
+            objective="atomic intent",
+            subject="root",
+            authority=AuthorityContext("root"),
+        )
+        attempt = TaskAttempt(
+            task_id=task.id,
+            attempt_number=1,
+            tool_call_id=call.id,
+            status=TaskStatus.QUEUED,
+        )
+        with pytest.raises(IntegrityError):
+            await execution.store.save_task_with_intent(task, call, attempt)
+
+        async with execution.store._session_factory() as session:  # noqa: SLF001
+            assert await session.get(TaskRecord, task.id) is None
+            attempts = (
+                await session.scalars(
+                    select(TaskAttemptRecord).where(
+                        TaskAttemptRecord.task_id == task.id
+                    )
+                )
+            ).all()
+            assert attempts == []
+    finally:
+        await engine.dispose()
 
 
 async def _force_running(
@@ -418,6 +478,14 @@ async def test_window_d_subprocess_pid_is_captured_and_never_adopted_or_killed(
 async def test_window_e_stale_agent_run_is_interrupted_not_resumed(
     db: tuple[Path, str],
 ) -> None:
+    """Gate I12 Finding 3: reconcile the real AgentRuntime.run() lifecycle.
+
+    AgentRuntime.run() marks the AgentRun RUNNING durably but never
+    promotes the parent Task; the Task stays QUEUED for the entire
+    execution. Recovery must reconcile from that real shape, not from a
+    Task.RUNNING state AgentRuntime never actually produces.
+    """
+
     tmp_path, url = db
     await asyncio.to_thread(upgrade_to_head, url)
     execution, engine = await _new_execution(tmp_path, url)
@@ -442,6 +510,7 @@ async def test_window_e_stale_agent_run_is_interrupted_not_resumed(
             subject="root",
             authority=AuthorityContext("root"),
         )
+        assert task.status is TaskStatus.QUEUED
         run = await agents.create_agent_run(
             root_authority=agents.root_authority,
             task=task,
@@ -449,13 +518,15 @@ async def test_window_e_stale_agent_run_is_interrupted_not_resumed(
             delegated_context={"objective": task.objective},
             authority=AuthorityContext("root"),
         )
+        # Only the AgentRun is forced RUNNING, matching the real lifecycle
+        # exactly; the Task record is left untouched (still QUEUED).
         async with execution.store._session_factory() as session:  # noqa: SLF001
-            task_record = await session.get(TaskRecord, task.id)
             run_record = await session.get(AgentRunRecord, run.id)
-            assert task_record is not None and run_record is not None
-            task_record.status, task_record.claimed_by = "RUNNING", "previous-core"
+            assert run_record is not None
             run_record.status = "RUNNING"
             await session.commit()
+        durable_task = await tasks.get_task(task.id)
+        assert durable_task is not None and durable_task.status is TaskStatus.QUEUED
     finally:
         await engine.dispose()
 
@@ -472,6 +543,8 @@ async def test_window_e_stale_agent_run_is_interrupted_not_resumed(
         assert runs[-1].status is AgentRunStatus.FAILED
         assert runs[-1].result is not None
         assert runs[-1].result.get("recovery_required") is True
+        # No hidden reasoning resume, no duplicate runner spawned.
+        assert task.id not in tasks2._tasks  # noqa: SLF001
     finally:
         await tasks2.stop()
         await engine2.dispose()
@@ -517,6 +590,122 @@ async def test_window_f_waiting_confirmation_survives_without_duplication(
         approved = await tasks2.approve_confirmation(task.id, confirmation_id)
         assert approved.status is TaskStatus.SUCCEEDED
         assert approved.result == {"wrote": "ok"}
+    finally:
+        await tasks2.stop()
+        await engine2.dispose()
+
+
+async def _force_cancelling(
+    execution: ExecutionRuntime, task_id: UUID, call_id: UUID, *, owner: str
+) -> None:
+    """Directly mutate durable state to a CANCELLING Task + RUNNING ToolCall."""
+
+    async with execution.store._session_factory() as session:  # noqa: SLF001
+        task_record = await session.get(TaskRecord, task_id)
+        call_record = await session.get(ToolCallRecord, call_id)
+        assert task_record is not None and call_record is not None
+        task_record.status, task_record.claimed_by = "CANCELLING", owner
+        task_record.cancellation_requested = True
+        call_record.status = "RUNNING"
+        attempts = await session.scalars(
+            select(TaskAttemptRecord).where(TaskAttemptRecord.task_id == task_id)
+        )
+        for record in attempts:
+            record.status = "RUNNING"
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_finding4_cancelling_read_only_reconciles_stale_toolcall(
+    db: tuple[Path, str],
+) -> None:
+    """Gate I12 Finding 4a: CANCELLING never leaves a stale RUNNING ToolCall.
+
+    A read-only/idempotent ToolCall left RUNNING when a Task is CANCELLING
+    is reconciled to a terminal, fail-closed outcome — never SUCCEEDED, and
+    never left looking like ordinary in-flight work.
+    """
+
+    tmp_path, url = db
+    await asyncio.to_thread(upgrade_to_head, url)
+    execution, engine = await _new_execution(tmp_path, url)
+    grant_id = await _grant(execution, subject="root", capability="gate.i12.read")
+    tasks = TaskRuntime(execution)
+    try:
+        call = ToolCall(name="gate.i12.read", arguments={"value": "ok"}, subject="root")
+        task = await tasks.create_task(
+            objective="cancelling read-only",
+            subject="root",
+            tool_call=call,
+            grant_id=grant_id,
+        )
+        await _force_cancelling(execution, task.id, call.id, owner="previous-core")
+        await tasks.stop()
+    finally:
+        await engine.dispose()
+
+    execution2, engine2 = await _new_execution(tmp_path, url)
+    tasks2 = TaskRuntime(execution2)
+    try:
+        report = await tasks2.recover_stale_work()
+        assert dict(report.classifications)[task.id] is (
+            RecoveryClassification.SAFE_TO_RESUME
+        )
+        assert task.id not in tasks2._tasks  # no execution occurs
+        recovered = await tasks2.get_task(task.id)
+        assert recovered is not None and recovered.status is TaskStatus.CANCELLED
+        stored_call = await execution2.store.get_tool_call(call.id)
+        assert stored_call is not None
+        assert stored_call[2] == "FAILED"
+        assert stored_call[1] is not None and stored_call[1].error is not None
+        assert stored_call[1].error.code == "CANCELLED_DURING_RECOVERY"
+    finally:
+        await tasks2.stop()
+        await engine2.dispose()
+
+
+@pytest.mark.asyncio
+async def test_finding4_cancelling_mutating_never_retries(
+    db: tuple[Path, str],
+) -> None:
+    """Gate I12 Finding 4b: a mutating uncertain ToolCall never blind-retries,
+    even when the Task was already being cancelled."""
+
+    tmp_path, url = db
+    await asyncio.to_thread(upgrade_to_head, url)
+    execution, engine = await _new_execution(tmp_path, url)
+    grant_id = await _grant(execution, subject="root", capability="gate.i12.write")
+    tasks = TaskRuntime(execution)
+    try:
+        call = ToolCall(
+            name="gate.i12.write", arguments={"value": "ok"}, subject="root"
+        )
+        task = await tasks.create_task(
+            objective="cancelling mutating",
+            subject="root",
+            tool_call=call,
+            grant_id=grant_id,
+        )
+        await _force_cancelling(execution, task.id, call.id, owner="previous-core")
+        await tasks.stop()
+    finally:
+        await engine.dispose()
+
+    execution2, engine2 = await _new_execution(tmp_path, url)
+    tasks2 = TaskRuntime(execution2)
+    try:
+        report = await tasks2.recover_stale_work()
+        assert dict(report.classifications)[task.id] is (
+            RecoveryClassification.REQUIRES_RECONCILIATION
+        )
+        assert task.id not in tasks2._tasks  # no retry
+        recovered = await tasks2.get_task(task.id)
+        assert recovered is not None and recovered.status is TaskStatus.PAUSED
+        assert recovered.error is not None and recovered.error.code == (
+            "RECOVERY_REQUIRED"
+        )
+        stored_call = await execution2.store.get_tool_call(call.id)
+        assert stored_call is not None and stored_call[2] == "RECOVERY_REQUIRED"
     finally:
         await tasks2.stop()
         await engine2.dispose()

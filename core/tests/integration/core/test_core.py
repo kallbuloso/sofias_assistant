@@ -1,6 +1,6 @@
 """Integration tests for SofiaCore foundation lifecycle composition."""
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -38,13 +38,21 @@ from sofias_assistant.core import (
     CoreState,
     SofiaCore,
 )
+from sofias_assistant.execution import ToolCall
+from sofias_assistant.execution.models import TaskStatus
 from sofias_assistant.health import HealthStatus
 from sofias_assistant.persistence.database import (
     create_async_engine,
     create_session_factory,
 )
-from sofias_assistant.persistence.models import RuntimeSession, RuntimeSessionStatus
+from sofias_assistant.persistence.models import (
+    RuntimeSession,
+    RuntimeSessionStatus,
+    TaskRecord,
+    ToolCallRecord,
+)
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sofias_assistant.proactivity.models import FakeClock
 from sofias_assistant.runtime import CoreAlreadyRunningError, operational_database_url
 from sofias_assistant.secrets.models import SecretRef, SecretValue
 from tests.support.ai import (
@@ -633,3 +641,89 @@ async def test_already_running_fails_before_secret_or_operational_store(
     assert not config.paths.data_dir.exists()
     assert not config.paths.operational_database.exists()
     assert core.runtime_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_general_recovery_leaves_scheduled_task_to_specialized_recovery(
+    tmp_path: Path,
+) -> None:
+    """Gate I12 Finding 2: general recovery must see the Scheduler binding.
+
+    TaskRuntime.scheduler has to be wired (ProactivityRuntime.bind_tasks())
+    before the Startup Recovery Coordinator runs, so general recovery can
+    correctly exclude a Task tied to a TASK_WAKEUP schedule and leave it to
+    the specialized Scheduler recovery path. Before the fix, bind_tasks()
+    only happened after recovery: TaskRuntime.scheduler was still None
+    during recover_stale_work(), so its scheduled_task_ids exclusion set
+    was always empty and a scheduled Task could be reclassified by general
+    recovery instead — racing the specialized path.
+    """
+
+    config = runtime_config(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, tzinfo=UTC))
+
+    core1 = SofiaCore(
+        config,
+        application_version="0.1.0.dev0",
+        secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
+        clock=clock,
+    )
+    await core1.start()
+    resources = core1._resources  # noqa: SLF001
+    assert resources is not None
+    try:
+        call = ToolCall(
+            name="core.recovery.read", arguments={"value": "ok"}, subject="root"
+        )
+        task = await core1.task_runtime.create_task(
+            objective="scheduled continuation",
+            subject="root",
+            tool_call=call,
+            wait_until=clock.now() + timedelta(seconds=1),
+        )
+        task_id = task.id
+        await core1.task_runtime._tasks[task_id]  # noqa: SLF001
+        clock.advance(timedelta(seconds=1))
+        await core1.proactivity.scheduler.tick()
+        # Force the exact interrupted-mid-continuation shape: the schedule
+        # fired (COMPLETED) but the resumed execution crashed while RUNNING,
+        # before its outcome was observed.
+        async with resources.session_factory() as session:
+            task_record = await session.get(TaskRecord, task_id)
+            call_record = await session.get(ToolCallRecord, call.id)
+            assert task_record is not None and call_record is not None
+            task_record.status, task_record.claimed_by = "RUNNING", "previous-core"
+            call_record.status = "RUNNING"
+            await session.commit()
+    finally:
+        # Simulate a crash: abandon in-memory tracking without a graceful
+        # shutdown (which would cleanly mark the RuntimeSession stopped and
+        # defeat the crash simulation this test depends on).
+        await core1.task_runtime.stop()
+        await core1.proactivity.stop()
+        await resources.close()
+
+    core2 = SofiaCore(
+        config,
+        application_version="0.1.0.dev0",
+        secret_store_factory=RecordingSecretStoreFactory(),
+        instance_ownership_factory=fake_ownership_factory,
+        clock=clock,
+    )
+    await core2.start()
+    try:
+        recovered = await core2.task_runtime.get_task(task_id)
+        assert recovered is not None and recovered.status is TaskStatus.PAUSED
+        assert recovered.error is not None
+        # Only the specialized Scheduler recovery path uses this error
+        # code; general recovery uses "RECOVERY_REQUIRED" instead — this
+        # distinguishes the two paths precisely.
+        assert recovered.error.code == "SCHEDULE_RECONCILIATION_REQUIRED"
+        attempts = await core2.task_runtime.store.list_task_attempts(task_id)
+        # General recovery never appended a retry attempt for this Task.
+        assert len(attempts) == 1
+        # No duplicate/leftover in-memory runner from either recovery path.
+        assert task_id not in core2.task_runtime._tasks  # noqa: SLF001
+    finally:
+        await core2.stop()
