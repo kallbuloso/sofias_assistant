@@ -27,6 +27,7 @@ from sofias_assistant.context.builder import (
     ContextBuilder,
     ContextLocalityError,
 )
+from sofias_assistant.context.models import MemoryContextItem
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
 from sofias_assistant.conversation.events import (
     ConversationStreamEvent,
@@ -43,6 +44,7 @@ from sofias_assistant.conversation.models import (
     TurnInputModality,
     TurnStatus,
 )
+from sofias_assistant.memory.orchestrator import MemoryOrchestrator
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 
@@ -135,6 +137,7 @@ class TextConversationRuntime:
         activity_coordinator: ConversationActivityCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
+        memory_orchestrator: MemoryOrchestrator | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._router = router
@@ -144,6 +147,12 @@ class TextConversationRuntime:
         self._activity_coordinator = (
             activity_coordinator or ConversationActivityCoordinator()
         )
+        self._memory_orchestrator = memory_orchestrator
+
+    async def _recall_memory_context(self, turn: Turn) -> tuple[MemoryContextItem, ...]:
+        if self._memory_orchestrator is None:
+            return ()
+        return await self._memory_orchestrator.recall_for_turn(turn)
 
     async def create_conversation(self) -> Conversation:
         """Create and durably persist one Core-owned Conversation."""
@@ -228,12 +237,14 @@ class TextConversationRuntime:
                 conversation_id=conversation.id,
                 turn_id=processing_turn.id,
             )
+            memory_context = await self._recall_memory_context(persisted_turn)
             try:
                 projection = self._context_builder.build(
                     current_turn=persisted_turn,
                     conversation_turns=conversation_turns,
                     locality=command.locality,
                     model=route.descriptor,
+                    memory_context=memory_context,
                 )
             except ContextBudgetExceededError:
                 result = await self._finalize_failure(
@@ -496,12 +507,14 @@ class TextConversationRuntime:
             conversation_id=conversation.id,
             turn_id=processing_turn.id,
         )
+        memory_context = await self._recall_memory_context(persisted_turn)
         try:
             projection = self._context_builder.build(
                 current_turn=persisted_turn,
                 conversation_turns=conversation_turns,
                 locality=command.locality,
                 model=route.descriptor,
+                memory_context=memory_context,
             )
         except ContextBudgetExceededError:
             return await self._finalize_failure(
