@@ -4,11 +4,17 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from sofias_assistant.config.models import AppPaths, RuntimeConfig
+from sofias_assistant.config.models import AppPaths, RuntimeConfig, SofiasMemoryConfig
 
 DATA_DIR_ENVIRONMENT_VARIABLE = "SOFIAS_ASSISTANT_DATA_DIR"
 LOCAL_APP_DATA_ENVIRONMENT_VARIABLE = "LOCALAPPDATA"
 WINDOWS_PLATFORM_NAME = "nt"
+
+MEMORY_BASE_URL_ENVIRONMENT_VARIABLE = "SOFIAS_ASSISTANT_MEMORY_BASE_URL"
+MEMORY_TIMEOUT_SECONDS_ENVIRONMENT_VARIABLE = "SOFIAS_ASSISTANT_MEMORY_TIMEOUT_SECONDS"
+MEMORY_RECALL_LIMIT_ENVIRONMENT_VARIABLE = "SOFIAS_ASSISTANT_MEMORY_RECALL_LIMIT"
+_DEFAULT_MEMORY_TIMEOUT_SECONDS = 8.0
+_DEFAULT_MEMORY_RECALL_LIMIT = 10
 
 
 def load_runtime_config(
@@ -21,7 +27,42 @@ def load_runtime_config(
     source_environment = os.environ if environment is None else environment
     source_platform_name = os.name if platform_name is None else platform_name
     data_dir = _resolve_data_dir(source_environment, source_platform_name)
-    return RuntimeConfig(paths=AppPaths(data_dir=data_dir))
+    return RuntimeConfig(
+        paths=AppPaths(data_dir=data_dir),
+        memory=_resolve_memory_config(source_environment),
+    )
+
+
+def _resolve_memory_config(environment: Mapping[str, str]) -> SofiasMemoryConfig:
+    base_url = environment.get(MEMORY_BASE_URL_ENVIRONMENT_VARIABLE)
+    if base_url is not None and not base_url.strip():
+        raise ValueError(
+            f"{MEMORY_BASE_URL_ENVIRONMENT_VARIABLE} must not be blank when set"
+        )
+    timeout_text = environment.get(MEMORY_TIMEOUT_SECONDS_ENVIRONMENT_VARIABLE)
+    timeout_seconds = _DEFAULT_MEMORY_TIMEOUT_SECONDS
+    if timeout_text is not None:
+        try:
+            timeout_seconds = float(timeout_text)
+        except ValueError as error:
+            raise ValueError(
+                f"{MEMORY_TIMEOUT_SECONDS_ENVIRONMENT_VARIABLE} must be numeric"
+            ) from error
+    recall_limit_text = environment.get(MEMORY_RECALL_LIMIT_ENVIRONMENT_VARIABLE)
+    recall_limit = _DEFAULT_MEMORY_RECALL_LIMIT
+    if recall_limit_text is not None:
+        try:
+            recall_limit = int(recall_limit_text)
+        except ValueError as error:
+            raise ValueError(
+                f"{MEMORY_RECALL_LIMIT_ENVIRONMENT_VARIABLE} must be an integer"
+            ) from error
+    return SofiasMemoryConfig(
+        enabled=base_url is not None,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        recall_limit=recall_limit,
+    )
 
 
 def _resolve_data_dir(environment: Mapping[str, str], platform_name: str) -> Path:
