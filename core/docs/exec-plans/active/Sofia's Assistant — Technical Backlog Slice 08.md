@@ -3051,3 +3051,296 @@ Real blockers: none.
 
 Gate I12 — CLOSED — REMOTE VERIFIED
 ```
+
+---
+
+# 87. Gate I13 / Slice 08 Closure Ledger
+
+```text
+Baseline:
+5194ed73fd711cdf7b86a3d67ec36d4600a8902d
+(Gate I12 — CLOSED — REMOTE VERIFIED; CI run 34908950485, success)
+
+Reference Harvest (I13, §8.2 — integrate, not rewrite):
+REUSED:
+  - AgentRuntime/ExecutionRuntime/Policy/Audit seams
+    (execution/agents.py, execution/runtime.py) — the Scenario F
+    ResearchAgent is a second specialization with the exact same
+    shape as DevelopmentAnalysisAgent (Gate I9); no new orchestration
+    layer, no bypass of ExecutionRuntime.
+  - CapabilityRouter/ModelRegistry (ai/registry, ai/contracts) as-is
+    for Scenario J — no custom `if provider == ...` branching added;
+    routing is entirely the existing capability/locality-driven
+    selection.
+  - web.search/web.read Tools (capabilities/web.py) exactly as
+    registered by Gate I8 — no new Tool, no direct Tool-implementation
+    call from the Agent (every call goes through
+    AgentExecutionContext.call_tool -> ExecutionRuntime.invoke ->
+    Policy -> ToolRegistry).
+  - SofiaCore composition (core/core.py), TaskRuntime.create_agent_task,
+    Grant/Confirmation machinery, migration head (0010_task_attempt_grant
+    — unchanged, no new schema needed).
+  - Gate I2/I3/I6/I7/I8/I9/I12 test suites as the coverage of record for
+    Scenarios A(deep)/B/C/D/E/G(deep)/H/I — referenced, not duplicated,
+    in the new Gate file's scenario coverage map docstring.
+  - `--smoke` CLI flag on client_app/__main__.py and
+    client/SofiaAssistant.spec's onefile build — used as-is for the
+    packaged release smoke; no second smoke entrypoint created.
+ADAPTED:
+  - client/SofiaAssistant.spec: pinned the frozen build's OpenSSL DLLs
+    to the build interpreter's own DLLs directory (see "Packaged smoke"
+    below) — a packaging correction, not a new mechanism.
+  - .github/workflows/ci.yml: one added step (packaged executable
+    smoke) appended to the existing Quality job; no new job, no new
+    CI infrastructure.
+REJECTED:
+  - A generic/standalone "ResearchService" outside the Agent runtime —
+    the existing AgentRuntime specialization pattern was already the
+    natural, least-privileged home for a bounded multi-source research
+    flow (Slice §54.1/§15 guidance followed).
+  - A second real cloud provider for Scenario J — a fake local/cloud
+    provider pair proves the routing property (provider identity is an
+    execution choice) without a new production dependency (Slice §22).
+
+Feature/integration commits:
+cc9c057545d590ead299416f52f1cca0c709b4d6
+  feat(mvp): add bounded multi-source web research Agent specialization
+f92edb984a29a8b9ab4ed6be3d79218f0a4ea039
+  test(mvp): add Gate I13 release-acceptance scenarios
+
+Version/release commit:
+1188bff9b806376c2ae471e798dd9e02cdb3ce91
+  build(release): prepare v0.1.0 and fix packaged OpenSSL DLL pinning
+
+Release notes commit:
+8bc921532b8f3e7e79a49e5f1b3ca1f5b02cf904
+  docs(release): add Sofia's Assistant v0.1.0 release notes
+
+Closure commit:
+(recorded after this commit lands)
+
+Final HEAD:
+(recorded after push, see "CI run" below)
+
+CI run:
+run 34914792277 — conclusion: success — HEAD
+8bc921532b8f3e7e79a49e5f1b3ca1f5b02cf904
+(Ruff PASS, Format PASS, Mypy PASS 177 source files,
+Pytest 669 passed/4 skipped, PyInstaller PASS,
+Packaged executable smoke PASS — dist\SofiaAssistant.exe --smoke,
+QT_QPA_PLATFORM=offscreen, exit 0)
+(this closure-ledger commit gets its own separate CI confirmation
+below once it lands)
+
+Scenario A — Text Conversation:
+PASS. New vertical
+test_scenario_a_text_conversation_is_durable_and_authoritative proves
+client -> Conversation -> Turn -> ContextBuilder -> provider ->
+durable/authoritative Conversation through a real SofiaCore instance.
+Deep protocol coverage: test_gate_i2_conversation.py (unchanged, green).
+
+Scenario B — Realtime Voice:
+PASS by reuse only, no new vertical needed. test_gate_i3_realtime_
+boundary.py (real SofiaCore WS/HTTP loopback, audio/transcript
+lifecycle, barge-in/interruption, canonical Turn) remains the release
+evidence; a deterministic fake realtime provider is release-acceptable.
+
+Scenario C — Memory:
+PASS by reuse. test_gate_i6_memory.py vertical_a (remember ->
+cross-conversation recall) and vertical_h (recall outage degrades,
+conversation still works) cover the default FakeMemoryProvider suite.
+The live Sofias Memory smoke against
+https://pefil-sofias-memory.q8cqqr.easypanel.host from Slice 05 remains
+valid historical evidence; I13 does not change that boundary, so it was
+not rerun (Slice §11/§33/§70).
+
+Scenario D — Filesystem:
+PASS by reuse. test_gate_i8_capabilities.py (Tool Registry, Policy,
+Grant, path canonicalization, traversal protection, Audit) unchanged
+and green.
+
+Scenario E — Shell:
+PASS by reuse. test_gate_i8_capabilities.py (argv-only execution,
+filtered environment, timeout, bounded output) plus
+test_gate_i12_recovery.py (interrupted subprocess recovery semantics)
+unchanged and green.
+
+Scenario F — Web Research (the genuine product gap):
+PASS. New file src/sofias_assistant/execution/research.py
+(ResearchAgent + research_definition + register_research). Vertical:
+research query -> web.search -> reads >=2 distinct sources -> bounded
+evidence (max 4 sources, 2000 chars/source, 16KB final text) ->
+provider synthesis -> result carries only runtime-observed source
+URLs, never a provider's own claim. Proven by
+test_scenario_f_multi_source_research_synthesizes_with_attribution
+(happy path, 2 distinct sources, Audit trail asserted) and
+test_scenario_f_insufficient_sources_reports_explicit_degraded_failure
+(one source fails, provider claims success anyway, Agent still fails
+closed with INSUFFICIENT_SOURCES and never fabricates the missing
+source's attribution). Both tests run through the real
+AgentRuntime/ExecutionRuntime/Policy/Audit seams against a real local
+HTTP fixture server, not direct Tool-implementation calls.
+
+Scenario G — Reminder:
+PASS. Deep coverage in test_gate_i7_proactivity.py (unchanged, green).
+Restart-survival folded into test_sofia_core_integrated_smoke: a
+reminder created against one SofiaCore process is a pending Notification
+after a full stop/restart against the same on-disk temp database.
+
+Scenario H — Agent:
+PASS by reuse. test_gate_i9_development_analysis.py (root-created
+AgentRun, narrowed context/Tool subset/authority, bounded result,
+Audit) unchanged and green. The Scenario F ResearchAgent exercises the
+identical narrowing machinery for a second specialization, reinforcing
+rather than duplicating this evidence.
+
+Scenario I — Recovery:
+PASS by reuse. test_gate_i12_recovery.py (13 cases) plus
+tests/integration/core/test_core.py::
+test_general_recovery_leaves_scheduled_task_to_specialized_recovery.
+I13 changed no recovery code path; Gate I12's findings 1-4 hardening
+remains the closure evidence, consumed as-is (Slice §57 — I13 does not
+ignore or re-litigate I12).
+
+Scenario J — Provider Routing:
+PASS. New vertical
+test_scenario_j_capability_locality_selects_different_provider_bindings
+proves the same Sofia identity/Conversation persists across two
+send_text calls while DataLocality (LOCAL_ONLY vs CLOUD_PREFERRED)
+alone selects a different real CapabilityRouter/ModelRegistry
+provider/model binding (fake-local/text-local vs fake-cloud/
+text-cloud) — no custom `if provider == ...` branching, provider
+identity proven to be purely an execution choice.
+
+SofiaCore integrated smoke:
+PASS. test_sofia_core_integrated_smoke: temp data directory -> create
+Core -> start -> authenticated text Conversation -> durable reminder ->
+stop -> restart against the same on-disk state -> Conversation/Turn
+durable, reminder Notification pending, health components
+(recovery/scheduler/notifications/event-runtime) all present -> stop.
+
+Migration fresh:
+PASS. test_upgrade_to_head_is_idempotent (fresh DB -> head, idempotent
+re-run). Migration head unchanged at 0010_task_attempt_grant — Scenario
+F's ResearchAgent needed no new schema (reuses Task/ToolCall/AgentRun/
+Grant tables as-is).
+
+Migration upgrade:
+PASS. test_downgrade_to_base_then_upgrade_to_head and
+test_upgrade_from_0008_adds_cognitive_memory_runtime_state (prior valid
+DB -> head). No destructive reset, no migration edited.
+
+Security regression:
+PASS, by reuse plus direct audit:
+  - localhost auth: LOCAL_API_HOST = "127.0.0.1" hardcoded in
+    client_boundary/server.py; unchanged.
+  - Policy-before-side-effect, Confirmation, Grant narrowing, Agent
+    Tool subset: test_gate_i4_safe_execution.py, test_gate_i8_
+    capabilities.py, test_gate_i9_development_analysis.py, and the new
+    Scenario F tests (grants scoped to exact capability/resource, no
+    widening across the AgentRun boundary) — all green.
+  - Workspace/path bounds, SSRF protections: test_gate_i8_
+    capabilities.py unchanged; the new Web Research fixture server binds
+    127.0.0.1 and the test grant scope is `{base}/*`, exercised through
+    the real WebReader Tool/Policy path, not a bypass.
+  - Shell argv/no-shell: unchanged, test_gate_i8_capabilities.py.
+  - Secrets only via SecretService: confirmed by direct audit —
+    .env.example carries no key (Sofias Memory key is set via
+    `python -m sofias_assistant.secrets set`), config/loader.py only
+    reads an env file when explicitly given one (never implicit
+    discovery), and core/.env (git-ignored, untracked) holds no
+    committed secret.
+  - Memory as untrusted context: test_gate_i6_memory.py vertical_h.
+  - cloud_context_eligible: exercised directly by Scenario A/J tests
+    (explicit True/False per send_text call).
+  - Audit redaction: test_gate_i10_audit.py unchanged.
+  - Recovery without authorization bypass: test_gate_i12_recovery.py
+    unchanged (every resumed/retried execution still re-enters
+    ExecutionRuntime.invoke() and PolicyEngine fresh).
+
+Degraded behavior:
+PASS by reuse — Memory outage (test_gate_i6_memory.py vertical_h),
+Realtime provider degradation (test_gate_i3_realtime_boundary.py),
+Scheduler/Notification failure paths (test_gate_i7_proactivity.py,
+tests/unit/health/test_models.py component states), Web source failure
+inside a bounded research run (test_scenario_f_insufficient_sources_
+reports_explicit_degraded_failure — fails closed, never fabricates a
+source). No optional/degradable subsystem failure was made a global
+startup failure by this Gate's changes.
+
+Full pytest:
+669 passed, 4 skipped (pre-existing opt-in OpenAI/OpenAI Realtime/
+Sofias Memory live/Windows Credential Manager smokes; no Gate
+correctness skipped). +5 over the Gate I12 baseline (664) — the five
+new Gate I13 tests.
+
+Ruff:      PASS (uv run ruff check .)
+Format:    PASS (uv run ruff format --check . — 177 files already formatted)
+Mypy:      PASS (uv run mypy src tests — 177 source files, no issues)
+git diff --check: PASS (no whitespace errors)
+
+PyInstaller: PASS (uv run python -m PyInstaller --noconfirm
+client/SofiaAssistant.spec) — both in CI and re-verified locally with a
+fresh --noconfirm rebuild in this session.
+Packaged smoke (local): PASS — dist\SofiaAssistant.exe --smoke,
+QT_QPA_PLATFORM=offscreen, exit 0. This directly resolves the Gate I12
+closure note that local packaged-smoke verification was unavailable in
+that sandbox (Slice §32): the actual defect was OpenSSL DLL shadowing
+from an unrelated tool on PATH (observed here: MySQL Shell's
+libssl-3-x64.dll/libcrypto-3-x64.dll), fixed by pinning the frozen
+build's OpenSSL DLLs to the build interpreter's own DLLs directory in
+client/SofiaAssistant.spec — a real packaging defect, corrected rather
+than masked.
+Packaged smoke (CI): PASS — new "Packaged executable smoke" step in
+.github/workflows/ci.yml (dist\SofiaAssistant.exe --smoke,
+QT_QPA_PLATFORM=offscreen) ran and passed as part of CI run
+34914792277.
+
+Live integrations reused/executed:
+Reused as historical evidence only (Slice §33/§70 — I13 does not
+change these boundaries): OpenAI text smoke, OpenAI Realtime smoke,
+Sofias Memory live smoke (all from earlier Slices). None rerun in this
+Gate; default I13 suite is fully deterministic, no network/billing
+dependency.
+
+Release version:
+0.1.0 — core/pyproject.toml + core/uv.lock (from 0.1.0.dev0). No
+version convention conflict found; no other authoritative runtime/
+packaging version surface exists yet (application_version is an
+explicit SofiaCore constructor parameter, not a hardcoded literal —
+pre-existing test fixtures using "0.1.0.dev0" as arbitrary session
+data are unrelated to the package version and were left untouched).
+
+Release notes:
+core/docs/release-notes/v0.1.0.md — capabilities, unchanged security
+boundaries, A-J scenario coverage, setup essentials, optional external
+services, recovery guarantees, explicit known limitations (no
+standalone Core launcher yet, SANDBOX fail-closed, no universal
+exactly-once, no universal workflow engine, no plugin marketplace, no
+wake word/continuous perception, bounded Web Research by design), and
+SA-B032 deferred.
+
+Known limitations (unchanged/carried from release notes):
+- No standalone Core server launcher/console script; SofiaCore +
+  LocalClientBoundary composition is proven end-to-end by integration
+  tests, not yet a packaged long-running entry point.
+- ToolExecutionMode.SANDBOX remains fail-closed (no sandbox backend).
+- No universal exactly-once guarantee; no universal workflow engine;
+  no plugin marketplace in this MVP.
+- No wake word / continuous camera/microphone perception.
+- Web Research is intentionally bounded, not a general autonomous
+  browsing agent.
+
+Deferred:
+SA-B032 Plugin Foundation — unchanged, post-kernel, optional for the
+first MVP release. Not pulled into this Gate; no blocker required it.
+
+Real blockers: none.
+
+Gate I13 — CLOSED — REMOTE VERIFIED (pending new CI confirmation above)
+SA-B034 — DONE
+
+Slice 08 — COMPLETED — REMOTE VERIFIED (pending new CI confirmation above)
+
+MVP RELEASE READINESS — PASSED (pending new CI confirmation above)
+```
