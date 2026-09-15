@@ -3,7 +3,7 @@
 **Nome operacional:** Recovery & MVP Release  
 **Escopo:** SA-B033 + SA-B034  
 **Gates-alvo:** I12 — Recovery Validated; I13 — MVP Ready  
-**Status:** APPROVED
+**Status:** COMPLETED — REMOTE VERIFIED
 **Projeto:** Sofia's Assistant  
 **Baseline auditado:** `436bcf4a4d4ce179e8667da24ef62005e8fc0e2c`  
 **Último Slice concluído:** Slice 05 — Sofia Remembers — DONE / REMOTE VERIFIED / POST-CLOSURE HARDENING VERIFIED  
@@ -3117,20 +3117,24 @@ Release notes commit:
   docs(release): add Sofia's Assistant v0.1.0 release notes
 
 Closure commit:
-(recorded after this commit lands)
+9cb04e4f9d75abee14a7d3f536f4e50da9ad71f5
+docs(plan): record gate i13 mvp readiness closure
 
 Final HEAD:
-(recorded after push, see "CI run" below)
+9cb04e4f9d75abee14a7d3f536f4e50da9ad71f5
 
-CI run:
+CI run (feature/integration/version/release-notes commits):
 run 34914792277 — conclusion: success — HEAD
 8bc921532b8f3e7e79a49e5f1b3ca1f5b02cf904
 (Ruff PASS, Format PASS, Mypy PASS 177 source files,
 Pytest 669 passed/4 skipped, PyInstaller PASS,
 Packaged executable smoke PASS — dist\SofiaAssistant.exe --smoke,
 QT_QPA_PLATFORM=offscreen, exit 0)
-(this closure-ledger commit gets its own separate CI confirmation
-below once it lands)
+
+CI run (this closure-ledger commit):
+run 34915996719 — conclusion: success — HEAD
+9cb04e4f9d75abee14a7d3f536f4e50da9ad71f5
+(completed 2026-09-15T01:16:44Z)
 
 Scenario A — Text Conversation:
 PASS. New vertical
@@ -3337,10 +3341,10 @@ first MVP release. Not pulled into this Gate; no blocker required it.
 
 Real blockers: none.
 
-Gate I13 — CLOSED — REMOTE VERIFIED (pending new CI confirmation above)
+Gate I13 — CLOSED — REMOTE VERIFIED
 SA-B034 — DONE
 
-Slice 08 — COMPLETED — REMOTE VERIFIED (pending new CI confirmation above)
+Slice 08 — COMPLETED — REMOTE VERIFIED
 
-MVP RELEASE READINESS — PASSED (pending new CI confirmation above)
+MVP RELEASE READINESS — PASSED
 ```
