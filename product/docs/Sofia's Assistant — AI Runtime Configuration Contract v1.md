@@ -3,7 +3,7 @@
 **Project:** Sofia's Assistant  
 **Contract:** AI Runtime Configuration Contract  
 **Version:** 1  
-**Status:** Proposed — Ready for Approval  
+**Status:** APPROVED  
 **Date:** 2026-09-15  
 **Depends on:** ADR-0004 + Architecture Review Amendment 0003  
 **Primary consumers:** Runtime host, AI Configuration Service, CapabilityRouter composition, Local Client Boundary, future Dashboard  

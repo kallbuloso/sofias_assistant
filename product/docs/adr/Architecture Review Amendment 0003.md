@@ -1,7 +1,7 @@
 # Architecture Review Amendment 0003
 
 **Project:** Sofia's Assistant  
-**Status:** Proposed — Ready for Approval  
+**Status:** Accepted  
 **Decision date:** 2026-09-15  
 **Applies to:** ADR-0001, ADR-0002, ADR-0004, ADR-0005, ADR-0011, Architecture Review Amendment 0001, Technical Backlog Slice 09  
 **Origin:** Post-MVP architecture review after `v0.1.0`  
