@@ -21,10 +21,37 @@ uv sync
 
 ## Run
 
+The standalone production Core host (`sofia-core`) starts Sofia Core as a
+real, persistent process independent from the Desktop Client, and binds an
+authenticated, loopback-only local API. It never exposes the LAN or the
+public internet.
+
+With an explicit `.env` file:
+
 ```powershell
 cd core
-uv run python -m sofias_assistant
+copy .env.example .env
+# edit .env: at minimum set LLM_MODEL, and either LLM_API_KEY or store the
+# key durably via `uv run python -m sofias_assistant.secrets set providers/openai/api-key`
+uv run sofia-core --env-file .env
 ```
+
+Or entirely through the real process environment, with no `.env` file at
+all (`.env` is never loaded implicitly):
+
+```powershell
+cd core
+$env:LLM_MODEL = "gpt-4o-mini"
+$env:LLM_API_KEY = "sk-..."
+uv run sofia-core
+```
+
+`sofia-core` prints `READY` once the local API is listening, stays alive
+until Ctrl+C (or SIGINT/SIGTERM where supported), and then shuts down
+cleanly. It does not require the Desktop Client to be running.
+
+`uv run python -m sofias_assistant` remains available for printing the
+installed application identity and version only; it does not start Core.
 
 ## Development configuration (Sofias Memory)
 
