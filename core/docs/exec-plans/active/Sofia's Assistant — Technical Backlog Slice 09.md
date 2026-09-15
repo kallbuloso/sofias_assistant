@@ -650,7 +650,7 @@ GATE I14 CLOSED — REMOTE VERIFIED
 
 ```text
 Gate: I14 — Production Core Runtime
-Status: IMPLEMENTED — AWAITING REMOTE VERIFICATION
+Status: CLOSED — REMOTE VERIFIED
 
 Baseline: f64870daca04aec09389665fffec2d31161c7ca8
 
@@ -663,10 +663,13 @@ Test commits:
 
 Docs commits:
   24d1f40 docs: document sofia-core host setup and update .env.example
-  (this commit) docs(plan): record Gate I14 ledger
+  967fec7 docs(plan): record Gate I14 ledger — implemented, awaiting remote verification
 
-Final HEAD: (preenchido após push)
-Remote CI: (preenchido após verificação)
+Final HEAD: 967fec77074e4c1d5e788285a64b0dd11b64ba3c
+Remote CI: run 35020701564 — SUCCESS
+  https://github.com/kallbuloso/sofias_assistant/actions/runs/35020701564
+  Lint / Check formatting / Type check / Test / Desktop package baseline /
+  Packaged executable smoke — all green on windows-latest.
 
 Tests:
   - tests/unit/host/test_config.py (SA-B035 bootstrap key set, precedence,
