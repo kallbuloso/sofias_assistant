@@ -54,16 +54,22 @@ class SofiasMemoryConfig:
             raise ValueError("recall_limit must be between 1 and 50")
 
 
-def _require_safe_memory_url(base_url: str) -> None:
-    parsed = urlsplit(base_url)
+def require_safe_http_url(url: str, *, field_name: str) -> None:
+    """Reject anything but a plain, credential-free http(s) URL with a host."""
+
+    parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError("Memory base_url must use http or https")
+        raise ValueError(f"{field_name} must use http or https")
     if not parsed.netloc:
-        raise ValueError("Memory base_url must include a host")
+        raise ValueError(f"{field_name} must include a host")
     if parsed.username is not None or parsed.password is not None:
-        raise ValueError("Memory base_url must not embed credentials")
+        raise ValueError(f"{field_name} must not embed credentials")
     if parsed.fragment:
-        raise ValueError("Memory base_url must not include a fragment")
+        raise ValueError(f"{field_name} must not include a fragment")
+
+
+def _require_safe_memory_url(base_url: str) -> None:
+    require_safe_http_url(base_url, field_name="Memory base_url")
 
 
 @dataclass(frozen=True, slots=True)

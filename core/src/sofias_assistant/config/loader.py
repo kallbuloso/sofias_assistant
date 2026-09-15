@@ -104,6 +104,15 @@ def _resolve_data_dir(environment: Mapping[str, str], platform_name: str) -> Pat
             "The default Sofia's Assistant data directory is currently defined only "
             "for Windows; set SOFIAS_ASSISTANT_DATA_DIR explicitly."
         )
+    return resolve_windows_default_data_dir(environment)
+
+
+def resolve_windows_default_data_dir(environment: Mapping[str, str]) -> Path:
+    """Return the shared Windows default data directory under `%LOCALAPPDATA%`.
+
+    Reused by the production host loader so both configuration surfaces agree
+    on exactly one default-directory rule instead of duplicating it.
+    """
 
     local_app_data = environment.get(LOCAL_APP_DATA_ENVIRONMENT_VARIABLE)
     if local_app_data is None or not local_app_data.strip():
