@@ -39,6 +39,11 @@ from sofias_assistant.execution.models import (
     ToolSideEffect,
     ToolSpec,
 )
+from sofias_assistant.execution.research import (
+    ResearchAgent,
+    register_research,
+    research_definition,
+)
 from sofias_assistant.execution.runtime import ExecutionRuntime
 from sofias_assistant.execution.task_runtime import TaskRuntime
 
@@ -66,6 +71,9 @@ __all__ = [
     "DevelopmentAnalysisAgent",
     "development_analysis_definition",
     "register_development_analysis",
+    "ResearchAgent",
+    "register_research",
+    "research_definition",
     "SpecializationRequest",
     "Task",
     "TaskAttempt",
