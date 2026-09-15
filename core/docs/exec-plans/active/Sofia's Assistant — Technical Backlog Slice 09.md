@@ -646,6 +646,76 @@ GATE I14 CLOSED — REMOTE VERIFIED
 
 ---
 
+## Gate I14 — closure ledger
+
+```text
+Gate: I14 — Production Core Runtime
+Status: IMPLEMENTED — AWAITING REMOTE VERIFICATION
+
+Baseline: f64870daca04aec09389665fffec2d31161c7ca8
+
+Feature commits:
+  3252194 feat(config): add production runtime configuration bootstrap seams
+  817b791 feat(host): add standalone Core process host and production AI/secret composition
+
+Test commits:
+  75724ab test(host): validate Gate I14 runtime configuration and lifecycle
+
+Docs commits:
+  24d1f40 docs: document sofia-core host setup and update .env.example
+  (this commit) docs(plan): record Gate I14 ledger
+
+Final HEAD: (preenchido após push)
+Remote CI: (preenchido após verificação)
+
+Tests:
+  - tests/unit/host/test_config.py (SA-B035 bootstrap key set, precedence,
+    validation, boolean parsing, non-loopback rejection)
+  - tests/unit/host/test_secret_bridge.py (known env->SecretRef mappings,
+    secret-source diagnostics)
+  - tests/unit/secrets/test_environment_store.py (EnvironmentSecretStore /
+    LayeredSecretStore precedence, redaction, no arbitrary enumeration)
+  - tests/integration/gate/test_gate_i14_core_runtime.py (16 scenarios:
+    env-file + process-env precedence, no implicit `.env` discovery,
+    provider bootstrap + SecretService bridge end-to-end through the real
+    OpenAI adapter with a fake transport, invalid-configuration fail-fast
+    with zero side effects, Memory disabled/degraded, readiness
+    credential-state distinction, graceful shutdown, failed-start cleanup,
+    duplicate-instance rejection, loopback-only default)
+  - full existing regression suite (Gates I2-I13)
+
+Quality: ruff check/format, mypy (src+tests), pytest — all green locally.
+
+Architecture findings: none requiring an Amendment/Contract change.
+  `SofiaCore`'s existing `secret_store_factory` and
+  `conversation_dependencies_factory` seams, and `LocalClientBoundary`'s
+  `app_factory` seam, were sufficient to compose the whole production host
+  without modifying `core/core.py`.
+
+Deferred (explicitly out of Gate I14 scope, per Slice SS "Não escopo"):
+  persistent ProviderConfiguration/ModelCatalogEntry, capability
+  provenance, Inference Profiles, ProfileModelBinding, AI Configuration
+  API, routing preview, Dashboard — all Gate I15.
+
+Known limitations:
+  - Human smoke could not script a literal OS-level Ctrl+C keypress from
+    this non-interactive environment (Windows console signal delivery to
+    a detached child process is not reliably scriptable); the real
+    `sofia-core` executable was proven to start, bind loopback, serve the
+    authenticated readiness endpoint, and stay alive. The graceful
+    shutdown code path itself (signal handler -> shutdown_event ->
+    boundary.stop() -> core.stop() -> exit 0) is fully covered
+    deterministically by
+    test_gate_i14_core_runtime.py::test_graceful_shutdown_stops_boundary_and_core.
+  - `CoreApiClient.stream_text` (existing Desktop convenience helper,
+    unrelated to this Gate) still hardcodes `local_only` locality; it is
+    unchanged here and remains a Slice 10 UX concern.
+
+Blockers: none.
+```
+
+---
+
 # 17. Gate I15 — Intelligent AI Routing
 
 **Escopo:** SA-B037.
