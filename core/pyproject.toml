@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 sofia-desktop = "sofias_assistant.client_app.__main__:main"
+sofia-core = "sofias_assistant.host.runner:main"
 
 [dependency-groups]
 dev = [
