@@ -77,10 +77,13 @@ class OpenAIProviderAdapter:
         secret_service: SecretService,
         api_key_ref: SecretRef,
         client_factory: _OpenAIClientFactory | None = None,
+        base_url: str | None = None,
     ) -> None:
         self._secret_service = secret_service
         self._api_key_ref = api_key_ref
-        self._client_factory = client_factory or _create_client
+        self._client_factory = client_factory or (
+            lambda api_key: _create_client(api_key, base_url=base_url)
+        )
 
     async def generate_text(
         self, *, model: ModelIdentity, request: AIRequest
@@ -625,7 +628,11 @@ class OpenAIRealtimeProviderSession:
             raise RuntimeError("OpenAI realtime interaction is not active")
 
 
-def _create_client(api_key: str) -> AsyncOpenAI:
+def _create_client(api_key: str, *, base_url: str | None = None) -> AsyncOpenAI:
+    if base_url is not None:
+        return AsyncOpenAI(
+            api_key=api_key, base_url=base_url, max_retries=0, timeout=30.0
+        )
     return AsyncOpenAI(api_key=api_key, max_retries=0, timeout=30.0)
 
 

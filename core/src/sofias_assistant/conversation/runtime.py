@@ -21,7 +21,9 @@ from sofias_assistant.ai.contracts import (
     ToolCallProposed,
     UsageUpdated,
 )
-from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
+from sofias_assistant.ai.routing import AIRoute, RoutingError
+from sofias_assistant.ai.routing_policy import Router, RoutingPolicy
+from sofias_assistant.ai_config.service import record_routing_decision
 from sofias_assistant.context.builder import (
     ContextBudgetExceededError,
     ContextBuilder,
@@ -44,6 +46,7 @@ from sofias_assistant.conversation.models import (
     TurnInputModality,
     TurnStatus,
 )
+from sofias_assistant.execution.audit import AuditService
 from sofias_assistant.memory.orchestrator import MemoryOrchestrator
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -132,12 +135,13 @@ class TextConversationRuntime:
         self,
         *,
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
-        router: CapabilityRouter,
+        router: Router,
         context_builder: ContextBuilder,
         activity_coordinator: ConversationActivityCoordinator | None = None,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
         memory_orchestrator: MemoryOrchestrator | None = None,
+        audit: AuditService | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._router = router
@@ -148,6 +152,44 @@ class TextConversationRuntime:
             activity_coordinator or ConversationActivityCoordinator()
         )
         self._memory_orchestrator = memory_orchestrator
+        self._audit = audit
+
+    async def _route(
+        self,
+        requirements: AIRequestRequirements,
+        *,
+        model_override: ModelIdentity | None,
+        correlation_id: UUID,
+    ) -> AIRoute:
+        """Route via the injected Router, emitting Audit when profile-aware."""
+
+        try:
+            route = self._router.route(requirements, model_override=model_override)
+        except RoutingError:
+            if isinstance(self._router, RoutingPolicy) and self._audit is not None:
+                decision = self._router.resolve(
+                    requirements, model_override=model_override
+                )
+                await record_routing_decision(
+                    self._audit,
+                    decision,
+                    correlation_id=correlation_id,
+                    actor="Sofia/root",
+                    subject=self._router.profile_key,
+                    origin="CONVERSATION",
+                )
+            raise
+        if isinstance(self._router, RoutingPolicy) and self._audit is not None:
+            decision = self._router.resolve(requirements, model_override=model_override)
+            await record_routing_decision(
+                self._audit,
+                decision,
+                correlation_id=correlation_id,
+                actor="Sofia/root",
+                subject=self._router.profile_key,
+                origin="CONVERSATION",
+            )
+        return route
 
     async def _recall_memory_context(self, turn: Turn) -> tuple[MemoryContextItem, ...]:
         if self._memory_orchestrator is None:
@@ -219,8 +261,10 @@ class TextConversationRuntime:
                 locality=command.locality,
             )
             try:
-                route = self._router.route(
-                    requirements, model_override=command.model_override
+                route = await self._route(
+                    requirements,
+                    model_override=command.model_override,
+                    correlation_id=processing_turn.id,
                 )
             except RoutingError:
                 result = await self._finalize_failure(
@@ -492,8 +536,10 @@ class TextConversationRuntime:
             locality=command.locality,
         )
         try:
-            route = self._router.route(
-                requirements, model_override=command.model_override
+            route = await self._route(
+                requirements,
+                model_override=command.model_override,
+                correlation_id=processing_turn.id,
             )
         except RoutingError:
             return await self._finalize_failure(

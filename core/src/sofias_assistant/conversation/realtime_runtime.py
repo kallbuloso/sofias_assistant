@@ -28,7 +28,9 @@ from sofias_assistant.ai.contracts import (
     UserTranscriptPartial,
 )
 from sofias_assistant.ai.providers import RealtimeProviderSession
-from sofias_assistant.ai.routing import CapabilityRouter, RoutingError
+from sofias_assistant.ai.routing import AIRoute, RoutingError
+from sofias_assistant.ai.routing_policy import Router, RoutingPolicy
+from sofias_assistant.ai_config.service import record_routing_decision
 from sofias_assistant.context.builder import ContextBuilder, ContextLocalityError
 from sofias_assistant.conversation.coordination import (
     ConversationActivityCoordinator,
@@ -70,6 +72,7 @@ from sofias_assistant.conversation.realtime_models import (
     RealtimeSessionState,
 )
 from sofias_assistant.conversation.runtime import ConversationNotFoundError
+from sofias_assistant.execution.audit import AuditService
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 
@@ -140,11 +143,12 @@ class RealtimeConversationRuntime:
         self,
         *,
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
-        router: CapabilityRouter,
+        router: Router,
         context_builder: ContextBuilder,
         activity_coordinator: ConversationActivityCoordinator,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], UUID] | None = None,
+        audit: AuditService | None = None,
     ) -> None:
         self._uow_factory, self._router, self._context_builder = (
             uow_factory,
@@ -156,6 +160,7 @@ class RealtimeConversationRuntime:
             clock or (lambda: datetime.now(UTC)),
             id_factory or uuid4,
         )
+        self._audit = audit
         self._sessions: dict[RealtimeSessionId, RealtimeSession] = {}
         self._conversation_sessions: dict[UUID, RealtimeSessionId] = {}
         self._sessions_gate = asyncio.Lock()
@@ -175,7 +180,7 @@ class RealtimeConversationRuntime:
                 command.conversation_id
             )
             try:
-                route, turns = await self._route_and_load(command)
+                route, turns = await self._route_and_load(command, session_id)
                 seed = self._context_builder.build_realtime_seed(
                     conversation_id=command.conversation_id,
                     conversation_turns=turns,
@@ -462,7 +467,9 @@ class RealtimeConversationRuntime:
         for session_id in tuple(self._sessions):
             await self.close_session(session_id)
 
-    async def _route_and_load(self, command: OpenRealtimeSessionCommand):
+    async def _route_and_load(
+        self, command: OpenRealtimeSessionCommand, session_id: RealtimeSessionId
+    ):
         async with self._uow_factory() as uow:
             conversation = await uow.conversations.get_by_id(command.conversation_id)
             if conversation is None:
@@ -476,14 +483,53 @@ class RealtimeConversationRuntime:
             command.locality,
         )
         try:
-            route = self._router.route(
-                requirements, model_override=command.model_override
+            route = await self._route(
+                requirements,
+                model_override=command.model_override,
+                correlation_id=session_id,
             )
         except RoutingError as error:
             raise InvalidRealtimeStateError(
                 "No compatible realtime model is available"
             ) from error
         return route, turns
+
+    async def _route(
+        self,
+        requirements: AIRequestRequirements,
+        *,
+        model_override: ModelIdentity | None,
+        correlation_id: UUID,
+    ) -> AIRoute:
+        """Route via the injected Router, emitting Audit when profile-aware."""
+
+        try:
+            route = self._router.route(requirements, model_override=model_override)
+        except RoutingError:
+            if isinstance(self._router, RoutingPolicy) and self._audit is not None:
+                decision = self._router.resolve(
+                    requirements, model_override=model_override
+                )
+                await record_routing_decision(
+                    self._audit,
+                    decision,
+                    correlation_id=correlation_id,
+                    actor="Sofia/root",
+                    subject=self._router.profile_key,
+                    origin="REALTIME",
+                )
+            raise
+        if isinstance(self._router, RoutingPolicy) and self._audit is not None:
+            decision = self._router.resolve(requirements, model_override=model_override)
+            await record_routing_decision(
+                self._audit,
+                decision,
+                correlation_id=correlation_id,
+                actor="Sofia/root",
+                subject=self._router.profile_key,
+                origin="REALTIME",
+            )
+        return route
 
     async def _reseed_provider(self, session: RealtimeSession) -> None:
         await self._close_provider(session)
@@ -495,7 +541,7 @@ class RealtimeConversationRuntime:
             session.output_audio_format,
             session.model,
         )
-        route, turns = await self._route_and_load(command)
+        route, turns = await self._route_and_load(command, session.id)
         seed = self._context_builder.build_realtime_seed(
             conversation_id=session.conversation_id,
             conversation_turns=turns,

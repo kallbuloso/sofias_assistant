@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
+from sofias_assistant.ai_config.service import AIConfigurationService
+from sofias_assistant.client_boundary.ai_http import register_ai_configuration_routes
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
 from sofias_assistant.client_boundary.memory_http import register_memory_routes
 from sofias_assistant.client_boundary.proactivity_http import (
@@ -518,6 +520,7 @@ def create_local_http_app(
     tasks: TaskRuntime | None = None,
     proactivity: ProactivityRuntime | None = None,
     memory: MemoryOrchestrator | None = None,
+    ai_configuration: AIConfigurationService | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -562,6 +565,9 @@ def create_local_http_app(
 
     if memory is not None:
         register_memory_routes(app, require_session, memory)
+
+    if ai_configuration is not None:
+        register_ai_configuration_routes(app, require_session, ai_configuration)
 
     @app.post(
         "/api/v1/client-sessions",

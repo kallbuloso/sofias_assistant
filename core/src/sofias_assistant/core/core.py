@@ -5,6 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
+from sofias_assistant.ai_config.service import AIConfigurationService
 from sofias_assistant.capabilities.registration import register_builtin_capabilities
 from sofias_assistant.config.models import RuntimeConfig
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
@@ -103,6 +104,7 @@ class SofiaCore:
         self._health = RuntimeHealthSnapshot(())
         self._clock = clock
         self._proactivity: ProactivityRuntime | None = None
+        self._ai_configuration_service: AIConfigurationService | None = None
 
     @property
     def state(self) -> CoreState:
@@ -214,6 +216,16 @@ class SofiaCore:
         return self._memory_orchestrator
 
     @property
+    def ai_configuration_service(self) -> AIConfigurationService | None:
+        """Return the composed AI Configuration Service, or None when absent."""
+
+        if self._state is not CoreState.RUNNING:
+            raise RuntimeError(
+                "AI Configuration Service is only available while SofiaCore is running"
+            )
+        return self._ai_configuration_service
+
+    @property
     def realtime_conversation_runtime(self) -> RealtimeConversationRuntime:
         """Return the composed realtime runtime only while SofiaCore is running."""
 
@@ -256,7 +268,7 @@ class SofiaCore:
             )
             self._agent_runtime = AgentRuntime(self._execution_runtime)
             memory_health = await self._compose_memory_orchestrator()
-            self._compose_conversation_runtime()
+            await self._compose_conversation_runtime()
             self._proactivity = ProactivityRuntime(
                 self._resources.session_factory,
                 self._execution_runtime.audit,
@@ -397,6 +409,7 @@ class SofiaCore:
         self._conversation_runtime = None
         self._realtime_conversation_runtime = None
         self._conversation_activity_coordinator = None
+        self._ai_configuration_service = None
         self._memory_orchestrator = None
         self._resources = None
         self._session_lifecycle = None
@@ -462,21 +475,26 @@ class SofiaCore:
         self._memory_orchestrator = orchestrator
         return ComponentHealth("sofias-memory", HealthStatus.HEALTHY)
 
-    def _compose_conversation_runtime(self) -> None:
+    async def _compose_conversation_runtime(self) -> None:
         factory = self._conversation_dependencies_factory
         if factory is None:
             return
 
         secret_service = self._secret_service
         resources = self._resources
+        execution_runtime = self._execution_runtime
         if secret_service is None or resources is None:
             raise RuntimeError("SofiaCore is missing composition resources")
-        dependencies = factory(secret_service)
+        dependencies = factory(
+            secret_service, lambda: SqlAlchemyUnitOfWork(resources.session_factory)
+        )
         if not isinstance(dependencies, ConversationRuntimeDependencies):
             raise ValueError(
                 "conversation_dependencies_factory must return "
                 "ConversationRuntimeDependencies"
             )
+        self._ai_configuration_service = dependencies.ai_configuration_service
+        audit = execution_runtime.audit if execution_runtime is not None else None
 
         self._conversation_activity_coordinator = ConversationActivityCoordinator()
         self._conversation_runtime = TextConversationRuntime(
@@ -485,10 +503,19 @@ class SofiaCore:
             context_builder=dependencies.context_builder,
             activity_coordinator=self._conversation_activity_coordinator,
             memory_orchestrator=self._memory_orchestrator,
+            audit=audit,
         )
         self._realtime_conversation_runtime = RealtimeConversationRuntime(
             uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),
-            router=dependencies.router,
+            router=dependencies.realtime_router or dependencies.router,
             context_builder=dependencies.context_builder,
             activity_coordinator=self._conversation_activity_coordinator,
+            audit=audit,
         )
+        if dependencies.ai_configuration_service is not None:
+            if dependencies.ai_configuration_bootstrap is not None:
+                await dependencies.ai_configuration_service.bootstrap(
+                    dependencies.ai_configuration_bootstrap
+                )
+            else:
+                await dependencies.ai_configuration_service.initialize()

@@ -28,9 +28,10 @@ from sofias_assistant.ai import (
     AIRequestRequirements,
     AIToolDefinition,
     Capability,
-    CapabilityRouter,
     DataLocality,
 )
+from sofias_assistant.ai.routing_policy import Router, RoutingPolicy
+from sofias_assistant.ai_config.service import record_routing_decision
 from sofias_assistant.execution.agents import AgentExecutionContext, AgentRuntime
 from sofias_assistant.execution.models import (
     AgentDefinition,
@@ -80,7 +81,7 @@ class _RunState:
 class ResearchAgent:
     """Agent runner that delegates every action to the existing runtime."""
 
-    def __init__(self, router: CapabilityRouter) -> None:
+    def __init__(self, router: Router) -> None:
         self._router = router
 
     async def __call__(self, context: AgentExecutionContext) -> AgentExecutionOutcome:
@@ -104,6 +105,17 @@ class ResearchAgent:
         run = context.run
         requirements = _requirements(run.provider_requirements)
         route = self._router.route(requirements)
+        if isinstance(self._router, RoutingPolicy):
+            decision = self._router.resolve(requirements)
+            await record_routing_decision(
+                context._execution.audit,
+                decision,
+                correlation_id=run.correlation_id,
+                actor="Sofia/root",
+                subject=context._authority.subject,
+                origin="AGENT_RUN",
+                causation_id=run.id,
+            )
         provider = route.binding.text_generation
         if provider is None:
             return _failed("PROVIDER_UNAVAILABLE", "No text generation provider")
@@ -240,7 +252,7 @@ class ResearchAgent:
 
 async def register_research(
     runtime: AgentRuntime,
-    router: CapabilityRouter,
+    router: Router,
     *,
     definition: AgentDefinition | None = None,
 ) -> AgentDefinition:

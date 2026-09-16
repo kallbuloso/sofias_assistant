@@ -30,6 +30,20 @@ class DataLocality(StrEnum):
     CLOUD_PREFERRED = "cloud_preferred"
 
 
+class CapabilityProvenance(StrEnum):
+    """Evidence origin for one claimed model capability (Amendment 0003 SS11).
+
+    A provider listing a model proves only that identity was advertised, not
+    that it supports any given capability. ``DISCOVERED`` alone must never
+    satisfy a hard capability requirement.
+    """
+
+    BUILTIN_METADATA = "builtin_metadata"
+    PROBED = "probed"
+    USER_OVERRIDE = "user_override"
+    DISCOVERED = "discovered"
+
+
 class ExecutionLocation(StrEnum):
     """Where a model executes, independent from a request's data policy."""
 

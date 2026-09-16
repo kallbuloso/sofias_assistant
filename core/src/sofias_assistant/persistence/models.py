@@ -527,6 +527,86 @@ class MemoryCandidateRecord(Base):
     persisted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class ProviderConfigurationRecord(Base):
+    """Non-secret AI provider configuration (Amendment 0003 SS10, Gate I15)."""
+
+    __tablename__ = "ai_provider_configurations"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    adapter_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    execution_location: Mapped[str] = mapped_column(String(16), nullable=False)
+    credential_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ModelCatalogEntryRecord(Base):
+    """Non-secret catalog entry keyed by (provider_id, model_id) identity."""
+
+    __tablename__ = "ai_model_catalog_entries"
+    __table_args__ = (UniqueConstraint("provider_id", "model_id"),)
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    provider_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("ai_provider_configurations.id"), nullable=False
+    )
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    context_window: Mapped[int | None] = mapped_column(nullable=True)
+    execution_location: Mapped[str] = mapped_column(String(16), nullable=False)
+    availability: Mapped[str] = mapped_column(String(16), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    discovery_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    capabilities_json: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class InferenceProfileRecord(Base):
+    """Persistent workload profile (Contract v1 SS21)."""
+
+    __tablename__ = "ai_inference_profiles"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    required_capabilities_json: Mapped[str] = mapped_column(Text, nullable=False)
+    preferred_capabilities_json: Mapped[str] = mapped_column(Text, nullable=False)
+    locality: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fallback_policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class ProfileModelBindingRecord(Base):
+    """Ordered preference binding a profile to one candidate model."""
+
+    __tablename__ = "ai_profile_model_bindings"
+    __table_args__ = (UniqueConstraint("profile_key", "provider_id", "model_id"),)
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid4
+    )
+    profile_key: Mapped[str] = mapped_column(
+        String(64), ForeignKey("ai_inference_profiles.key"), nullable=False
+    )
+    provider_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    priority: Mapped[int] = mapped_column(nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 class MemoryOperationRecord(Base):
     """Assistant-owned durable identity for one Supersede/Forget mutation."""
 
