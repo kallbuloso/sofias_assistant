@@ -1925,16 +1925,17 @@ Diagnostic smoke:
   canonical bootstrap model.
 
 Commits:
-  <feature commit>  feat(ai): add persistent AI provider/model/profile
-                     configuration and dynamic routing
-  <test commit>      test(ai): validate Gate I15 intelligent routing
-  <docs commit>      docs(plan): record Gate I15 ledger — implemented,
-                     awaiting remote verification
-  <docs commit>      docs(plan): close Gate I15 — remote verified;
-                     complete Slice 09
+  e1f28d7  feat(ai): add persistent AI provider/model/profile
+           configuration and dynamic routing
+  db221f3  test(ai): validate Gate I15 intelligent routing
+  ae84c1d  docs(plan): record Gate I15 ledger — implemented,
+           awaiting remote verification
 
-Final HEAD: <to be filled after remote verification>
-Remote CI: <to be filled after remote verification>
+Final HEAD: ae84c1d7dc46c7c51d0f5234ab332f81d7b8b419
+Remote CI: run 35045542761 (run #78) — SUCCESS
+  https://github.com/kallbuloso/sofias_assistant/actions/runs/35045542761
+  Lint / Check formatting / Type check / Test / Desktop package baseline /
+  Packaged executable smoke — all green on windows-latest.
 
 Architecture findings: none requiring a new Amendment/Contract revision.
   `CapabilityRouter`/`ModelRegistry` required zero code changes; the
@@ -1965,6 +1966,21 @@ Known limitations:
 
 Blockers: none.
 ```
+
+---
+
+## Slice 09 — closure
+
+```text
+GATE I14 CLOSED — REMOTE VERIFIED
+GATE I15 CLOSED — REMOTE VERIFIED
+SLICE 09 COMPLETED — REMOTE VERIFIED
+CORE READY FOR DASHBOARD UX
+```
+
+Both Gates of this Slice are implemented, tested, quality-gated and remote
+CI verified at their respective final HEADs. Slice 10 (Human Desktop
+Experience) is not started by this closure.
 
 ---
 
