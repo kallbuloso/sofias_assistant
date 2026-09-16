@@ -1724,6 +1724,250 @@ CORE READY FOR DASHBOARD UX
 
 ---
 
+## Gate I15 — closure ledger
+
+```text
+Gate: I15 — Intelligent AI Routing
+Status: CLOSED — REMOTE VERIFIED
+
+Baseline: 77a1a18f7b91780e69abb24f1e6a3043c81571be
+
+Reference Harvest:
+  Mark LI / Brahma AI / OpenAI model listing / OpenRouter / Ollama patterns
+  were reviewed conceptually against the plan's constraints. No external
+  code was imported. Findings:
+    REJECTED  direct provider -> Tool authority (never applicable here;
+              routing config never grants filesystem/shell/network/desktop
+              authority — preserved).
+    REJECTED  "discovery == capability truth" (every discovery adapter in
+              this Gate returns identity only; capability claims always
+              require explicit BUILTIN_METADATA/PROBED/USER_OVERRIDE
+              provenance before they count for hard compatibility).
+    REJECTED  unrestricted auto-model selection from the full catalog
+              (fallback is limited to ORDERED_ONLY / ORDERED_THEN_CANONICAL;
+              Contract v1 explicitly forbids "any other compatible model").
+    ADAPTED   OpenAI-compatible `GET /v1/models` listing shape, normalized
+              into `DiscoveredModel(model_id, display_name)` only.
+    REUSED    existing project seams: Alembic migration convention,
+              SqlAlchemyUnitOfWork/repository pattern, AuditService safe
+              metadata redaction, FastAPI `register_x_routes(app,
+              require_session, ...)` convention, ScriptedFakeProvider test
+              support.
+
+Persistence:
+  Migration 0011_ai_provider_model_profile_routing (incremental, after
+  0010_task_attempt_grant): ai_provider_configurations,
+  ai_model_catalog_entries (FK to providers, unique (provider_id, model_id)),
+  ai_inference_profiles, ai_profile_model_bindings (FK to profiles, unique
+  (profile_key, provider_id, model_id)). No published migration modified.
+  credential_ref persists only a SecretRef identity string; no secret value
+  in any AI table.
+
+Migration tests:
+  tests/integration/persistence/test_migrations.py — fresh DB -> head,
+  0010 (v0.1.0/Gate I14 baseline) -> head adds exactly the four new tables
+  without touching existing data, head -> head is a no-op. Updated
+  HEAD_REVISION/DOMAIN_TABLES fixtures accordingly.
+
+ProviderConfiguration / ModelCatalog:
+  sofias_assistant.ai_config.models — frozen domain dataclasses separate
+  from both ai.contracts (provider-neutral inference DTOs) and the ORM
+  records. Stable identity is (provider_id, model_id); display_name is
+  never identity. `ModelCatalogEntry.trusted_capabilities()` excludes any
+  capability whose provenance is DISCOVERED.
+
+Capability provenance:
+  Capability.CapabilityProvenance added to ai/contracts.py
+  (BUILTIN_METADATA/PROBED/USER_OVERRIDE/DISCOVERED). Enforced at snapshot-
+  build time in AIConfigurationService._rebuild_and_publish: only non-
+  DISCOVERED claims are registered into the in-memory ModelRegistry
+  CapabilityRouter actually uses, so a bare discovery listing can never
+  satisfy a hard requirement — CapabilityRouter itself needed no change.
+
+Discovery:
+  ai/discovery.py — provider-neutral `ModelDiscoveryAdapter` Protocol,
+  bounded `OpenAIModelDiscoveryAdapter` (`asyncio.timeout`, normalizes
+  provider failures/timeouts to `ModelDiscoveryError`, closes its client),
+  `FakeModelDiscoveryAdapter` for tests. `AIConfigurationService.
+  refresh_models` reconciles idempotently: new identities are added
+  disabled (discovery never authorizes usage); identities no longer
+  reported are marked UNAVAILABLE, never physically deleted.
+
+Inference profiles:
+  ai/routing_policy.py `ProfileSpec` + ai_config `InferenceProfile`.
+  Bootstrap seeds exactly chat.general/coding/research/vision/realtime with
+  the Contract v1 SS22 baseline required_capabilities; no speculative
+  `utility` profile (no real consumer).
+
+Bindings:
+  ProfileModelBinding persisted with deterministic `priority` ordering.
+  `AIConfigurationService.update_profile` validates every candidate binding
+  against the profile's required_capabilities/locality before any write
+  (unknown model or missing capability/locality raises AIConfigurationError
+  and nothing is persisted).
+
+Routing policy:
+  ai/routing_policy.py `RoutingPolicy` sits strictly above
+  `CapabilityRouter`: it resolves profile + explicit-override + ordered
+  bindings + canonical fallback purely from an immutable `RoutingSnapshot`,
+  and always delegates the actual hard-compatibility decision to
+  `CapabilityRouter.route(model_override=...)` — CapabilityRouter and
+  ModelRegistry required zero code changes (boundary crítico preserved).
+  `RoutingPolicy` structurally satisfies the same `Router` Protocol as
+  `CapabilityRouter.route(...)`, so every existing consumer constructor
+  needed only a widened type hint, not a call-site rewrite.
+
+Fallback:
+  FallbackPolicy.ORDERED_ONLY / ORDERED_THEN_CANONICAL implemented exactly
+  as specified; canonical is a separate resolution step, never a
+  ProfileModelBinding row. Proven vertical: coding primary
+  provider-b/model-new configured explicitly; when it becomes UNAVAILABLE,
+  routing fails closed (no synonymous discovery-based substitute), and the
+  original binding preference remains persisted untouched.
+
+Locality:
+  `_narrow_locality` guarantees a profile can only push a request toward
+  LOCAL_ONLY, never widen it; LOCAL_ONLY requests never receive a cloud
+  candidate, canonical fallback included.
+
+Runtime snapshot:
+  `RoutingSnapshot` is an immutable dataclass built entirely inside
+  `AIConfigurationService._rebuild_and_publish` from one consistent read of
+  ProviderConfiguration/ModelCatalogEntry/InferenceProfile/
+  ProfileModelBinding, then published via a single attribute assignment.
+  Captured snapshot references remain valid after a later publish (proven
+  by test_routing_snapshot_is_immutable_and_in_flight_requests_keep_their_version).
+  A failed rebuild (simulated persistence outage) leaves the previously
+  published snapshot active and surfaces `SnapshotPublicationError`.
+
+Runtime reconfiguration:
+  Provider/model enable-disable, binding order, and fallback policy all
+  take effect on the next `RoutingPolicy.resolve()` call against the same
+  long-lived instance, with no Core restart (proven end-to-end through the
+  real `sofia-core` host in the Gate's human-facing diagnostic smoke).
+
+Consumer integration:
+  Conversation (chat.general) and RealtimeConversationRuntime (realtime)
+  now receive a profile-bound `RoutingPolicy` from
+  `host/composition.py::build_conversation_dependencies_factory` instead of
+  a single hardcoded in-memory registration; both keep their own hard
+  capability requirements and existing exception contracts unchanged.
+  DevelopmentAnalysisAgent (coding), ResearchAgent (research) and
+  VisionCapability (vision, IMAGE_INPUT hard requirement, no text-only
+  fallback) accept the same `Router`-shaped policy and emit
+  AI_ROUTING_SELECTED/FALLBACK/FAILED Audit through their existing
+  AuditService. None of these three are wired into the production
+  `sofia-core` host itself (unchanged from Gate I14 — still test/consumer-
+  composed only), matching the Slice's Dashboard/agent-invocation UX being
+  out of scope until Slice 10.
+
+AI Configuration API:
+  client_boundary/ai_http.py, registered conditionally in
+  create_local_http_app via a new `ai_configuration` parameter, wired from
+  `core.ai_configuration_service` (new SofiaCore property, mirroring
+  `memory_orchestrator`). GET providers/models, POST models/refresh, GET/
+  PATCH profiles, POST routing/preview — all behind the existing
+  `require_session` authenticated boundary; no second auth subsystem.
+
+Routing preview:
+  Deterministic only (`AIConfigurationService.preview_routing` ->
+  `RoutingPolicy.resolve`); never invokes a provider; response carries
+  profile/selected/fallback/reason_code/reason only.
+
+Audit:
+  AI_PROVIDER_CONFIG_CHANGED (bootstrap), AI_MODEL_CATALOG_REFRESHED
+  (refresh_models), AI_PROFILE_CHANGED (update_profile),
+  AI_ROUTING_SELECTED/AI_ROUTING_FALLBACK/AI_ROUTING_FAILED
+  (route_with_audit / consumer-side record_routing_decision) all verified
+  present with safe metadata (profile, provider_id, model_id, reason_code,
+  fallback) and no secret/prompt content.
+
+Security:
+  No raw secret ever leaves SecretService (verified via repr/API/Audit
+  assertions across ai_config and Gate I15 tests); credential API
+  representation exposes only `{ref, configured: bool}`. Loopback-only
+  authenticated boundary, Policy/Grant/Tool authorization, Memory trust,
+  Agent narrowing and recovery semantics are all untouched by this Gate.
+
+Targeted tests:
+  tests/unit/ai/test_routing_policy.py (12), tests/unit/ai/test_discovery.py
+  (6), tests/integration/ai_config/test_ai_configuration_service.py (10).
+
+Gate tests:
+  tests/integration/gate/test_gate_i15_intelligent_ai_routing.py (24
+  scenarios: first boot, persisted config survives reinitialize, discovery
+  reconciliation without deletion, DISCOVERED-only capability rejected,
+  profile defaults, incompatible binding rejected, unavailable-primary
+  fallback with preserved preference, LOCAL_ONLY blocks cloud, disabled/
+  invalid profile, explicit incompatible override without fallthrough,
+  canonical fallback only when compatible, coding/research Agent profile
+  integration with Audit, Vision profile with no text fallback, realtime
+  hard-requirement fail-closed, config update without restart, immutable
+  snapshot versioning, failed-rebuild keeps previous snapshot, preview
+  response shape, Audit coverage, no secret leakage, multi-provider
+  vertical, and a human-facing diagnostic smoke against the real
+  `sofia-core` host over HTTP).
+
+Migration tests: included above (test_migrations.py).
+
+Full pytest: 788 passed, 4 skipped (pre-existing opt-in live-provider/
+  Windows-credential-store smokes) locally.
+
+Ruff: clean. Format: clean. Mypy (src+tests): clean. git diff --check: clean.
+
+Diagnostic smoke:
+  test_human_facing_diagnostic_smoke_exposes_ai_configuration_over_http
+  starts the real `sofias_assistant.host.runner.run` lifecycle (same
+  composition sofia-core uses), then calls GET /api/v1/ai/providers,
+  /models, /profiles and POST /api/v1/ai/routing/preview over real HTTP
+  loopback with a fake OpenAI SDK transport, asserting providers/models/
+  profiles are visible and routing preview resolves chat.general to the
+  canonical bootstrap model.
+
+Commits:
+  <feature commit>  feat(ai): add persistent AI provider/model/profile
+                     configuration and dynamic routing
+  <test commit>      test(ai): validate Gate I15 intelligent routing
+  <docs commit>      docs(plan): record Gate I15 ledger — implemented,
+                     awaiting remote verification
+  <docs commit>      docs(plan): close Gate I15 — remote verified;
+                     complete Slice 09
+
+Final HEAD: <to be filled after remote verification>
+Remote CI: <to be filled after remote verification>
+
+Architecture findings: none requiring a new Amendment/Contract revision.
+  `CapabilityRouter`/`ModelRegistry` required zero code changes; the
+  profile-aware layer above them (`RoutingPolicy`/`RoutingSnapshot`) fully
+  satisfied Amendment 0003 SS13's "Operational Store -> AI Configuration
+  Service -> validated immutable Routing Snapshot -> Routing Policy ->
+  CapabilityRouter" shape without new persistence-awareness inside the
+  router.
+
+Deferred (explicitly out of Gate I15 scope, per Slice "Não escopo"):
+  Desktop Dashboard, profile editor UI, provider settings UI, wiring
+  DevelopmentAnalysisAgent/ResearchAgent/VisionCapability into the
+  production sofia-core host itself (still test/consumer-composed only,
+  same as Gate I14), OAuth provider accounts, public/VPS API exposure,
+  billing/cost engine, universal model marketplace, semantic LLM router,
+  full STT->LLM->TTS pipeline.
+
+Known limitations:
+  - `OpenAIProviderAdapter`/`ai/adapters/openai.py` now honors a configured
+    `base_url` for the default client factory (a narrow, backward-
+    compatible completion of the existing Gate I14 seam), but no live
+    OpenAI-compatible endpoint was exercised in CI; discovery/binding
+    correctness against a real OpenAI-compatible server remains opt-in
+    live-smoke territory, consistent with "Não exigir live OpenAI em CI".
+  - `CoreApiClient.stream_text` still hardcodes `local_only` locality
+    (pre-existing Gate I14 note, unrelated to this Gate, Slice 10 UX
+    concern).
+
+Blockers: none.
+```
+
+---
+
 # 57. Stop conditions
 
 Parar para decisão humana apenas se:
