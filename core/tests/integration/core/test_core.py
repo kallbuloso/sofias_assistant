@@ -200,7 +200,7 @@ def test_construction_is_side_effect_free(tmp_path: Path) -> None:
 
 
 def test_conversation_runtime_dependencies_validate_internal_contracts() -> None:
-    with pytest.raises(ValueError, match="router must be a CapabilityRouter"):
+    with pytest.raises(ValueError, match="router must be Router-shaped"):
         ConversationRuntimeDependencies(
             router=cast(CapabilityRouter, None),
             context_builder=cast(ContextBuilder, None),
@@ -282,7 +282,9 @@ async def test_core_composes_conversation_runtime_with_its_operational_store(
     )
     received_secret_services: list[object] = []
 
-    def dependencies_factory(secret_service: object) -> ConversationRuntimeDependencies:
+    def dependencies_factory(
+        secret_service: object, _uow_factory: object
+    ) -> ConversationRuntimeDependencies:
         received_secret_services.append(secret_service)
         return conversation_dependencies(provider)
 
@@ -338,7 +340,9 @@ async def test_composition_failure_cleans_up_runtime_resources(tmp_path: Path) -
     ownership_factory = RecordingOwnershipFactory()
     expected_error = RuntimeError("conversation composition failed")
 
-    def failing_dependencies_factory(_: object) -> ConversationRuntimeDependencies:
+    def failing_dependencies_factory(
+        _: object, __: object
+    ) -> ConversationRuntimeDependencies:
         raise expected_error
 
     core = SofiaCore(

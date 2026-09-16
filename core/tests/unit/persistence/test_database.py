@@ -51,6 +51,10 @@ def test_base_metadata_contains_mapped_operational_tables() -> None:
         "notifications",
         "memory_candidates",
         "memory_operations",
+        "ai_provider_configurations",
+        "ai_model_catalog_entries",
+        "ai_inference_profiles",
+        "ai_profile_model_bindings",
     }
 
 

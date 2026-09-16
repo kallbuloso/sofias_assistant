@@ -7,7 +7,6 @@ Forget, current-truth-at-`as_of` recall) that this Gate depends on.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -38,7 +37,11 @@ from sofias_assistant.conversation.models import (
     TurnStatus,
 )
 from sofias_assistant.conversation.runtime import SendTextCommand
-from sofias_assistant.core import ConversationRuntimeDependencies, SofiaCore
+from sofias_assistant.core import (
+    ConversationDependenciesFactory,
+    ConversationRuntimeDependencies,
+    SofiaCore,
+)
 from sofias_assistant.memory.adapter import FakeMemoryProvider
 from sofias_assistant.memory.models import (
     CreateMemoryRequest,
@@ -80,8 +83,8 @@ def _dependencies_factory(
     provider: ScriptedFakeProvider,
     *,
     execution_location: ExecutionLocation = ExecutionLocation.LOCAL,
-) -> Callable[[SecretService], ConversationRuntimeDependencies]:
-    def factory(_: SecretService) -> ConversationRuntimeDependencies:
+) -> ConversationDependenciesFactory:
+    def factory(_: SecretService, __: object) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
         registry.register(
             ModelRegistration(

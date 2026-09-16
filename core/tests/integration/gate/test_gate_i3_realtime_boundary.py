@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
@@ -31,7 +30,12 @@ from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.context.builder import ContextBuilder
 from sofias_assistant.context.models import CoreSystemContext
 from sofias_assistant.conversation.models import TurnInputModality, TurnStatus
-from sofias_assistant.core import ConversationRuntimeDependencies, CoreState, SofiaCore
+from sofias_assistant.core import (
+    ConversationDependenciesFactory,
+    ConversationRuntimeDependencies,
+    CoreState,
+    SofiaCore,
+)
 from sofias_assistant.secrets.models import SecretRef, SecretValue
 from sofias_assistant.secrets.service import SecretService
 
@@ -92,8 +96,8 @@ def _format_wire(value: AudioFormat) -> dict[str, object]:
 def _dependencies_factory(
     provider: ScriptedFakeRealtimeProvider,
     text_provider: ScriptedFakeProvider | None = None,
-) -> Callable[[SecretService], ConversationRuntimeDependencies]:
-    def factory(_: SecretService) -> ConversationRuntimeDependencies:
+) -> ConversationDependenciesFactory:
+    def factory(_: SecretService, __: object) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
         registry.register(
             ModelRegistration(

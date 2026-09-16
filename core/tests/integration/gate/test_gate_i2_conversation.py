@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
@@ -29,7 +28,12 @@ from sofias_assistant.client_boundary.http_api import create_local_http_app
 from sofias_assistant.config.models import AppPaths, RuntimeConfig
 from sofias_assistant.context.builder import ContextBuilder
 from sofias_assistant.context.models import CoreSystemContext
-from sofias_assistant.core import ConversationRuntimeDependencies, CoreState, SofiaCore
+from sofias_assistant.core import (
+    ConversationDependenciesFactory,
+    ConversationRuntimeDependencies,
+    CoreState,
+    SofiaCore,
+)
 from sofias_assistant.secrets.models import SecretRef, SecretValue
 from sofias_assistant.secrets.service import SecretService
 from tests.support.ai import (
@@ -70,8 +74,8 @@ class FakeOwnership:
 def _dependencies_factory(
     provider_a: ScriptedFakeProvider,
     provider_b: ScriptedFakeProvider,
-) -> Callable[[SecretService], ConversationRuntimeDependencies]:
-    def factory(_: SecretService) -> ConversationRuntimeDependencies:
+) -> ConversationDependenciesFactory:
+    def factory(_: SecretService, __: object) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
         for model_id, provider in (
             ("provider-a", provider_a),

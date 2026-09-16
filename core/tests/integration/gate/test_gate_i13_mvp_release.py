@@ -104,7 +104,9 @@ from ...support.ai import FakeTextSuccess, ScriptedFakeProvider
 
 
 def _text_dependencies_factory(provider: ScriptedFakeProvider):
-    def factory(_secret_service: Any) -> ConversationRuntimeDependencies:
+    def factory(
+        _secret_service: Any, _uow_factory: Any
+    ) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
         registry.register(
             ModelRegistration(
@@ -210,7 +212,9 @@ async def test_scenario_j_capability_locality_selects_different_provider_binding
         text_scripts=[FakeTextSuccess(text="respondido na nuvem")]
     )
 
-    def factory(_secret_service: Any) -> ConversationRuntimeDependencies:
+    def factory(
+        _secret_service: Any, _uow_factory: Any
+    ) -> ConversationRuntimeDependencies:
         registry = ModelRegistry()
         registry.register(
             ModelRegistration(

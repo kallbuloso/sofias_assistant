@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0010_task_attempt_grant"
+HEAD_REVISION = "0011_ai_provider_model_profile_routing"
 DOMAIN_TABLES = {
     "runtime_events",
     "schedules",
@@ -44,6 +44,10 @@ DOMAIN_TABLES = {
     "audit_entries",
     "memory_candidates",
     "memory_operations",
+    "ai_provider_configurations",
+    "ai_model_catalog_entries",
+    "ai_inference_profiles",
+    "ai_profile_model_bindings",
 }
 
 
@@ -187,6 +191,43 @@ def test_upgrade_from_0008_adds_cognitive_memory_runtime_state(
     )
     assert "memory_session_id" not in candidate_columns
     assert "memory_session_id" not in audit_columns_after
+
+
+def test_upgrade_from_0010_adds_ai_provider_model_profile_routing(
+    tmp_path: Path,
+) -> None:
+    """Gate I15: the v0.1.0/Gate I14 database upgrades cleanly to the new head."""
+
+    url = database_url(tmp_path)
+    upgrade_to_revision(url, "0010_task_attempt_grant")
+    before = table_names(url)
+    assert "ai_provider_configurations" not in before
+
+    upgrade_to_head(url)
+
+    after = table_names(url)
+    assert {
+        "ai_provider_configurations",
+        "ai_model_catalog_entries",
+        "ai_inference_profiles",
+        "ai_profile_model_bindings",
+    } <= after
+    path = url.removeprefix("sqlite+aiosqlite:///")
+    with sqlite3.connect(path) as connection:
+        catalog_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(ai_model_catalog_entries)")
+        }
+        binding_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(ai_profile_model_bindings)"
+            )
+        }
+    assert {"provider_id", "model_id", "capabilities_json", "availability"} <= (
+        catalog_columns
+    )
+    assert {"profile_key", "priority", "enabled"} <= binding_columns
 
 
 @pytest.mark.asyncio
