@@ -2414,3 +2414,439 @@ Real blockers:
     None.
 ```
 
+---
+
+# 65. Gate I18 — Closure Ledger
+
+```text
+Gate:
+    I18 — Daily Assistant Experience
+    (SA-B040 — Conversation History & Privacy UX; SA-B041 — Voice &
+    Operational UX)
+
+Status:
+    IMPLEMENTED — AWAITING REMOTE VERIFICATION
+
+Baseline:
+    2aa68a99227f47c748b7f057c1aa70b613e93fa9
+    (CI run 35263820931 — SUCCESS; I16/I17 both CLOSED — REMOTE VERIFIED)
+
+What changed (Core):
+    - conversation/history.py (new): ConversationHistoryService --
+      list_conversations(limit, cursor) / list_turns(conversation_id, limit,
+      before_sequence). Deterministic preview (first non-blank user Turn,
+      whitespace-normalized, truncated to 120 code points, "New
+      conversation" when none exists yet) computed from a bounded batch
+      read, never an LLM/Memory call. DEFAULT_LIMIT=50/MAX_LIMIT=100,
+      opaque base64 keyset cursor ("updated_at|id"), InvalidCursorError on
+      tampering, ConversationNotFoundError for an unknown id.
+    - persistence/repositories.py: ConversationRepository.list_page()
+      (keyset pagination, ORDER BY updated_at DESC, id DESC, fetches
+      limit+1 to compute has_more) plus TurnRepository.list_recent()/
+      list_before() (chronological Turn paging) and batch
+      first_turns_for()/latest_turns_for() (one query per N conversations,
+      never N+1) -- proven never to call list_for_conversation (unbounded
+      load) by a monkeypatch-based test.
+    - persistence/models.py + migrations/versions/0012_conversation_
+      history_index.py (new): Index("ix_conversations_updated_at_id",
+      "updated_at", "id") -- additive, reversible, no data migration.
+    - client_boundary/conversation_history_http.py (new): GET
+      /api/v1/conversations, GET
+      /api/v1/conversations/{conversation_id}/turns, registered from
+      http_api.py/host/composition.py/core/core.py
+      (conversation_history_service property, composed alongside the
+      existing Conversation runtime).
+    - conversation/runtime.py + realtime_runtime.py: PRIVACY_POLICY_APPLIED
+      Audit emission, once per text Turn / once per realtime session open
+      (never per audio frame), metadata = {locality, cloud_context_eligible}.
+
+What changed (Desktop):
+    - client_app/api.py: stream_text()/RealtimeVoiceConnection.open() now
+      require explicit locality/cloud_context_eligible keyword arguments --
+      the `local_only`/`cloud_context_eligible=False` hardcodes Slice 10 SS
+      flagged are gone; no Desktop call path can omit them (proven by a
+      real 422 from the HTTP layer when the wire body omits them). New
+      pump_events() is the sole continuous reader of the realtime socket
+      after start(); list_conversations()/list_conversation_turns() added
+      for the History UX.
+    - client_app/models.py: InferencePrivacyPreference (locality +
+      cloud_context_eligible, human-facing locality_label, .default() ==
+      LOCAL_ONLY/false); ConversationSummaryItem/TurnHistoryItem.
+    - client_app/service.py: ClientApplicationService.connect() no longer
+      auto-creates a conversation; start_new_conversation()/
+      open_conversation() are now explicit, so Conversation History
+      resume is a real user action, never an implicit side effect of
+      attaching. decide_confirmation() echoes the confirmation's actual
+      requested_lifetime instead of a hardcoded ONE_SHOT.
+    - client_app/audio.py (new): AudioInputDevice/AudioOutputDevice
+      Protocols; FakeAudioInputDevice/FakeAudioOutputDevice/
+      FailingAudioInputDevice/FailingAudioOutputDevice (deterministic,
+      CI-authoritative); QtAudioInputDevice/QtAudioOutputDevice
+      (PCM16/24000Hz/mono via QAudioSource/QAudioSink -- best-effort real
+      hardware, Windows-first, ADR-0005 SS47/Contract v1 SS46).
+    - client_app/qt_app.py: PrivacyPreferenceDialog (first-run gate, human
+      labels only -- no internal enum name ever rendered);
+      ConfirmationDialog (renders only capability/operation/resource/
+      requested_lifetime, never a raw payload dump). ClientWorker gained
+      the audio pipeline (start_voice() wires real/fake input+output
+      devices, a dedicated thread drains pump_events() into
+      _handle_voice_event(), which dispatches assistant audio to the
+      output device and transcript/turn/session events to Qt signals),
+      Conversation History slots (load_conversations()/
+      start_new_conversation()/open_conversation()/load_older_turns()), a
+      reconnect path that reloads the last Turn from Core instead of
+      resending anything on failure, and a cancel_task() that reports
+      "already finished" instead of a false failure for a terminal Task.
+      MainWindow: privacy-gated send/voice entry points, a Conversation
+      List sidebar (new/resume/older-history paging), a
+      redesigned Voice tab.
+    - client_app/dashboard.py: HomeTab now flags "Realtime unavailable" (no
+      enabled binding on the realtime profile) and "Scheduler degraded"
+      (via update_health()), plus a "Configure AI" action that switches to
+      the AI & Models tab.
+
+Reference Harvest:
+    REUSED -- the existing ClientWorker/QThread + DesktopController
+        request_*/ready-signal pattern (Gates I16/I17) for every new
+        History/voice-pipeline/confirmation operation; no second worker
+        architecture introduced.
+    REUSED -- Gate I3's ScriptedFakeRealtimeProvider (tests/support/
+        realtime.py) as the only realtime fake this Gate drives against --
+        no second Realtime runtime, no live/paid provider in the default
+        suite.
+    REUSED -- the keyset-pagination shape already established by
+        AIConfigurationService's model/profile listings, applied to
+        Conversation/Turn history for the same reason (bounded, gap-free,
+        deterministic tie-break).
+    ADAPTED -- QtMultimedia QAudioSource/QAudioSink wrapped behind the new
+        AudioInputDevice/AudioOutputDevice Protocol pair so the Gate's own
+        tests (and ClientWorker) never depend on real hardware; PyInstaller
+        already bundles the Qt multimedia plugins via its own upstream
+        PySide6 hook (verified in the rebuilt package -- see Packaging).
+    REJECTED -- a second Task/queue abstraction for the realtime event
+        pump: a single daemon threading.Thread draining pump_events() into
+        existing Qt signals was sufficient (CLAUDE.md SS15).
+
+Conversation persistence / list / Turn history:
+    Bounded, cursor-paged, keyset-ordered; preview is a plain deterministic
+    projection over already-persisted Turn rows (no LLM/Memory call, proven
+    directly). Resuming a conversation is a plain Operational read, never a
+    context-assembly/Memory-recall path.
+
+Conversation UX:
+    Desktop sidebar lists conversations (id/preview/last_turn_status/
+    last_turn_sequence), "New conversation" starts one explicitly,
+    selecting an item resumes it (loads its most recent bounded Turn page,
+    "Load older messages" pages further back). No conversation is created
+    as a side effect of connecting.
+
+Privacy model:
+    InferencePrivacyPreference maps Local only/Allow cloud/Prefer cloud to
+    LOCAL_ONLY/CLOUD_ALLOWED/CLOUD_PREFERRED (Contract v1 SS31); a second,
+    independent "Allow cognitive memory/context to be sent to cloud models"
+    preference defaults false and is never auto-enabled by a locality
+    change (Contract v1 SS32). Both values are sent explicitly on every
+    text Turn and on every realtime session open (Contract v1 SS34-35); no
+    Desktop helper substitutes a default.
+
+First-run privacy:
+    MainWindow gates the first real send/voice action behind
+    PrivacyPreferenceDialog when QSettings has no prior explicit choice
+    (Contract v1 SS33); the chosen defaults persist locally as UI
+    preference only, never as Core-authoritative state.
+
+Text/Realtime locality enforcement:
+    Proven against the real production host: an explicit `local_only`
+    request against a cloud-only canonical model fails closed
+    (context_locality_error / turn_failed), never silently reroutes to
+    cloud (Amendment 0003 SS14). A `cloud_allowed` request with the current
+    Turn's own content marked cloud-eligible completes normally.
+
+    Finding (pre-existing Core behavior, not introduced by this Gate):
+    Turn.cloud_context_eligible is enforced by context/builder.py's
+    _validate_mandatory_cloud_sources() as a hard precondition for *any*
+    cloud-directed Turn, not only for including recalled Memory content --
+    already covered by an existing, accepted Core test
+    (test_routing_and_context_locality_failures_do_not_invoke_provider).
+    Contract v1 SS32's wording ("controls whether recalled cognitive
+    memory/context may be included") reads narrower than that enforcement.
+    This Gate does not change Core's Conversation/Context runtime (out of
+    I18's Desktop-UX scope and explicitly excluded by the mission: "não
+    redefina Realtime runtime" / don't reopen already-accepted Core
+    behavior); the Desktop forwards the caller's explicit values unchanged
+    either way, so no Desktop-side defect exists. Left as a DEFERRED
+    documentation/product-clarity item below, not a blocker, since fixing
+    it would mean amending or re-litigating an already-accepted, already-
+    tested Core contract from an earlier Slice.
+
+Reconnect/Turn dedupe:
+    A send failure never resends; ClientWorker reloads the conversation's
+    latest persisted Turn from Core and surfaces it via
+    conversation_recovered, matching Gate I16's "reconnect never replays a
+    mutation" invariant.
+
+Voice architecture:
+    No second Realtime runtime. RealtimeVoiceConnection (client_app/api.py)
+    drives the existing realtime.v1 protocol; ClientWorker adds the two
+    pieces that never existed before this Gate: a real audio device
+    abstraction and a continuous event pump.
+
+Audio input/output:
+    AudioInputDevice/AudioOutputDevice Protocols; deterministic fakes are
+    CI-authoritative (FakeAudioInputDevice replays scripted PCM16 chunks,
+    FakeAudioOutputDevice records writes and rejects write-before-start);
+    QtAudioInputDevice/QtAudioOutputDevice are a best-effort real
+    QAudioSource/QAudioSink Windows-first implementation
+    (SAMPLE_RATE_HZ=24000, mono, PCM16), verified against real QtMultimedia
+    in this sandbox: QAudioSink.start()/write() are functional (opt-in
+    integration smoke passes), QAudioSource.start() has no functional
+    backend in this sandboxed environment (opt-in smoke SKIPS with a clean
+    AudioDeviceError rather than hanging or crashing).
+
+Realtime event pump:
+    pump_events() is the sole reader of the realtime socket once start()
+    returns; _handle_voice_event() dispatches assistant_audio_chunk to the
+    output device and every transcript/turn/session event to Qt signals.
+
+Device handling:
+    A device start/write failure raises AudioDeviceError, surfaced through
+    the existing failure signal/statusBar path; stop_voice() always stops
+    both devices and closes the connection, even after a mid-session
+    failure.
+
+Voice privacy:
+    RealtimeVoiceConnection.open() takes the same explicit locality/
+    cloud_context_eligible the text path uses (Contract v1 SS35); proven
+    that these are the caller's values, not a hardcode.
+
+Voice failure semantics:
+    turn.failed/interaction.failed/session.failed/error move the UI to a
+    distinct ERROR state (not silently swallowed); turn.interrupted is
+    distinct from turn.completed/turn.failed.
+
+Confirmation/Tasks/Notifications UX:
+    ConfirmationDialog renders only capability/operation/resource/
+    requested_lifetime (never a raw payload dump); decide_confirmation()
+    approves with the confirmation's own requested_lifetime instead of a
+    hardcoded ONE_SHOT; cancel_task() distinguishes "already finished" from
+    a real cancel failure by checking the Task's terminal status first.
+    Confirmation/Task/Notification Core-domain correctness (approve/deny/
+    cancel/acknowledge semantics) is unchanged and remains covered by the
+    Gates that introduced it; this Gate's own additions are unit-tested
+    directly (test_client_application_service.py, test_worker.py,
+    test_qt_components.py).
+
+Health/degraded UX:
+    HomeTab now derives "Realtime unavailable" (the realtime profile has
+    zero enabled bindings) and "Scheduler degraded" (a non-healthy/unknown
+    Scheduler HealthItem) in addition to Gate I17's existing readiness
+    states.
+
+    health_items() key mismatch (documented Deferred in the Gate I17
+    ledger): investigated during I18 preflight. It does not affect I18
+    acceptance -- Realtime readiness is derived from the AI dashboard
+    bundle's own profile/binding data (the same purpose-specific-read
+    pattern Gate I17 already established for Memory health), and Scheduler
+    uses its own correctly-keyed HealthItem row, unaffected by the
+    "ai-provider"/"memory" mismatch. Left Deferred with this explicit
+    evidence, not ignored.
+
+Onboarding:
+    First-run privacy choice (see above) plus Gate I17's existing "AI
+    needs configuration" -> Configure AI button is the full first-run path;
+    no duplicate onboarding form was introduced.
+
+Security:
+    - No new credential ever reaches QSettings (still only
+      "notifications/enabled" + "privacy/locality" +
+      "privacy/cloud_context_eligible" -- the latter two are UI preference
+      booleans/strings, never a secret; grep-verified no
+      SecretService/secrets.store import under client_app/).
+    - ConfirmationDialog never renders a raw ToolCall/Confirmation payload,
+      only the four bounded fields named above.
+    - Realtime audio frames are forwarded to the output device or
+      transcribed to text; raw audio is never logged or persisted
+      Desktop-side.
+    - PRIVACY_POLICY_APPLIED Audit metadata carries only
+      {locality, cloud_context_eligible} -- booleans/enums, never message
+      content -- and is emitted once per Turn/session-open, never per
+      audio frame.
+    - No Desktop call path can omit locality/cloud_context_eligible;
+      proven by a raw-HTTP 422 against the real host
+      (test_stream_text_requires_explicit_privacy_values_on_the_wire).
+    - LOCAL_ONLY still fails closed against a cloud-only model rather than
+      silently rerouting (proven against the real host, not just a unit
+      fake).
+    - Cursor tampering raises InvalidCursorError (400), never a stack
+      trace or unbounded scan.
+    - No SQL injection surface: all new repository reads use SQLAlchemy
+      Core/ORM constructs (select/func/and_/or_), no string-built SQL.
+    - No direct SQLite/SecretStore import anywhere under client_app/
+      (grep-verified, unchanged invariant from Gate I17).
+    - WebSocket URL is always derived from the validated, loopback-only
+      base_url (ws://127.0.0.1:<port>/api/v1/realtime); no caller-supplied
+      host/path ever reaches it.
+    - LocalClientBoundary/require_session unchanged and mandatory on the
+      two new HTTP routes.
+    - Migration 0012 is additive/index-only (no column/table change, no
+      data migration, clean downgrade).
+
+Findings fixed (in-scope, discovered during implementation):
+    - RealtimeVoiceConnection._websocket_url() built the WS URL from
+      self.base_url's path component, but base_url is always path-less --
+      the resulting URL was ws://host:port instead of
+      ws://host:port/api/v1/realtime, so Desktop voice could never connect
+      to the real endpoint in the shipped product. No prior test drove
+      RealtimeVoiceConnection against a real WebSocket server (Gate I3 used
+      raw sockets with an explicit correct path), so this was never
+      caught. Fixed; regression test
+      test_realtime_connection_targets_the_realtime_websocket_route.
+    - RealtimeVoiceConnection.start() waited for a client-side
+      "interaction_started" (no dot) event type that the server never
+      sends -- realtime_ws.py emits "interaction.started" (dot) -- so
+      start() always hung until the 8s recv timeout and raised. Same root
+      cause (start() had never been driven against the real WS server
+      before this Gate). Fixed; regression test
+      test_start_matches_the_servers_dotted_interaction_started_type.
+    - A related robustness gap found while fixing the above: a fast
+      provider can legitimately emit assistant events (including raw
+      binary audio frames) before start() finishes waiting for
+      interaction.started -- the wire has no ordering guarantee between
+      them. start() previously called _receive_json(), which raises
+      CoreApiError on any non-text frame; a binary frame arriving early
+      would have crashed voice startup outright. Fixed by buffering any
+      frame received during start() that isn't the awaited confirmation
+      (or error) and replaying it, in order, as the first item(s)
+      pump_events() yields -- no event is ever dropped or misclassified as
+      a protocol error. Regression test
+      test_start_buffers_assistant_events_that_race_ahead_of_confirmation.
+
+Deferred (out of I18 scope, explicitly not started):
+    - Turn.cloud_context_eligible's Core-side scope (gates the whole Turn,
+      not only recalled Memory content) vs. Contract v1 SS32's narrower
+      wording -- see "Text/Realtime locality enforcement" Finding above. A
+      future Amendment clarification or Core change is the right vehicle,
+      not a silent Desktop-side workaround.
+    - client_app/models.py's generic health_items() "ai-provider"/"memory"
+      key mismatch (pre-existing, documented in the Gate I17 ledger):
+      confirmed non-blocking for I18 (see Health/degraded UX above);
+      remains unfixed.
+    - Slice 11 (explicitly out of scope for this mission).
+
+Known limitations:
+    - Real interactive GUI-driven click-through (mouse/keyboard operator)
+      of the new Chat/Voice tabs was not performed (no interactive operator
+      in this session); covered instead by the offscreen Qt widget tests
+      plus the real end-to-end Gate test driving RealtimeVoiceConnection +
+      ClientWorker over the real realtime.v1 WebSocket protocol against a
+      real running host.
+    - Real microphone capture could not be smoke-tested in this sandbox
+      (QAudioSource.start() has no functional backend here); the opt-in
+      integration smoke records this as a clean SKIP, not a false pass.
+      QAudioSink (speaker) playback was verified functional.
+
+Real blockers:
+    None.
+
+Targeted tests:
+    tests/integration/conversation/test_history.py (new, 12):
+    ConversationHistoryService -- empty list, preview/last-turn
+    correctness, 120-code-point truncation, default/max limit, cursor
+    determinism, malformed-cursor rejection, initial/older Turn pages,
+    unknown conversation, invalid before_sequence, and a monkeypatch proof
+    that list_conversations() never loads unbounded Turns.
+    tests/integration/persistence/test_conversation_repositories.py (+4):
+    keyset pagination ordering/tie-break, gap-free pagination, list_recent/
+    list_before chronological paging, batch first_turns_for/
+    latest_turns_for.
+    tests/unit/client_app/test_client_application_service.py (new, 7):
+    connect() never auto-creates a conversation, start_new_conversation/
+    open_conversation, stream_text lazy-creates and forwards privacy
+    values, decide_confirmation approves with the real lifetime / never
+    approves on deny.
+    tests/unit/client_app/test_worker.py (new, 10): cancel_task already-
+    finished vs. active messaging, send failure recovery (no resend),
+    _handle_voice_event dispatch for every event kind, start_voice/
+    stop_voice end to end with fake audio devices + a fake realtime
+    connection.
+    tests/unit/client_app/test_audio.py (new, 7): fake input/output device
+    behavior (replay, write-before-start rejection, failure paths).
+    tests/integration/client_app/test_audio_live.py (new, 2, opt-in): real
+    QtMultimedia smoke -- speaker PASSED, microphone SKIPPED (no functional
+    backend in this sandbox), both by design rather than a hang/crash.
+    tests/unit/client_app/test_api.py (+4): explicit privacy values
+    forwarded on stream_text, realtime WS URL targets /api/v1/realtime,
+    start() matches the server's dotted interaction.started type, start()
+    buffers events that race ahead of the confirmation.
+    tests/unit/client_app/test_qt_components.py (+4): PrivacyPreferenceDialog
+    default/no-internal-enum-names/cloud-context-defaults-false,
+    ConfirmationDialog renders only the four bounded fields.
+    tests/unit/client_app/test_dashboard.py (+5): Realtime unavailable/
+    ready, Scheduler degraded, Configure AI button visibility + signal.
+
+Gate tests:
+    tests/integration/gate/test_gate_i18_daily_assistant_experience.py --
+    9 tests against the real production host
+    (sofias_assistant.host.runner.run, the exact composition sofia-core
+    uses) driven through the real, blocking CoreApiClient via
+    asyncio.to_thread: empty conversation list, create/resume/bounded-
+    history round trip, bounded+chronological paging, never-unbounded-load
+    proof, LOCAL_ONLY fails closed against a cloud-only model, an eligible
+    CLOUD_ALLOWED Turn completes, the wire rejects a Turn request missing
+    explicit privacy fields (422), a full realtime pipeline (fake audio
+    devices + ScriptedFakeRealtimeProvider) driven end to end through
+    RealtimeVoiceConnection/ClientWorker over the real realtime.v1
+    WebSocket protocol, and realtime open() carries explicit privacy
+    values. All 9 pass individually and as a suite (~13s).
+
+Full pytest:
+    993 passed, 6 skipped (pre-existing + this Gate's own opt-in live/
+    hardware smokes) in ~354s.
+
+Ruff / Format / Mypy / git diff --check:
+    All green (`uv run ruff check .`, `uv run ruff format --check .`,
+    `uv run mypy src tests` -- 231 source files, `git diff --check` only
+    flags pre-existing LF/CRLF normalization notices, no trailing
+    whitespace).
+
+Packaging:
+    core/client/SofiaCore.spec and core/client/SofiaAssistant.spec rebuilt
+    locally (no spec changes required). PyInstaller's own upstream PySide6
+    hook auto-bundles the QtMultimedia backend plugins
+    (windowsmediaplugin.dll, ffmpegmediaplugin.dll) and Qt6Multimedia*.dll
+    alongside the onefile build -- confirmed directly in the debug build
+    log, not assumed. `dist\SofiaAssistant.exe --smoke` exit 0;
+    `scripts/ci_core_smoke.py` against the rebuilt `dist\SofiaCore.exe`
+    exit 0 ("attach + authenticated identity verified", "graceful shutdown
+    and attach cleanup verified").
+
+Windows human smoke:
+    Limited to the automated packaged-executable smoke above (no
+    interactive GUI operator in this session -- see Known limitations). A
+    full manual click-through equivalent to the Gate I16/I17 sessions was
+    not repeated for I18; the real end-to-end Gate test already drives the
+    same RealtimeVoiceConnection/ClientWorker/CoreApiClient code paths the
+    packaged Desktop process uses, over the real protocol, against a real
+    host.
+
+Live provider/hardware evidence:
+    No live/paid AI provider call in the default suite (ScriptedFake*
+    throughout). QtMultimedia hardware evidence: see Known limitations
+    (speaker verified functional, microphone smoke cleanly skipped).
+
+Commits:
+    (recorded after commit; see below)
+
+Code-complete HEAD:
+    (recorded after commit; see below)
+
+Closure HEAD:
+    (pending remote verification)
+
+origin/main:
+    (pending push)
+
+CI:
+    (pending)
+```
+
