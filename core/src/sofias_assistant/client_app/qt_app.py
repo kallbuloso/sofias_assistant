@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QStatusBar,
     QSystemTrayIcon,
     QTabWidget,
@@ -37,6 +40,13 @@ from sofias_assistant.client_app.api import (
     CoreValidationError,
     RealtimeVoiceConnection,
 )
+from sofias_assistant.client_app.audio import (
+    AudioDeviceError,
+    AudioInputDevice,
+    AudioOutputDevice,
+    QtAudioInputDevice,
+    QtAudioOutputDevice,
+)
 from sofias_assistant.client_app.dashboard import (
     AIModelsTab,
     HomeTab,
@@ -46,11 +56,26 @@ from sofias_assistant.client_app.models import (
     ClientSnapshot,
     ConnectionState,
     HealthItem,
+    InferencePrivacyPreference,
     NotificationItem,
     TaskItem,
     VoiceState,
 )
 from sofias_assistant.client_app.service import ClientApplicationService
+
+_LOCALITY_WIRE_VALUES = ("local_only", "cloud_allowed", "cloud_preferred")
+_LOCALITY_LABELS = {
+    "local_only": "Local only",
+    "cloud_allowed": "Allow cloud",
+    "cloud_preferred": "Prefer cloud",
+}
+_TERMINAL_TASK_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+_ACTIVE_TASK_STATUSES = {
+    "QUEUED",
+    "RUNNING",
+    "WAITING_SCHEDULE",
+    "WAITING_CONFIRMATION",
+}
 
 
 class ClientWorker(QObject):
@@ -60,17 +85,27 @@ class ClientWorker(QObject):
     stream_delta = Signal(str)
     stream_finished = Signal()
     voice_changed = Signal(str)
+    voice_transcript = Signal(str)
+    voice_assistant_text = Signal(str)
     failure = Signal(str)
     stopped = Signal()
     ai_dashboard_ready = Signal(object)
     routing_preview_ready = Signal(object)
     credential_write_succeeded = Signal(str)
+    conversations_ready = Signal(object)
+    conversation_opened = Signal(str, object)
+    older_turns_ready = Signal(str, object)
+    conversation_recovered = Signal(object)
+    confirmation_ready = Signal(object)
 
     def __init__(
         self,
         base_url: str,
         credential: str,
         runtime_session_id: UUID | None = None,
+        *,
+        input_device_factory: Any = QtAudioInputDevice,
+        output_device_factory: Any = QtAudioOutputDevice,
     ) -> None:
         super().__init__()
         self._base_url = base_url
@@ -79,6 +114,11 @@ class ClientWorker(QObject):
         self._service: ClientApplicationService | None = None
         self._voice: RealtimeVoiceConnection | None = None
         self._voice_status = VoiceState.IDLE
+        self._input_device_factory = input_device_factory
+        self._output_device_factory = output_device_factory
+        self._input_device: AudioInputDevice | None = None
+        self._output_device: AudioOutputDevice | None = None
+        self._pump_thread: threading.Thread | None = None
 
     @Slot()
     def connect_core(self) -> None:
@@ -111,15 +151,17 @@ class ClientWorker(QObject):
             self._state(ConnectionState.DEGRADED)
             self.failure.emit("Core state could not be synchronized")
 
-    @Slot(str)
-    def send_text(self, text: str) -> None:
+    @Slot(str, str, bool)
+    def send_text(self, text: str, locality: str, cloud_context_eligible: bool) -> None:
         service = self._service
         if service is None or service.connection is ConnectionState.DISCONNECTED:
             self.failure.emit("Connect to Core before sending a message")
             return
         self.stream_started.emit()
         try:
-            for event in service.stream_text(text):
+            for event in service.stream_text(
+                text, locality=locality, cloud_context_eligible=cloud_context_eligible
+            ):
                 kind = event.get("type")
                 if kind == "text_delta":
                     self.stream_delta.emit(str(event.get("text", "")))
@@ -128,8 +170,28 @@ class ClientWorker(QObject):
             self.stream_finished.emit()
             self.refresh()
         except Exception:
-            self.failure.emit("Conversation request failed")
             self.stream_finished.emit()
+            self.failure.emit(
+                "Connection was interrupted; checking Core for the result…"
+            )
+            self._recover_current_conversation()
+
+    def _recover_current_conversation(self) -> None:
+        """Reload Core-authoritative state after an uncertain stream failure.
+
+        Never resends the text automatically (Contract v1 SS21/SS42):
+        `UNKNOWN != failed`, so this only reports what Core actually
+        persisted, leaving any retry to an explicit later user action.
+        """
+
+        service = self._service
+        if service is None or service.conversation_id is None:
+            return
+        try:
+            page = service.api.list_conversation_turns(service.conversation_id, limit=1)
+            self.conversation_recovered.emit(page)
+        except Exception:
+            pass
 
     @Slot(str)
     def acknowledge(self, notification_id: str) -> None:
@@ -140,6 +202,17 @@ class ClientWorker(QObject):
             self.refresh()
         except Exception:
             self.failure.emit("Notification could not be acknowledged")
+
+    @Slot(str)
+    def load_confirmation(self, confirmation_id: str) -> None:
+        if self._service is None:
+            return
+        try:
+            self.confirmation_ready.emit(
+                self._service.api.get_confirmation(UUID(confirmation_id))
+            )
+        except Exception:
+            self.failure.emit("Confirmation details could not be loaded")
 
     @Slot(str, bool)
     def decide_confirmation(self, confirmation_id: str, approved: bool) -> None:
@@ -156,33 +229,196 @@ class ClientWorker(QObject):
         if self._service is None:
             return
         try:
-            self._service.cancel_task(UUID(task_id))
+            result = self._service.cancel_task(UUID(task_id))
+            if str(result.get("status")) in _TERMINAL_TASK_STATUSES:
+                self.failure.emit("Task already finished; cancel had no effect")
             self.refresh()
         except Exception:
             self.failure.emit("Task could not be cancelled")
 
+    # -- Conversation History (Gate I18, SA-B040) -------------------------
+
     @Slot()
-    def start_voice(self) -> None:
+    def load_conversations(self) -> None:
+        service = self._service
+        if service is None:
+            return
+        try:
+            self.conversations_ready.emit(service.api.list_conversations(limit=50))
+        except Exception:
+            self.failure.emit("Conversation list could not be loaded")
+
+    @Slot()
+    def start_new_conversation(self) -> None:
+        service = self._service
+        if service is None:
+            return
+        try:
+            conversation_id = service.start_new_conversation()
+            self.conversation_opened.emit(
+                str(conversation_id), {"turns": [], "has_older": False}
+            )
+            self.load_conversations()
+        except Exception:
+            self.failure.emit("New conversation could not be created")
+
+    @Slot(str)
+    def open_conversation(self, conversation_id: str) -> None:
+        service = self._service
+        if service is None:
+            return
+        try:
+            parsed_id = UUID(conversation_id)
+            service.open_conversation(parsed_id)
+            page = service.api.list_conversation_turns(parsed_id, limit=50)
+            self.conversation_opened.emit(conversation_id, page)
+        except Exception:
+            self.failure.emit("Conversation could not be opened")
+
+    @Slot(str, str)
+    def load_older_turns(self, conversation_id: str, before_sequence: str) -> None:
+        service = self._service
+        if service is None:
+            return
+        try:
+            page = service.api.list_conversation_turns(
+                UUID(conversation_id), limit=50, before_sequence=int(before_sequence)
+            )
+            self.older_turns_ready.emit(conversation_id, page)
+        except Exception:
+            self.failure.emit("Older messages could not be loaded")
+
+    # -- Realtime voice (Gate I18, SA-B041) -------------------------------
+
+    @Slot(str, bool)
+    def start_voice(self, locality: str, cloud_context_eligible: bool) -> None:
         service = self._service
         if service is None or service.snapshot is None:
             self.failure.emit("Connect to Core before starting realtime voice")
             return
         if service.conversation_id is None:
-            self.failure.emit("Conversation is not available")
-            return
+            service.start_new_conversation()
         self._set_voice_state(VoiceState.CONNECTING)
         try:
             self._voice = service.api.realtime()
-            self._voice.open(service.conversation_id)
+            assert service.conversation_id is not None
+            self._voice.open(
+                service.conversation_id,
+                locality=locality,
+                cloud_context_eligible=cloud_context_eligible,
+            )
             self._voice.start()
+            self._output_device = self._output_device_factory()
+            self._output_device.start()
+            self._input_device = self._input_device_factory()
+            self._input_device.start(self._on_microphone_chunk)
             self._set_voice_state(VoiceState.LISTENING)
+            self._pump_thread = threading.Thread(
+                target=self._pump_loop, daemon=True, name="sofia-realtime-pump"
+            )
+            self._pump_thread.start()
+        except AudioDeviceError as error:
+            self._set_voice_state(VoiceState.ERROR)
+            self.failure.emit(f"Voice unavailable: {error}")
+            self._close_voice()
         except Exception:
             self._set_voice_state(VoiceState.ERROR)
             self.failure.emit("Realtime voice could not be started")
             self._close_voice()
 
+    def _on_microphone_chunk(self, chunk: bytes) -> None:
+        voice = self._voice
+        if voice is None:
+            return
+        try:
+            voice.send_audio(chunk)
+        except Exception:
+            pass  # a real failure surfaces through the pump loop instead
+
+    def _pump_loop(self) -> None:
+        """Sole reader of the realtime socket once a session is active.
+
+        Runs on a dedicated background thread; Qt signal emission is
+        thread-safe, so every UI update below crosses back to the GUI
+        thread automatically through the existing queued connections.
+        """
+
+        voice = self._voice
+        if voice is None:
+            return
+        try:
+            for event in voice.pump_events():
+                self._handle_voice_event(event)
+        except Exception:
+            self.failure.emit("Realtime connection was lost")
+            self._set_voice_state(VoiceState.ERROR)
+
+    def _handle_voice_event(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "assistant_audio_chunk":
+            self._set_voice_state(VoiceState.RESPONDING)
+            output_device = self._output_device
+            if output_device is not None:
+                try:
+                    output_device.write(event["audio"])
+                except AudioDeviceError:
+                    self.failure.emit("Speaker output failed; voice is degraded")
+        elif kind in {"user_transcript.partial", "user_transcript.final"}:
+            self.voice_transcript.emit(str(event.get("text", "")))
+        elif kind in {"assistant_transcript.partial", "assistant_transcript.final"}:
+            self.voice_assistant_text.emit(str(event.get("text", "")))
+        elif kind == "turn.completed":
+            self._set_voice_state(VoiceState.LISTENING)
+            self.refresh()
+        elif kind in {"turn.failed", "interaction.failed"}:
+            self._set_voice_state(VoiceState.ERROR)
+            self.failure.emit("Realtime interaction did not complete")
+            self.refresh()
+        elif kind == "turn.interrupted":
+            self._set_voice_state(VoiceState.INTERRUPTED)
+            self.refresh()
+        elif kind in {"session.failed", "error"}:
+            self._set_voice_state(VoiceState.ERROR)
+            self.failure.emit("Realtime session failed")
+        elif kind == "session.closed":
+            self._set_voice_state(VoiceState.IDLE)
+
+    @Slot()
+    def commit_voice(self) -> None:
+        """Explicit push-to-talk "stop speaking" action (Gate I18 baseline).
+
+        No VAD/barge-in is implemented; the user explicitly signals input is
+        done, matching Slice 10's "explicit push/stop interaction satisfies
+        the Gate" allowance.
+        """
+
+        if self._input_device is not None:
+            try:
+                self._input_device.stop()
+            except Exception:
+                pass
+        if self._voice is None:
+            return
+        try:
+            self._voice.commit()
+            self._set_voice_state(VoiceState.RESPONDING)
+        except Exception:
+            self.failure.emit("Could not stop speaking")
+
     @Slot()
     def stop_voice(self) -> None:
+        if self._input_device is not None:
+            try:
+                self._input_device.stop()
+            except Exception:
+                pass
+            self._input_device = None
+        if self._output_device is not None:
+            try:
+                self._output_device.stop()
+            except Exception:
+                pass
+            self._output_device = None
         if self._voice is not None:
             try:
                 self._voice.stop()
@@ -382,12 +618,14 @@ class ClientWorker(QObject):
 
 
 class DesktopController(QObject):
-    request_send = Signal(str)
+    request_send = Signal(str, str, bool)
     request_refresh = Signal()
     request_acknowledge = Signal(str)
+    request_load_confirmation = Signal(str)
     request_decision = Signal(str, bool)
     request_cancel_task = Signal(str)
-    request_voice_start = Signal()
+    request_voice_start = Signal(str, bool)
+    request_voice_commit = Signal()
     request_voice_stop = Signal()
     request_voice_interrupt = Signal()
     request_shutdown = Signal()
@@ -401,6 +639,10 @@ class DesktopController(QObject):
     request_delete_provider_credential = Signal(str)
     request_set_memory_credential = Signal(str)
     request_delete_memory_credential = Signal()
+    request_load_conversations = Signal()
+    request_new_conversation = Signal()
+    request_open_conversation = Signal(str)
+    request_load_older_turns = Signal(str, str)
 
     def __init__(
         self,
@@ -410,19 +652,29 @@ class DesktopController(QObject):
         *,
         auto_connect: bool = True,
         runtime_session_id: UUID | None = None,
+        input_device_factory: Any = QtAudioInputDevice,
+        output_device_factory: Any = QtAudioOutputDevice,
     ):
         super().__init__(parent)
         self._thread = QThread(self)
-        self.worker = ClientWorker(base_url, credential, runtime_session_id)
+        self.worker = ClientWorker(
+            base_url,
+            credential,
+            runtime_session_id,
+            input_device_factory=input_device_factory,
+            output_device_factory=output_device_factory,
+        )
         self.worker.moveToThread(self._thread)
         if auto_connect:
             self._thread.started.connect(self.worker.connect_core)
         self.request_send.connect(self.worker.send_text)
         self.request_refresh.connect(self.worker.refresh)
         self.request_acknowledge.connect(self.worker.acknowledge)
+        self.request_load_confirmation.connect(self.worker.load_confirmation)
         self.request_decision.connect(self.worker.decide_confirmation)
         self.request_cancel_task.connect(self.worker.cancel_task)
         self.request_voice_start.connect(self.worker.start_voice)
+        self.request_voice_commit.connect(self.worker.commit_voice)
         self.request_voice_stop.connect(self.worker.stop_voice)
         self.request_voice_interrupt.connect(self.worker.interrupt_voice)
         self.request_shutdown.connect(self.worker.shutdown)
@@ -442,6 +694,10 @@ class DesktopController(QObject):
         self.request_delete_memory_credential.connect(
             self.worker.delete_memory_credential
         )
+        self.request_load_conversations.connect(self.worker.load_conversations)
+        self.request_new_conversation.connect(self.worker.start_new_conversation)
+        self.request_open_conversation.connect(self.worker.open_conversation)
+        self.request_load_older_turns.connect(self.worker.load_older_turns)
         self.worker.stopped.connect(self._thread.quit)
         self._thread_started = auto_connect
         if auto_connect:
@@ -476,6 +732,79 @@ class SettingsDialog(QDialog):
         return self._notifications.isChecked()
 
 
+class PrivacyPreferenceDialog(QDialog):
+    """First-run/explicit inference privacy choice (Contract v1 SS31-34).
+
+    Maps directly to human wording only; the internal `DataLocality` enum
+    names are never shown as primary UI text.
+    """
+
+    def __init__(
+        self, preference: InferencePrivacyPreference, parent: QWidget | None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sofia privacy")
+        self.setModal(True)
+        form = QFormLayout(self)
+        note = QLabel(
+            "Choose how Sofia may process your messages. You can change this "
+            "later in Settings."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        self._locality = QComboBox()
+        for value in _LOCALITY_WIRE_VALUES:
+            self._locality.addItem(_LOCALITY_LABELS[value], value)
+        self._locality.setCurrentIndex(_LOCALITY_WIRE_VALUES.index(preference.locality))
+        form.addRow("Inference location", self._locality)
+        self._cloud_context = QCheckBox(
+            "Allow cognitive memory/context to be sent to cloud models"
+        )
+        self._cloud_context.setChecked(preference.cloud_context_eligible)
+        form.addRow(self._cloud_context)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save)
+        buttons.accepted.connect(self.accept)
+        form.addRow(buttons)
+
+    @property
+    def preference(self) -> InferencePrivacyPreference:
+        return InferencePrivacyPreference(
+            locality=str(self._locality.currentData()),
+            cloud_context_eligible=self._cloud_context.isChecked(),
+        )
+
+
+class ConfirmationDialog(QDialog):
+    """Human-safe confirmation review (Slice 10 SA-B041 Confirmation UX).
+
+    Shows only the bounded, already-safe fields the Core confirmation
+    response carries -- never a raw domain object dump.
+    """
+
+    def __init__(self, confirmation: dict[str, Any], parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sofia wants to do something")
+        self.setModal(True)
+        form = QFormLayout(self)
+        form.addRow("Capability", QLabel(str(confirmation.get("capability", "—"))))
+        form.addRow("Operation", QLabel(str(confirmation.get("operation", "—"))))
+        resource = QLabel(str(confirmation.get("resource", "—")))
+        resource.setWordWrap(True)
+        form.addRow("Target", resource)
+        form.addRow(
+            "Permission lifetime",
+            QLabel(str(confirmation.get("requested_lifetime", "ONE_SHOT"))),
+        )
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Yes).setText("Approve")
+        buttons.button(QDialogButtonBox.StandardButton.No).setText("Deny")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, controller: DesktopController, base_url: str) -> None:
         super().__init__()
@@ -485,11 +814,15 @@ class MainWindow(QMainWindow):
         self._notifications_enabled = bool(
             self._settings.value("notifications/enabled", True, type=bool)
         )
+        self._privacy_preference = self._load_privacy_preference()
         self._quitting = False
         self._seen_native: set[UUID] = set()
         self._notification_rows: dict[UUID, QWidget] = {}
         self._task_rows: dict[UUID, QWidget] = {}
         self._last_connection_state: str | None = None
+        self._current_conversation_id: str | None = None
+        self._pending_confirmation_id: str | None = None
+        self._ai_dashboard: dict[str, Any] | None = None
         self._build_ui()
         self._build_tray()
         self._wire_controller()
@@ -497,6 +830,50 @@ class MainWindow(QMainWindow):
         self._refresh_timer.setInterval(2500)
         self._refresh_timer.timeout.connect(self._controller.request_refresh.emit)
         self._refresh_timer.start()
+
+    # -- Privacy preference (Contract v1 SS31-34) -------------------------
+
+    def _load_privacy_preference(self) -> InferencePrivacyPreference:
+        locality = self._settings.value("privacy/locality", None, type=str)
+        if locality not in _LOCALITY_WIRE_VALUES:
+            return InferencePrivacyPreference.default()
+        cloud_context_eligible = bool(
+            self._settings.value("privacy/cloud_context_eligible", False, type=bool)
+        )
+        return InferencePrivacyPreference(locality, cloud_context_eligible)
+
+    def _save_privacy_preference(self, preference: InferencePrivacyPreference) -> None:
+        self._privacy_preference = preference
+        self._settings.setValue("privacy/locality", preference.locality)
+        self._settings.setValue(
+            "privacy/cloud_context_eligible", preference.cloud_context_eligible
+        )
+
+    def _has_explicit_privacy_choice(self) -> bool:
+        return self._settings.value("privacy/locality", None, type=str) in (
+            _LOCALITY_WIRE_VALUES
+        )
+
+    def _ensure_privacy_choice(self) -> bool:
+        """Block the first real inference until the user resolves a choice.
+
+        Non-inference operations (attach, health, dashboard, routing
+        preview, provider/Memory setup) never go through this gate
+        (Contract v1 SS33).
+        """
+
+        if self._has_explicit_privacy_choice():
+            return True
+        return self._show_privacy_dialog()
+
+    def _show_privacy_dialog(self) -> bool:
+        dialog = PrivacyPreferenceDialog(self._privacy_preference, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save_privacy_preference(dialog.preference)
+            return True
+        return False
+
+    # -- UI construction ---------------------------------------------------
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Sofia's Assistant")
@@ -509,25 +886,32 @@ class MainWindow(QMainWindow):
         settings = QAction("Settings", self)
         settings.triggered.connect(self._show_settings)
         menu.addAction(settings)
+        privacy = QAction("Privacy…", self)
+        privacy.triggered.connect(self._show_privacy_dialog)
+        menu.addAction(privacy)
         menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
 
-        tabs = QTabWidget(self)
-        tabs.addTab(self._home_tab(), "Home")
-        tabs.addTab(self._chat_tab(), "Chat")
-        tabs.addTab(self._ai_models_tab(), "AI & Models")
-        tabs.addTab(self._memory_tab(), "Memory / Integrations")
-        tabs.addTab(self._tasks_tab(), "Tasks")
-        tabs.addTab(self._notifications_tab(), "Notifications")
-        tabs.addTab(self._voice_tab(), "Voice")
-        tabs.addTab(self._health_tab(), "Health")
-        self.setCentralWidget(tabs)
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(self._home_tab(), "Home")
+        self._tabs.addTab(self._chat_tab(), "Chat")
+        self._tabs.addTab(self._ai_models_tab(), "AI & Models")
+        self._tabs.addTab(self._memory_tab(), "Memory / Integrations")
+        self._tabs.addTab(self._tasks_tab(), "Tasks")
+        self._tabs.addTab(self._notifications_tab(), "Notifications")
+        self._tabs.addTab(self._voice_tab(), "Voice")
+        self._tabs.addTab(self._health_tab(), "Health")
+        self.setCentralWidget(self._tabs)
 
     def _home_tab(self) -> QWidget:
         self._home = HomeTab()
+        self._home.configure_ai_requested.connect(self._open_ai_models_tab)
         return self._home
+
+    def _open_ai_models_tab(self) -> None:
+        self._tabs.setCurrentWidget(self._ai_models)
 
     def _ai_models_tab(self) -> QWidget:
         self._ai_models = AIModelsTab()
@@ -565,12 +949,33 @@ class MainWindow(QMainWindow):
 
     def _chat_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
+        outer = QVBoxLayout(tab)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        outer.addWidget(splitter, 1)
+
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout(sidebar)
+        new_conversation = QPushButton("New conversation")
+        new_conversation.clicked.connect(self._controller.request_new_conversation.emit)
+        sidebar_layout.addWidget(new_conversation)
+        self._conversation_list = QListWidget()
+        self._conversation_list.setAccessibleName("Conversation history")
+        self._conversation_list.currentItemChanged.connect(
+            self._on_conversation_selected
+        )
+        sidebar_layout.addWidget(self._conversation_list, 1)
+        splitter.addWidget(sidebar)
+
+        chat_panel = QWidget()
+        chat_layout = QVBoxLayout(chat_panel)
+        older = QPushButton("Load older messages")
+        older.clicked.connect(self._load_older_turns)
+        chat_layout.addWidget(older)
         self._chat = QTextBrowser()
         self._chat.setOpenExternalLinks(False)
         self._chat.setPlaceholderText("Conversation output appears here")
         self._chat.setAccessibleName("Conversation transcript")
-        layout.addWidget(self._chat, 1)
+        chat_layout.addWidget(self._chat, 1)
         row = QHBoxLayout()
         self._draft = QLineEdit()
         self._draft.setPlaceholderText("Message Sofia…")
@@ -579,7 +984,11 @@ class MainWindow(QMainWindow):
         send.clicked.connect(self._send_draft)
         row.addWidget(self._draft, 1)
         row.addWidget(send)
-        layout.addLayout(row)
+        chat_layout.addLayout(row)
+        splitter.addWidget(chat_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        self._oldest_loaded_sequence: int | None = None
         return tab
 
     def _tasks_tab(self) -> QWidget:
@@ -604,20 +1013,29 @@ class MainWindow(QMainWindow):
         self._voice_label = QLabel("IDLE")
         self._voice_label.setAccessibleName("Voice state")
         box_layout.addWidget(self._voice_label)
+        self._voice_transcript = QTextBrowser()
+        self._voice_transcript.setAccessibleName("Voice transcript")
+        self._voice_transcript.setMaximumHeight(160)
+        box_layout.addWidget(self._voice_transcript)
         controls = QHBoxLayout()
         start = QPushButton("Start")
-        stop = QPushButton("Stop")
+        stop_speaking = QPushButton("Stop speaking")
         interrupt = QPushButton("Interrupt")
-        start.clicked.connect(self._controller.request_voice_start.emit)
-        stop.clicked.connect(self._controller.request_voice_stop.emit)
+        stop = QPushButton("Stop")
+        start.clicked.connect(self._start_voice)
+        stop_speaking.clicked.connect(self._controller.request_voice_commit.emit)
         interrupt.clicked.connect(self._controller.request_voice_interrupt.emit)
+        stop.clicked.connect(self._controller.request_voice_stop.emit)
         controls.addWidget(start)
-        controls.addWidget(stop)
+        controls.addWidget(stop_speaking)
         controls.addWidget(interrupt)
+        controls.addWidget(stop)
         box_layout.addLayout(controls)
         layout.addWidget(box)
         note = QLabel(
-            "Microphone/provider audio is controlled by Core's realtime boundary."
+            "Voice uses the same privacy choice as Chat. Microphone capture "
+            "starts only when you click Start and stops on Stop speaking, "
+            "Interrupt, Stop or a device error."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -674,10 +1092,21 @@ class MainWindow(QMainWindow):
         worker.stream_delta.connect(self._chat.insertPlainText)
         worker.stream_finished.connect(lambda: self._chat.append(""))
         worker.voice_changed.connect(self._voice_label.setText)
+        worker.voice_transcript.connect(
+            lambda text: self._voice_transcript.append(f"<b>You:</b> {text}")
+        )
+        worker.voice_assistant_text.connect(
+            lambda text: self._voice_transcript.append(f"<b>Sofia:</b> {text}")
+        )
         worker.failure.connect(self._show_error)
         worker.ai_dashboard_ready.connect(self._on_ai_dashboard)
         worker.routing_preview_ready.connect(self._ai_models.show_routing_preview)
         worker.credential_write_succeeded.connect(self._on_credential_write_succeeded)
+        worker.conversations_ready.connect(self._on_conversations_ready)
+        worker.conversation_opened.connect(self._on_conversation_opened)
+        worker.older_turns_ready.connect(self._on_older_turns_ready)
+        worker.conversation_recovered.connect(self._on_conversation_recovered)
+        worker.confirmation_ready.connect(self._on_confirmation_ready)
 
     @Slot(str)
     def _on_state(self, state: str) -> None:
@@ -690,10 +1119,12 @@ class MainWindow(QMainWindow):
         self._memory.set_writes_enabled(writes_enabled)
         if writes_enabled and value != self._last_connection_state:
             self._controller.request_ai_dashboard.emit()
+            self._controller.request_load_conversations.emit()
         self._last_connection_state = value
 
     @Slot(object)
     def _on_ai_dashboard(self, bundle: dict[str, object]) -> None:
+        self._ai_dashboard = bundle
         self._home.update_ai_dashboard(bundle)
         self._ai_models.update_ai_dashboard(bundle)
         self._memory.update_ai_dashboard(bundle)
@@ -704,9 +1135,119 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_snapshot(self, snapshot: ClientSnapshot) -> None:
+        self._home.update_health(snapshot.health)
         self._render_health(snapshot.health)
         self._render_tasks(snapshot.tasks)
         self._render_notifications(snapshot.notifications)
+
+    # -- Conversation History (Gate I18, SA-B040) -------------------------
+
+    @Slot(object)
+    def _on_conversations_ready(self, page: dict[str, Any]) -> None:
+        self._conversation_list.blockSignals(True)
+        self._conversation_list.clear()
+        for item in page.get("items", []):
+            row = QListWidgetItem(str(item.get("preview") or "New conversation"))
+            row.setData(Qt.ItemDataRole.UserRole, str(item.get("conversation_id")))
+            self._conversation_list.addItem(row)
+            if str(item.get("conversation_id")) == self._current_conversation_id:
+                self._conversation_list.setCurrentItem(row)
+        self._conversation_list.blockSignals(False)
+
+    def _on_conversation_selected(
+        self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
+    ) -> None:
+        if current is None:
+            return
+        conversation_id = str(current.data(Qt.ItemDataRole.UserRole))
+        if conversation_id == self._current_conversation_id:
+            return
+        self._controller.request_open_conversation.emit(conversation_id)
+
+    @Slot(str, object)
+    def _on_conversation_opened(
+        self, conversation_id: str, page: dict[str, Any]
+    ) -> None:
+        self._current_conversation_id = conversation_id
+        self._render_turn_page(page, replace=True)
+
+    @Slot(str, object)
+    def _on_older_turns_ready(self, conversation_id: str, page: dict[str, Any]) -> None:
+        if conversation_id != self._current_conversation_id:
+            return
+        self._render_turn_page(page, replace=False, prepend=True)
+
+    def _render_turn_page(
+        self, page: dict[str, Any], *, replace: bool, prepend: bool = False
+    ) -> None:
+        turns = page.get("turns", [])
+        if replace:
+            self._chat.clear()
+        html_lines = []
+        for turn in turns:
+            html_lines.append(f"<b>You:</b> {turn.get('user_text', '')}")
+            assistant_text = turn.get("assistant_text")
+            if assistant_text:
+                html_lines.append(f"<b>Sofia:</b> {assistant_text}")
+            elif turn.get("status") == "FAILED":
+                html_lines.append(
+                    f"<i>Sofia could not complete this turn: "
+                    f"{turn.get('error_message', 'unknown error')}</i>"
+                )
+        rendered = "<br>".join(html_lines)
+        if prepend:
+            existing = self._chat.toHtml()
+            self._chat.setHtml(rendered + "<br>" + existing)
+        else:
+            for line in html_lines:
+                self._chat.append(line)
+        if turns:
+            self._oldest_loaded_sequence = int(turns[0].get("sequence", 0)) or None
+        self._has_older_turns = bool(page.get("has_older", False))
+
+    def _load_older_turns(self) -> None:
+        if (
+            self._current_conversation_id is None
+            or self._oldest_loaded_sequence is None
+            or not getattr(self, "_has_older_turns", False)
+        ):
+            return
+        self._controller.request_load_older_turns.emit(
+            self._current_conversation_id, str(self._oldest_loaded_sequence)
+        )
+
+    @Slot(object)
+    def _on_conversation_recovered(self, page: dict[str, Any]) -> None:
+        turns = page.get("turns", [])
+        if not turns:
+            self._chat.append(
+                "<i>The last message's result is unconfirmed. "
+                "Please retry if needed.</i>"
+            )
+            return
+        turn = turns[-1]
+        if turn.get("status") == "COMPLETED" and turn.get("assistant_text"):
+            self._chat.append(f"<b>Sofia:</b> {turn['assistant_text']}")
+        else:
+            self._chat.append(
+                "<i>The last message's result is unconfirmed. "
+                "Please retry if needed.</i>"
+            )
+
+    # -- Confirmation UX ----------------------------------------------------
+
+    @Slot(object)
+    def _on_confirmation_ready(self, confirmation: dict[str, Any]) -> None:
+        dialog = ConfirmationDialog(confirmation, self)
+        confirmation_id = self._pending_confirmation_id
+        self._pending_confirmation_id = None
+        result = dialog.exec()
+        if confirmation_id is None:
+            return
+        if result == QDialog.DialogCode.Accepted:
+            self._controller.request_decision.emit(confirmation_id, True)
+        else:
+            self._controller.request_decision.emit(confirmation_id, False)
 
     def _render_health(self, health: tuple[HealthItem, ...]) -> None:
         self._health.clear()
@@ -723,12 +1264,7 @@ class MainWindow(QMainWindow):
             label = QLabel(f"{task.status} — {task.objective}")
             label.setWordWrap(True)
             layout.addWidget(label, 1)
-            if task.status in {
-                "QUEUED",
-                "RUNNING",
-                "WAITING_SCHEDULE",
-                "WAITING_CONFIRMATION",
-            }:
+            if task.status in _ACTIVE_TASK_STATUSES:
                 cancel = QPushButton("Cancel")
                 cancel.clicked.connect(
                     lambda _checked=False, task_id=task.id: (
@@ -756,20 +1292,13 @@ class MainWindow(QMainWindow):
                 notification.action_reference is not None
                 and notification.type == "PermissionRequested"
             ):
-                approve = QPushButton("Approve")
-                deny = QPushButton("Deny")
-                approve.clicked.connect(
+                review = QPushButton("Review")
+                review.clicked.connect(
                     lambda _checked=False, ref=notification.action_reference: (
-                        self._controller.request_decision.emit(str(ref), True)
+                        self._review_confirmation(ref)
                     )
                 )
-                deny.clicked.connect(
-                    lambda _checked=False, ref=notification.action_reference: (
-                        self._controller.request_decision.emit(str(ref), False)
-                    )
-                )
-                layout.addWidget(approve)
-                layout.addWidget(deny)
+                layout.addWidget(review)
             acknowledge = QPushButton("Acknowledge")
             acknowledge.clicked.connect(
                 lambda _checked=False, item_id=notification.id: (
@@ -791,13 +1320,30 @@ class MainWindow(QMainWindow):
                         5000,
                     )
 
+    def _review_confirmation(self, confirmation_id: UUID) -> None:
+        self._pending_confirmation_id = str(confirmation_id)
+        self._controller.request_load_confirmation.emit(str(confirmation_id))
+
     def _send_draft(self) -> None:
         text = self._draft.text().strip()
         if not text:
             return
+        if not self._ensure_privacy_choice():
+            return
         self._chat.append(f"<b>You:</b> {text}")
         self._draft.clear()
-        self._controller.request_send.emit(text)
+        preference = self._privacy_preference
+        self._controller.request_send.emit(
+            text, preference.locality, preference.cloud_context_eligible
+        )
+
+    def _start_voice(self) -> None:
+        if not self._ensure_privacy_choice():
+            return
+        preference = self._privacy_preference
+        self._controller.request_voice_start.emit(
+            preference.locality, preference.cloud_context_eligible
+        )
 
     def _show_settings(self) -> None:
         dialog = SettingsDialog(self._base_url, self._notifications_enabled, self)

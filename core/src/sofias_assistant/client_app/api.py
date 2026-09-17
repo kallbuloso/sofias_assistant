@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from typing import Any, cast
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import UUID
 
 import httpx2
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as connect_websocket
 
@@ -99,7 +100,53 @@ class CoreApiClient:
             dict[str, Any], self._get(f"/api/v1/conversations/{conversation_id}")
         )
 
-    def stream_text(self, conversation_id: UUID, text: str) -> Iterator[dict[str, Any]]:
+    def list_conversations(
+        self, *, limit: int = 50, cursor: str | None = None
+    ) -> dict[str, Any]:
+        """Return one bounded, cursor-paginated Conversation list page."""
+
+        params = {"limit": str(limit)}
+        if cursor is not None:
+            params["cursor"] = cursor
+        return cast(
+            dict[str, Any],
+            self._get_validated(f"/api/v1/conversations?{urlencode(params)}"),
+        )
+
+    def list_conversation_turns(
+        self,
+        conversation_id: UUID,
+        *,
+        limit: int = 50,
+        before_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one bounded, chronological Turn history page."""
+
+        params = {"limit": str(limit)}
+        if before_sequence is not None:
+            params["before_sequence"] = str(before_sequence)
+        return cast(
+            dict[str, Any],
+            self._get_validated(
+                f"/api/v1/conversations/{conversation_id}/turns?{urlencode(params)}"
+            ),
+        )
+
+    def stream_text(
+        self,
+        conversation_id: UUID,
+        text: str,
+        *,
+        locality: str,
+        cloud_context_eligible: bool,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream one Turn with the caller's explicit privacy policy.
+
+        Contract v1 SS34: `locality`/`cloud_context_eligible` are always
+        explicit here; no caller may omit them to get a silent
+        `LOCAL_ONLY`/`False` default (Amendment 0004 SS24-25).
+        """
+
         self._require_session()
         if not text.strip():
             raise ValueError("Text must not be blank")
@@ -109,8 +156,8 @@ class CoreApiClient:
             headers=self._headers(),
             json={
                 "text": text,
-                "locality": "local_only",
-                "cloud_context_eligible": False,
+                "locality": locality,
+                "cloud_context_eligible": cloud_context_eligible,
             },
         )
         with response as stream:
@@ -136,9 +183,19 @@ class CoreApiClient:
             dict[str, Any], self._get(f"/api/v1/confirmations/{confirmation_id}")
         )
 
-    def approve_confirmation(self, confirmation_id: UUID) -> dict[str, Any]:
+    def approve_confirmation(
+        self, confirmation_id: UUID, *, lifetime: str = "ONE_SHOT"
+    ) -> dict[str, Any]:
+        """Approve with an explicit lifetime, never wider than requested.
+
+        Core rejects an approval whose lifetime differs from the
+        confirmation's own `requested_lifetime`; callers should fetch it via
+        `get_confirmation()` first rather than assuming `ONE_SHOT`.
+        """
+
         return self._post(
-            f"/api/v1/confirmations/{confirmation_id}/approve", {"lifetime": "ONE_SHOT"}
+            f"/api/v1/confirmations/{confirmation_id}/approve",
+            {"lifetime": lifetime},
         )
 
     def deny_confirmation(self, confirmation_id: UUID) -> None:
@@ -268,11 +325,15 @@ class CoreApiClient:
 
     def _websocket_url(self) -> str:
         parsed = urlparse(self.base_url)
-        return urlunparse(("ws", parsed.netloc, parsed.path, "", "", ""))
+        return urlunparse(("ws", parsed.netloc, "/api/v1/realtime", "", "", ""))
 
     def _get(self, path: str) -> dict[str, Any] | list[dict[str, Any]]:
         response = self._http.get(path, headers=self._headers())
         return self._decode(response)
+
+    def _get_validated(self, path: str) -> Any:
+        response = self._http.get(path, headers=self._headers())
+        return self._decode_validated(response)
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self._http.post(path, headers=self._headers(), json=body)
@@ -367,8 +428,18 @@ class RealtimeVoiceConnection:
         self.session_id: UUID | None = None
         self.interaction_id: UUID | None = None
         self.committed = False
+        self._pending_events: list[dict[str, Any]] = []
 
-    def open(self, conversation_id: UUID) -> None:
+    def open(
+        self, conversation_id: UUID, *, locality: str, cloud_context_eligible: bool
+    ) -> None:
+        """Open a realtime session with the caller's explicit privacy policy.
+
+        Contract v1 SS35: voice carries the same effective `locality`/
+        `cloud_context_eligible` as the active text privacy preference; no
+        default is silently substituted here.
+        """
+
         self._socket = connect_websocket(self._url, open_timeout=5, close_timeout=2)
         self._send(
             {
@@ -388,8 +459,8 @@ class RealtimeVoiceConnection:
                 "protocol_version": "realtime.v1",
                 "type": "session.open",
                 "conversation_id": str(conversation_id),
-                "locality": "local_only",
-                "cloud_context_eligible": False,
+                "locality": locality,
+                "cloud_context_eligible": cloud_context_eligible,
                 "input_audio_format": {
                     "encoding": "pcm16",
                     "sample_rate_hz": 24000,
@@ -408,16 +479,35 @@ class RealtimeVoiceConnection:
         self.session_id = UUID(str(opened["realtime_session_id"]))
 
     def start(self) -> UUID:
+        """Start an interaction and wait for the server's confirmation.
+
+        A fast provider may already be emitting assistant events (including
+        raw binary audio frames) before this returns -- the wire has no
+        ordering guarantee relative to `interaction.started`. Any such frame
+        is buffered rather than dropped or treated as a protocol error; it is
+        replayed, in order, as the first item(s) `pump_events()` yields.
+        """
+
         session_id = self._require_open()
+        socket = self._socket
+        if socket is None:
+            raise CoreApiError("Realtime socket is closed")
         self._send({"type": "input_started", "realtime_session_id": str(session_id)})
         while True:
-            event = self._receive_json()
-            if event.get("type") == "interaction_started":
+            frame = socket.recv(timeout=8)
+            if isinstance(frame, bytes):
+                self._pending_events.append(
+                    {"type": "assistant_audio_chunk", "audio": frame}
+                )
+                continue
+            event = self._decode_json(frame)
+            if event.get("type") == "interaction.started":
                 self.interaction_id = UUID(str(event["realtime_interaction_id"]))
                 self.committed = False
                 return self.interaction_id
             if event.get("type") == "error":
                 raise CoreApiError("Realtime interaction could not be started")
+            self._pending_events.append(event)
 
     def send_audio(self, audio: bytes) -> None:
         if self._socket is None or self.interaction_id is None or self.committed:
@@ -468,6 +558,34 @@ class RealtimeVoiceConnection:
         self.session_id = self.interaction_id = None
         self.committed = False
 
+    def pump_events(self) -> Iterator[dict[str, Any]]:
+        """Continuously drain server events; the sole reader after `start()`.
+
+        Yields every decoded JSON control message unchanged, plus a
+        synthetic `{"type": "assistant_audio_chunk", "audio": bytes}` for
+        each raw binary frame (the wire has no envelope/length-prefix for
+        assistant audio -- see Contract v1/realtime_ws.py). Ends cleanly
+        (no more items) when the socket closes; a malformed frame raises
+        `CoreApiError` instead of yielding, since this generator is the only
+        code path reading this socket once a voice session is active
+        (Gate I18: no other call site may `.recv()` concurrently).
+        """
+
+        while self._pending_events:
+            yield self._pending_events.pop(0)
+        socket = self._socket
+        if socket is None:
+            raise CoreApiError("Realtime socket is closed")
+        while True:
+            try:
+                frame = socket.recv(timeout=None)
+            except ConnectionClosed:
+                return
+            if isinstance(frame, bytes):
+                yield {"type": "assistant_audio_chunk", "audio": frame}
+                continue
+            yield self._decode_json(frame)
+
     def _require_open(self) -> UUID:
         if self._socket is None or self.session_id is None:
             raise CoreApiError("Realtime session is not open")
@@ -495,9 +613,12 @@ class RealtimeVoiceConnection:
         value = self._socket.recv(timeout=8)
         if not isinstance(value, str):
             raise CoreApiError("Realtime returned an unexpected frame")
+        return self._decode_json(value)
+
+    def _decode_json(self, value: str) -> dict[str, Any]:
         try:
             parsed = json.loads(value)
-        except json.JSONDecodeError as error:
+        except (TypeError, json.JSONDecodeError) as error:
             raise CoreApiError("Realtime returned malformed data") from error
         if not isinstance(parsed, dict):
             raise CoreApiError("Realtime returned malformed data")

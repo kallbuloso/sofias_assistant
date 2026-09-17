@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from sofias_assistant.client_app.models import HealthItem
+
 _LOCALITY_LABELS = {
     "local_only": "Local only",
     "cloud_allowed": "Allow cloud",
@@ -60,6 +62,8 @@ def _credential_line(credential: dict[str, Any]) -> str:
 class HomeTab(QWidget):
     """Human readiness summary: Sofia ready / needs configuration / degraded."""
 
+    configure_ai_requested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -73,8 +77,13 @@ class HomeTab(QWidget):
         self._details = QListWidget()
         self._details.setAccessibleName("Readiness details")
         layout.addWidget(self._details, 1)
+        self._configure_ai = QPushButton("Configure AI")
+        self._configure_ai.clicked.connect(self.configure_ai_requested.emit)
+        self._configure_ai.setVisible(False)
+        layout.addWidget(self._configure_ai)
         self._connection_state = "DISCONNECTED"
         self._bundle: dict[str, Any] | None = None
+        self._health: tuple[HealthItem, ...] = ()
 
     def update_connection(self, state: str) -> None:
         self._connection_state = state
@@ -84,9 +93,14 @@ class HomeTab(QWidget):
         self._bundle = bundle
         self._render()
 
+    def update_health(self, health: tuple[HealthItem, ...]) -> None:
+        self._health = health
+        self._render()
+
     def _render(self) -> None:
         details: list[str] = []
         headline = "Sofia ready"
+        needs_ai_configuration = False
         state = self._connection_state.rsplit(".", 1)[-1]
         if state in {"DISCONNECTED", "CONNECTING"}:
             headline = "Core reconnecting"
@@ -108,6 +122,7 @@ class HomeTab(QWidget):
             ]
             if missing_credential and headline == "Sofia ready":
                 headline = "AI needs configuration"
+                needs_ai_configuration = True
             for provider in missing_credential:
                 details.append(
                     f"AI provider '{provider.get('display_name')}' has no credential"
@@ -122,13 +137,39 @@ class HomeTab(QWidget):
                     f"Memory: {status}"
                     + (f" — {health.get('detail')}" if health.get("detail") else "")
                 )
+            profiles = {
+                profile.get("key"): profile for profile in bundle.get("profiles", [])
+            }
+            realtime_profile = profiles.get("realtime")
+            if realtime_profile is not None:
+                eligible_bindings = [
+                    binding
+                    for binding in realtime_profile.get("bindings", [])
+                    if binding.get("enabled")
+                ]
+                if not eligible_bindings:
+                    details.append("Realtime: unavailable — no eligible model bound")
+                    if headline == "Sofia ready":
+                        headline = "Realtime unavailable"
         else:
             details.append("AI configuration: loading…")
+
+        scheduler = next(
+            (item for item in self._health if item.name == "Scheduler"), None
+        )
+        if scheduler is not None and scheduler.status not in {"healthy", "unknown"}:
+            details.append(
+                f"Scheduler: {scheduler.status}"
+                + (f" — {scheduler.detail}" if scheduler.detail else "")
+            )
+            if headline == "Sofia ready":
+                headline = "Scheduler degraded"
 
         self._headline.setText(headline)
         self._details.clear()
         for line in details:
             QListWidgetItem(line, self._details)
+        self._configure_ai.setVisible(needs_ai_configuration)
 
 
 class AIModelsTab(QWidget):
