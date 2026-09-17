@@ -2835,10 +2835,15 @@ Live provider/hardware evidence:
     (speaker verified functional, microphone smoke cleanly skipped).
 
 Commits:
-    (recorded after commit; see below)
+    1ae0b26 feat(conversation): add bounded Conversation History service and API
+    27e10c5 feat(client): add privacy preference, conversation history and voice UX
+    d44437f test(ai): validate Gate I18 daily assistant experience
+    c7e5562 docs(plan): record Gate I18 closure ledger — awaiting remote verification
 
 Code-complete HEAD:
-    (recorded after commit; see below)
+    d44437fff1ae3bb48042e1eeb4dec826f314d8aa
+    (c7e5562 is this ledger's own docs-only commit, same pattern as
+    Gate I16/I17's closure-doc-only follow-ups)
 
 Closure HEAD:
     (pending remote verification)
