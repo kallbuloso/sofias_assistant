@@ -1717,7 +1717,7 @@ Gate:
     I16 — Seamless Desktop Runtime (SA-B038 — Core Supervision & Secure Attach)
 
 Status:
-    IMPLEMENTED — AWAITING REMOTE VERIFICATION
+    CLOSED — REMOTE VERIFIED
 
 Baseline:
     cef3c84fefac96e0db175bc5a56b3f253396bac8
@@ -1866,7 +1866,12 @@ Packaging:
     core/client/SofiaCore.spec added (onefile, console=False, bundles Alembic
     migrations + aiosqlite hidden imports). Existing SofiaAssistant.spec
     unchanged and still builds. Both executables land side by side in
-    core/dist/, satisfying the sibling-executable locator contract.
+    core/dist/, satisfying the sibling-executable locator contract. CI now
+    builds and smoke-tests both executables on every push
+    (.github/workflows/ci.yml: "Core package baseline" +
+    "Packaged Core executable smoke" via core/scripts/ci_core_smoke.py,
+    alongside the existing Desktop package/smoke steps); remote-verified
+    green on windows-latest for the Final HEAD below.
 
 Targeted tests:
     tests/unit/client_attach/ (models, in-memory store, Windows store with a
@@ -1904,13 +1909,16 @@ Full pytest:
     other runs (isolated x2, full-suite x1). Root cause looks like transient
     system load during this session's very heavy subprocess/packaging
     activity, not a logic defect in the shutdown path; flagged here rather
-    than hidden.
+    than hidden. The remote CI run for the Final HEAD (single-attempt,
+    lighter concurrent load than this local session) passed the full suite
+    cleanly with no flake.
 
 Ruff / Format / Mypy / git diff --check:
-    All green. `git diff --check` only flags the pre-existing intentional
-    Markdown trailing-space line-break convention on the four housekeeping
-    header edits (unrelated to code, not introduced by this Gate) and
-    LF/CRLF normalization notices.
+    All green locally. `git diff --check` only flags the pre-existing
+    intentional Markdown trailing-space line-break convention on the four
+    housekeeping header edits (unrelated to code, not introduced by this
+    Gate) and LF/CRLF normalization notices. Lint, format check and mypy
+    also remote-verified green in CI for the Final HEAD.
 
 Windows human smoke (manual, real packaged executables):
     1. SofiaCore.exe launched standalone: attach record published to the
@@ -1940,16 +1948,23 @@ Windows human smoke (manual, real packaged executables):
     (test_stop_sofia_gracefully_stops_a_real_core).
 
 Commits:
-    (see final HEAD below)
+    1dfc431 feat(runtime): add protected client attach store and runtime lifecycle API
+    265f3f4 feat(desktop): add Core supervision and seamless secure attach
+    6f02dbf test(desktop): validate Gate I16 seamless desktop runtime
+    4295223 docs(plan): sync Slice 10 status headers and close Gate I16 ledger
+    2e63520 ci: build and smoke-test the packaged SofiaCore.exe
 
 Final HEAD:
-    (recorded at push time)
+    2e635207b20131c2115cfc1ac02d146e6ef46d76
 
 origin/main:
-    (recorded at push time)
+    2e635207b20131c2115cfc1ac02d146e6ef46d76 (pushed; matches Final HEAD)
 
 CI:
-    (recorded once the remote run completes)
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/35176427233
+    conclusion: success (Lint, format check, mypy, full pytest, Desktop
+    package baseline + packaged smoke, Core package baseline + packaged
+    smoke all green on windows-latest)
 
 Findings fixed (in-scope, discovered during implementation):
     - runtime_http.py accidentally used `from __future__ import annotations`,
