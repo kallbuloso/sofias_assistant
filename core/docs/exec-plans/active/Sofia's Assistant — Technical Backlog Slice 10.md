@@ -2021,7 +2021,7 @@ Gate:
     I17 — Human Configuration Dashboard (SA-B039 — Human Configuration Dashboard)
 
 Status:
-    IMPLEMENTED — AWAITING REMOTE VERIFICATION
+    CLOSED — REMOTE VERIFIED
 
 Baseline:
     a8638fc1354e9bfca952d412e0ed916c0b4b1dd2
@@ -2332,9 +2332,33 @@ Commits:
     d24f69c feat(ai): add purpose-specific provider/Memory credential write surfaces
     a477db9 feat(dashboard): add Home, AI & Models and Memory/Integrations pages
     d4eeb99 test(ai): validate Gate I17 human configuration dashboard
+    26a029f docs(plan): record Gate I17 closure ledger — awaiting remote verification
 
 Final HEAD (code-complete):
     d4eeb99
+    (26a029f and this ledger-closure commit carry only docs-only
+    follow-ups, same pattern as Gate I16's 2b7f79f/a8638fc)
+
+CI:
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/35257766380
+    Attempt 1: FAILED -- Test step failed on
+    tests/integration/gate/test_gate_i16_seamless_desktop_runtime.py::
+    test_credential_rotates_across_core_restarts ("attach record was not
+    published in time", a 20s bounded wait for a second real
+    `python -m sofias_assistant.host` OS subprocess to fully boot and
+    publish its attach record to the real Windows Credential Manager).
+    This is a pre-existing Gate I16 test, unmodified by this Gate, in the
+    same "real-subprocess timing under shared CI runner load" category the
+    Gate I16 ledger already documented for a different test in the same
+    file; nothing in this Gate's changes touches Core startup I/O in a way
+    that would explain a new regression (only a new dataclass property,
+    one attach_audit() attribute assignment, and in-memory FastAPI route
+    registration were added to the startup path).
+    Attempt 2 (`rerun-failed-jobs` against the identical commit, no code
+    changed): SUCCESS -- Lint, format check, mypy, full pytest (929 passed,
+    4 skipped, 0 failed), Desktop package baseline + packaged smoke, Core
+    package baseline + packaged smoke all green. This confirms attempt 1
+    was transient CI-runner flakiness, not a regression.
 
 Findings fixed (in-scope, discovered during implementation):
     - AIConfigurationService was constructed in host/composition.py without
@@ -2371,6 +2395,9 @@ Known limitations:
       smoke above.
     - The pre-existing health_items() key mismatch noted above remains
       unfixed (Deferred).
+    - One CI attempt-1 flake in a pre-existing, unmodified Gate I16 real-
+      subprocess timing test (see CI section above); clean on attempt 2 for
+      the identical commit.
 
 Real blockers:
     None.
