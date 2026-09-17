@@ -23,7 +23,6 @@ def test_snapshot_maps_degraded_core_without_inventing_authority() -> None:
         {"state": "running", "health": {"status": "degraded", "components": []}},
         [],
         [],
-        None,
     )
     assert snapshot.connection is ConnectionState.DEGRADED
     assert VoiceState.IDLE.value == "IDLE"
@@ -56,7 +55,6 @@ def test_snapshot_maps_transport_items() -> None:
                 "error_message": None,
             }
         ],
-        None,
     )
     assert snapshot.notifications[0].id == notification_id
     assert snapshot.tasks[0].id == task_id

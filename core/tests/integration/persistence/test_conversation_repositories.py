@@ -246,6 +246,196 @@ async def test_terminal_save_and_recreated_engine_recover_domain_snapshots(
         await recreated_engine.dispose()
 
 
+def _conversation(conversation_id: UUID, updated_at: datetime) -> Conversation:
+    return Conversation(conversation_id, CREATED_AT, updated_at)
+
+
+def _turn(
+    conversation_id: UUID, sequence: int, *, turn_id: UUID, user_text: str
+) -> Turn:
+    return Turn(
+        id=turn_id,
+        conversation_id=conversation_id,
+        sequence=sequence,
+        status=TurnStatus.PROCESSING,
+        input_modality=TurnInputModality.TEXT,
+        cloud_context_eligible=False,
+        user_text=user_text,
+        assistant_text=None,
+        ai_request_id=None,
+        provider_id=None,
+        model_id=None,
+        provider_request_id=None,
+        provider_session_id=None,
+        error_category=None,
+        error_message=None,
+        created_at=CREATED_AT,
+        updated_at=CREATED_AT,
+        finished_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_page_orders_desc_with_deterministic_tiebreak_and_bounds(
+    tmp_path: Path,
+) -> None:
+    engine, factory = await create_uow_factory(tmp_path)
+    ids = [UUID(f"20000000-0000-0000-0000-00000000000{i}") for i in range(1, 4)]
+    try:
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            # Two conversations share the same updated_at; id must break the tie.
+            uow.conversations.add(_conversation(ids[0], CREATED_AT))
+            uow.conversations.add(_conversation(ids[1], CREATED_AT))
+            uow.conversations.add(
+                _conversation(ids[2], CREATED_AT + timedelta(seconds=1))
+            )
+            await uow.commit()
+
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            page, has_more = await uow.conversations.list_page(limit=2, before=None)
+            assert has_more is True
+            assert [c.id for c in page] == [ids[2], max(ids[0], ids[1])]
+
+            second_page, has_more_2 = await uow.conversations.list_page(
+                limit=2, before=(page[-1].updated_at, page[-1].id)
+            )
+            assert has_more_2 is False
+            assert [c.id for c in second_page] == [min(ids[0], ids[1])]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_page_keyset_pagination_has_no_gaps_or_duplicates(
+    tmp_path: Path,
+) -> None:
+    engine, factory = await create_uow_factory(tmp_path)
+    ids = [UUID(f"21000000-0000-0000-0000-0000000000{i:02d}") for i in range(1, 6)]
+    try:
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            for index, conversation_id in enumerate(ids):
+                uow.conversations.add(
+                    _conversation(
+                        conversation_id, CREATED_AT + timedelta(seconds=index)
+                    )
+                )
+            await uow.commit()
+
+        seen: list[UUID] = []
+        cursor: tuple[datetime, UUID] | None = None
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            while True:
+                page, has_more = await uow.conversations.list_page(
+                    limit=2, before=cursor
+                )
+                seen.extend(c.id for c in page)
+                if not has_more:
+                    break
+                cursor = (page[-1].updated_at, page[-1].id)
+        assert seen == list(reversed(ids))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_turn_list_recent_and_list_before_page_chronologically(
+    tmp_path: Path,
+) -> None:
+    engine, factory = await create_uow_factory(tmp_path)
+    turn_ids = [UUID(f"22000000-0000-0000-0000-0000000000{i:02d}") for i in range(1, 6)]
+    try:
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            uow.conversations.add(conversation())
+            for sequence, turn_id in enumerate(turn_ids, start=1):
+                uow.turns.add(
+                    _turn(
+                        CONVERSATION_ID,
+                        sequence,
+                        turn_id=turn_id,
+                        user_text=f"turn {sequence}",
+                    )
+                )
+            await uow.commit()
+
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            recent, has_older = await uow.turns.list_recent(CONVERSATION_ID, limit=2)
+            assert [t.sequence for t in recent] == [4, 5]
+            assert has_older is True
+
+            older, has_older_2 = await uow.turns.list_before(
+                CONVERSATION_ID, before_sequence=4, limit=2
+            )
+            assert [t.sequence for t in older] == [2, 3]
+            assert has_older_2 is True
+
+            oldest, has_older_3 = await uow.turns.list_before(
+                CONVERSATION_ID, before_sequence=2, limit=2
+            )
+            assert [t.sequence for t in oldest] == [1]
+            assert has_older_3 is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_first_and_latest_turns_for_batch_lookup_across_conversations(
+    tmp_path: Path,
+) -> None:
+    engine, factory = await create_uow_factory(tmp_path)
+    conversation_a = UUID("23000000-0000-0000-0000-000000000001")
+    conversation_b = UUID("23000000-0000-0000-0000-000000000002")
+    conversation_c = UUID("23000000-0000-0000-0000-000000000003")
+    try:
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            for conversation_id in (conversation_a, conversation_b, conversation_c):
+                uow.conversations.add(_conversation(conversation_id, CREATED_AT))
+            uow.turns.add(
+                _turn(
+                    conversation_a,
+                    1,
+                    turn_id=UUID("23000000-0000-0000-0000-000000000011"),
+                    user_text="  first question   with   spaces ",
+                )
+            )
+            uow.turns.add(
+                _turn(
+                    conversation_a,
+                    2,
+                    turn_id=UUID("23000000-0000-0000-0000-000000000012"),
+                    user_text="second question",
+                )
+            )
+            uow.turns.add(
+                _turn(
+                    conversation_b,
+                    1,
+                    turn_id=UUID("23000000-0000-0000-0000-000000000021"),
+                    user_text="only question",
+                )
+            )
+            # conversation_c has no turns at all -- must not appear in either map.
+            await uow.commit()
+
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            ids = [conversation_a, conversation_b, conversation_c]
+            first_turns = await uow.turns.first_turns_for(ids)
+            latest_turns = await uow.turns.latest_turns_for(ids)
+            # empty id list must short-circuit without querying.
+            empty_first = await uow.turns.first_turns_for([])
+            empty_latest = await uow.turns.latest_turns_for([])
+
+        assert first_turns[conversation_a].sequence == 1
+        assert first_turns[conversation_b].sequence == 1
+        assert conversation_c not in first_turns
+        assert latest_turns[conversation_a].sequence == 2
+        assert latest_turns[conversation_b].sequence == 1
+        assert conversation_c not in latest_turns
+        assert empty_first == {}
+        assert empty_latest == {}
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_save_of_unknown_conversation_or_turn_is_explicit(tmp_path: Path) -> None:
     engine, factory = await create_uow_factory(tmp_path)

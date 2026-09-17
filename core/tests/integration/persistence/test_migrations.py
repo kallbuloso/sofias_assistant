@@ -28,7 +28,7 @@ from sofias_assistant.persistence.models import (
     RuntimeSessionStatus,
 )
 
-HEAD_REVISION = "0011_ai_provider_model_profile_routing"
+HEAD_REVISION = "0012_conversation_history_index"
 DOMAIN_TABLES = {
     "runtime_events",
     "schedules",
@@ -228,6 +228,27 @@ def test_upgrade_from_0010_adds_ai_provider_model_profile_routing(
         catalog_columns
     )
     assert {"profile_key", "priority", "enabled"} <= binding_columns
+
+
+def test_upgrade_from_0011_adds_conversation_history_index(tmp_path: Path) -> None:
+    """Gate I18: the Gate I15 database upgrades cleanly to the new head."""
+
+    url = database_url(tmp_path)
+    upgrade_to_revision(url, "0011_ai_provider_model_profile_routing")
+    path = url.removeprefix("sqlite+aiosqlite:///")
+    with sqlite3.connect(path) as connection:
+        indexes_before = {
+            row[1] for row in connection.execute("PRAGMA index_list(conversations)")
+        }
+    assert "ix_conversations_updated_at_id" not in indexes_before
+
+    upgrade_to_head(url)
+
+    with sqlite3.connect(path) as connection:
+        indexes_after = {
+            row[1] for row in connection.execute("PRAGMA index_list(conversations)")
+        }
+    assert "ix_conversations_updated_at_id" in indexes_after
 
 
 @pytest.mark.asyncio

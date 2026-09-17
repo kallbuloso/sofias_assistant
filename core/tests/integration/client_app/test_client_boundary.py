@@ -103,10 +103,14 @@ async def test_real_boundary_auth_sync_and_core_owned_conversation(
         service = ClientApplicationService(client)
         snapshot = await asyncio.to_thread(service.connect)
         assert snapshot.connection.value == "CONNECTED"
-        assert snapshot.conversation is not None
-        assert snapshot.conversation.id == conversation.conversation.id
+        # connect() alone must never create a Conversation just because the
+        # Desktop started (Contract v1 SS41 / Slice 10 SA-B040).
+        assert service.conversation_id is None
         assert snapshot.notifications == ()
         assert snapshot.tasks == ()
+
+        conversation_id = await asyncio.to_thread(service.start_new_conversation)
+        assert conversation_id == conversation.conversation.id
     finally:
         await asyncio.to_thread(client.close)
 

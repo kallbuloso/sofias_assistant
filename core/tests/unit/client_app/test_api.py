@@ -1,13 +1,17 @@
 """Transport adapter tests with a deterministic fake HTTP boundary."""
 
+import json
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 
 from sofias_assistant.client_app.api import (
     CoreApiClient,
     CoreApiError,
     CoreValidationError,
+    RealtimeVoiceConnection,
 )
 
 
@@ -40,6 +44,9 @@ class FakeHttp:
         self.session_id = uuid4()
         self.conversation_id = uuid4()
         self.shutdown_status_code = 202
+        self.last_stream_call: tuple[tuple[object, ...], dict[str, object]] | None = (
+            None
+        )
         self.runtime_identity: dict[str, object] = {
             "instance_key": "a" * 64,
             "runtime_session_id": str(uuid4()),
@@ -220,7 +227,8 @@ class FakeHttp:
             )
         raise AssertionError(path)
 
-    def stream(self, *_: object, **__: object) -> Stream:
+    def stream(self, *args: object, **kwargs: object) -> Stream:
+        self.last_stream_call = (args, kwargs)
         return Stream(Response(200, None), ['{"type":"text_delta","text":"hi"}'])
 
     def delete(self, path: str = "", **_: object) -> Response:
@@ -259,7 +267,17 @@ def test_client_authenticates_and_uses_single_transport_adapter() -> None:
     assert client.session_id == fake.session_id
     assert payload["core"]["state"] == "running"
     assert client.create_conversation() == fake.conversation_id
-    assert list(client.stream_text(fake.conversation_id, "hello"))[0]["text"] == "hi"
+    assert (
+        list(
+            client.stream_text(
+                fake.conversation_id,
+                "hello",
+                locality="local_only",
+                cloud_context_eligible=False,
+            )
+        )[0]["text"]
+        == "hi"
+    )
     assert client.acknowledge(uuid4()) is True
     assert "secret-token" not in repr(client)
 
@@ -275,6 +293,37 @@ def test_client_authenticates_and_uses_single_transport_adapter() -> None:
 def test_client_rejects_non_loopback_or_credential_bearing_urls(url: str) -> None:
     with pytest.raises(ValueError):
         CoreApiClient(url, "credential")
+
+
+def test_stream_text_forwards_the_callers_explicit_privacy_values() -> None:
+    fake = FakeHttp()
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+
+    list(
+        client.stream_text(
+            fake.conversation_id,
+            "hello",
+            locality="cloud_preferred",
+            cloud_context_eligible=True,
+        )
+    )
+
+    assert fake.last_stream_call is not None
+    _, kwargs = fake.last_stream_call
+    body = cast("dict[str, object]", kwargs["json"])
+    assert body["locality"] == "cloud_preferred"
+    assert body["cloud_context_eligible"] is True
+
+
+def test_realtime_connection_targets_the_realtime_websocket_route() -> None:
+    fake = FakeHttp()
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+
+    connection = client.realtime()
+
+    assert connection._url == "ws://127.0.0.1:8989/api/v1/realtime"  # noqa: SLF001
 
 
 def test_get_runtime_identity_returns_the_safe_payload() -> None:
@@ -406,3 +455,89 @@ def test_memory_integration_round_trip_never_echoes_credential_value() -> None:
 
     deleted = client.delete_memory_credential()
     assert deleted["configured"] is False
+
+
+class _FakeRealtimeSocket:
+    """A minimal `ClientConnection` stand-in: a scripted inbound frame queue."""
+
+    def __init__(self, frames: list[str | bytes]) -> None:
+        self._frames = list(frames)
+        self.sent: list[str] = []
+
+    def send(self, value: str) -> None:
+        self.sent.append(value)
+
+    def recv(self, timeout: float | None = None) -> str | bytes:
+        if not self._frames:
+            raise ConnectionClosed(None, None)
+        return self._frames.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def _realtime_connection(frames: list[str | bytes]) -> RealtimeVoiceConnection:
+    connection = RealtimeVoiceConnection(
+        "ws://127.0.0.1:8989/api/v1/realtime", "secret-token", uuid4()
+    )
+    connection._socket = cast("Any", _FakeRealtimeSocket(frames))  # noqa: SLF001
+    connection.session_id = uuid4()
+    return connection
+
+
+def test_start_matches_the_servers_dotted_interaction_started_type() -> None:
+    """Regression: the server sends `interaction.started` (Gate I18 found
+
+    `start()` checking the wrong, undotted `interaction_started`, which
+    hung every voice session waiting for a confirmation that could never
+    match).
+    """
+
+    interaction_id = uuid4()
+    connection = _realtime_connection(
+        [
+            json.dumps(
+                {
+                    "type": "interaction.started",
+                    "realtime_session_id": str(uuid4()),
+                    "realtime_interaction_id": str(interaction_id),
+                }
+            )
+        ]
+    )
+
+    started = connection.start()
+
+    assert started == interaction_id
+    assert connection.interaction_id == interaction_id
+
+
+def test_start_buffers_assistant_events_that_race_ahead_of_confirmation() -> None:
+    """Regression: a fast provider may emit assistant events before the
+
+    client's `start()` finishes waiting for `interaction.started` -- those
+    frames must be buffered and replayed by `pump_events()`, never dropped
+    or treated as a protocol error.
+    """
+
+    interaction_id = uuid4()
+    early_audio = b"\x01\x02"
+    early_transcript = json.dumps(
+        {"type": "assistant_transcript.partial", "text": "hel"}
+    )
+    confirmation = json.dumps(
+        {
+            "type": "interaction.started",
+            "realtime_session_id": str(uuid4()),
+            "realtime_interaction_id": str(interaction_id),
+        }
+    )
+    connection = _realtime_connection([early_audio, early_transcript, confirmation])
+
+    connection.start()
+    events = list(connection.pump_events())
+
+    assert events == [
+        {"type": "assistant_audio_chunk", "audio": early_audio},
+        {"type": "assistant_transcript.partial", "text": "hel"},
+    ]

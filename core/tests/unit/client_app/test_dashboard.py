@@ -142,6 +142,99 @@ def test_home_tab_shows_reconnecting_before_configuration_matters(
     assert home._headline.text() == "Core reconnecting"
 
 
+def test_home_tab_flags_realtime_unavailable_with_no_eligible_binding(
+    qapplication: QApplication,
+) -> None:
+    home = HomeTab()
+    home.update_connection("CONNECTED")
+    bundle = _bundle()
+    bundle["profiles"].append(  # type: ignore[attr-defined]
+        {
+            "key": "realtime",
+            "display_name": "realtime",
+            "required_capabilities": ["realtime", "audio_input", "audio_output"],
+            "preferred_capabilities": [],
+            "locality": "cloud_allowed",
+            "enabled": True,
+            "fallback_policy": "ordered_then_canonical",
+            "bindings": [],
+        }
+    )
+
+    home.update_ai_dashboard(bundle)
+
+    assert home._headline.text() == "Realtime unavailable"
+
+
+def test_home_tab_realtime_ready_with_an_eligible_binding(
+    qapplication: QApplication,
+) -> None:
+    home = HomeTab()
+    home.update_connection("CONNECTED")
+    bundle = _bundle()
+    bundle["profiles"].append(  # type: ignore[attr-defined]
+        {
+            "key": "realtime",
+            "display_name": "realtime",
+            "required_capabilities": ["realtime", "audio_input", "audio_output"],
+            "preferred_capabilities": [],
+            "locality": "cloud_allowed",
+            "enabled": True,
+            "fallback_policy": "ordered_then_canonical",
+            "bindings": [
+                {
+                    "provider_id": "openai",
+                    "model_id": "realtime-model",
+                    "priority": 1,
+                    "enabled": True,
+                    "source": "user",
+                }
+            ],
+        }
+    )
+
+    home.update_ai_dashboard(bundle)
+
+    assert home._headline.text() == "Sofia ready"
+
+
+def test_home_tab_flags_scheduler_degraded(qapplication: QApplication) -> None:
+    from sofias_assistant.client_app.models import HealthItem
+
+    home = HomeTab()
+    home.update_connection("CONNECTED")
+    home.update_ai_dashboard(_bundle())
+    home.update_health((HealthItem("Scheduler", "degraded", "tick failed"),))
+
+    assert home._headline.text() == "Scheduler degraded"
+
+
+def test_home_tab_shows_configure_ai_button_only_when_needed(
+    qapplication: QApplication,
+) -> None:
+    home = HomeTab()
+    home.update_connection("CONNECTED")
+    bundle = _bundle()
+    bundle["providers"][0]["credential"]["configured"] = False  # type: ignore[index]
+
+    home.update_ai_dashboard(bundle)
+    assert home._configure_ai.isHidden() is False
+
+    bundle["providers"][0]["credential"]["configured"] = True  # type: ignore[index]
+    home.update_ai_dashboard(bundle)
+    assert home._configure_ai.isHidden() is True
+
+
+def test_home_tab_configure_ai_button_emits_signal(qapplication: QApplication) -> None:
+    home = HomeTab()
+    received: list[None] = []
+    home.configure_ai_requested.connect(lambda: received.append(None))
+
+    home._configure_ai.click()
+
+    assert received == [None]
+
+
 # -- AIModelsTab ------------------------------------------------------------
 
 
