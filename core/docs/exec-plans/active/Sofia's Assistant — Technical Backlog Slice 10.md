@@ -2333,11 +2333,12 @@ Commits:
     a477db9 feat(dashboard): add Home, AI & Models and Memory/Integrations pages
     d4eeb99 test(ai): validate Gate I17 human configuration dashboard
     26a029f docs(plan): record Gate I17 closure ledger — awaiting remote verification
+    e19cadb docs(plan): close Gate I17 — remote verified
 
 Final HEAD (code-complete):
     d4eeb99
-    (26a029f and this ledger-closure commit carry only docs-only
-    follow-ups, same pattern as Gate I16's 2b7f79f/a8638fc)
+    (26a029f and e19cadb carry only docs-only follow-ups, same pattern as
+    Gate I16's 2b7f79f)
 
 CI:
     https://github.com/kallbuloso/sofias_assistant/actions/runs/35257766380
@@ -2359,6 +2360,16 @@ CI:
     4 skipped, 0 failed), Desktop package baseline + packaged smoke, Core
     package baseline + packaged smoke all green. This confirms attempt 1
     was transient CI-runner flakiness, not a regression.
+
+    A second CI run (35262187428), triggered by this ledger's own
+    docs-only closure commit, passed cleanly on its first attempt --
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/35262187428
+
+Closure HEAD:
+    e19cadba11abc21dd0730d9c2bc18c75163c720a
+
+origin/main:
+    e19cadba11abc21dd0730d9c2bc18c75163c720a (pushed; matches Closure HEAD)
 
 Findings fixed (in-scope, discovered during implementation):
     - AIConfigurationService was constructed in host/composition.py without
