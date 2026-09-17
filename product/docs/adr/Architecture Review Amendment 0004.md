@@ -1,7 +1,7 @@
 # Architecture Review Amendment 0004
 
 **Project:** Sofia's Assistant  
-**Status:** Proposed — Ready for Approval  
+**Status:** Accepted  
 **Decision date:** 2026-09-16  
 **Applies to:** ADR-0001, ADR-0002, ADR-0005, ADR-0006, ADR-0015, Architecture Review Amendments 0001/0003, TDR-0011, Technical Backlog Slice 10  
 **Origin:** Post-Slice-09 human desktop architecture review  

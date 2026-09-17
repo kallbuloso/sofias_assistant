@@ -3,7 +3,7 @@
 **Nome operacional:** Core Runtime Configuration & Intelligent AI Routing  
 **Escopo:** SA-B035 + SA-B036 + SA-B037  
 **Gates-alvo:** I14 — Core Runtime Ready; I15 — Intelligent AI Routing  
-**Status:** APPROVED  
+**Status:** COMPLETED  
 **Projeto:** Sofia's Assistant  
 **Baseline remoto auditado:** `aa273a9eed7643b89ba317da95387cd26d7ca77e`  
 **Release baseline:** `v0.1.0` — publicado  

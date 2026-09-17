@@ -3,7 +3,7 @@
 **Project:** Sofia's Assistant  
 **Contract:** Desktop/Core Interaction Contract  
 **Version:** 1  
-**Status:** Proposed — Ready for Approval  
+**Status:** APPROVED  
 **Date:** 2026-09-16  
 **Depends on:** ADR-0001 + ADR-0005 + Architecture Review Amendments 0001/0003/0004 + AI Runtime Configuration Contract v1 + TDR-0011  
 **Primary consumers:** `sofia-core` host, LocalClientBoundary, DesktopCoreSupervisor, CoreApiClient, ClientApplicationService, PySide6 Desktop, future packaging/runtime services  

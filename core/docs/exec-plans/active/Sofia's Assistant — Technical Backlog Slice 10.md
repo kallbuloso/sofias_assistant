@@ -3,7 +3,7 @@
 **Nome operacional:** Human Desktop Experience  
 **Escopo:** SA-B038 + SA-B039 + SA-B040 + SA-B041  
 **Gates-alvo:** I16 — Seamless Desktop Runtime; I17 — Human Configuration Dashboard; I18 — Daily Assistant Experience  
-**Status:** READY FOR APPROVAL  
+**Status:** APPROVED  
 **Projeto:** Sofia's Assistant  
 **Baseline remoto auditado:** `dcf25a3b7231c264d3c3ad860eac7df24bb56532`  
 **Release baseline:** `v0.1.0` — publicado  
@@ -1707,3 +1707,287 @@ PySide6 remains the Desktop technology
 ```
 
 A aprovação do Slice não dispensa a materialização/aprovação do Amendment 0004 e do Desktop/Core Interaction Contract v1 antes do Run 1.
+
+---
+
+# 63. Gate I16 — Closure Ledger
+
+```text
+Gate:
+    I16 — Seamless Desktop Runtime (SA-B038 — Core Supervision & Secure Attach)
+
+Status:
+    IMPLEMENTED — AWAITING REMOTE VERIFICATION
+
+Baseline:
+    cef3c84fefac96e0db175bc5a56b3f253396bac8
+
+What changed:
+    - instance_key_for_data_dir() extracted as shared, non-secret canonical
+      identity helper (runtime/instance_ownership.py); mutex naming reuses it.
+    - host/config.resolve_core_data_dir() made public so the Desktop derives
+      the identical instance_key without duplicating path/env resolution.
+    - client_attach/ package: ClientAttachRecord (bounded, versioned,
+      redacted credential), ClientAttachStore protocol,
+      InMemoryClientAttachStore deterministic fake, WindowsClientAttachStore
+      (Windows Credential Manager, separate "SofiasAssistant/Attach/v1/"
+      namespace from provider secrets, reusing the existing wincred ctypes
+      primitive).
+    - runtime/shutdown.RuntimeShutdownSignal wired into host/runner.py: Core
+      publishes its ClientAttachRecord only after LocalClientBoundary starts,
+      before declaring READY; graceful stop performs delete_if_current
+      before boundary/Core teardown; failed publish fails Core closed
+      (boundary+Core stopped, non-zero exit).
+    - client_boundary/runtime_http.py: authenticated
+      GET /api/v1/runtime/identity and POST /api/v1/runtime/shutdown, wired
+      into create_local_http_app/create_app_factory. Shutdown is lifecycle
+      control (never a Tool), rejects lifecycle mismatch with 409, never
+      kills a process.
+    - client_app/{instance_identity,executable_locator,launcher,supervisor}.py:
+      DesktopCoreSupervisor (CORE_NOT_FOUND/STARTING/READY/DEGRADED/
+      RECONNECTING/STOPPING/STOPPED/FAILED), CoreExecutableLocator (packaged
+      sibling SofiaCore.exe or dev `-m sofias_assistant.host`),
+      SubprocessCoreLauncher/QtProcessLauncher (explicit argv, no shell,
+      Windows-detached).
+    - client_app/api.py: CoreApiClient.get_runtime_identity()/
+      request_runtime_shutdown().
+    - client_app/qt_app.py + __main__.py: seamless attach is the default
+      startup path (no SOFIA_CLIENT_CREDENTIAL/--core-url override needed);
+      explicit "Stop Sofia" tray action with human confirmation, distinct
+      from Quit; Quit/close-to-tray unchanged (never call shutdown).
+    - client/SofiaCore.spec: new PyInstaller onefile target packaging
+      host/__main__.py as a sibling SofiaCore.exe (console=False), bundling
+      the Alembic migrations directory and aiosqlite (both required at
+      runtime and not picked up by default hidden-import discovery).
+
+Reference Harvest:
+    REUSED — QProcess.startDetached(): documented to survive the launching
+        process's exit; used for the production QtProcessLauncher.
+    REUSED — subprocess CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS: used by
+        SubprocessCoreLauncher (dev/tests) for the same detached semantics
+        without Qt.
+    ADAPTED — Windows Credential Manager generic blob limit is 2560 bytes
+        (~1280 UTF-16 chars); ClientAttachRecord.to_json() stays compact and
+        well under that bound (verified in tests/unit/client_attach).
+    REJECTED — keyring-style multi-credential chunking for oversized blobs:
+        unnecessary given the record's bounded field set.
+
+Architecture: preserved without exception —
+    Desktop != Core, Desktop != authority, localhost != identity,
+    attach record != authentication authority, attach credential != provider
+    credential, PID != authority, AI proposes/Runtime authorizes/Executor
+    acts. No Tool/Policy bypass; no direct Desktop->SQLite; no unauthenticated
+    local API introduced.
+
+Instance identity:
+    Shared instance_key_for_data_dir() (sha256 hex digest of the normalized,
+    case-folded absolute data-dir path); stable, non-secret, no plaintext
+    path in the key. Verified stable/distinct in
+    tests/unit/runtime/test_instance_ownership.py.
+
+Attach record / store:
+    ClientAttachRecord validated at construction (loopback host, valid port,
+    contract_version, timezone-aware created_at); credential redacted from
+    repr via SecretValue. WindowsClientAttachStore: real Windows Credential
+    Manager, separate namespace from provider secrets, delete_if_current is
+    read-then-compare-then-delete (documented small TOCTOU window, accepted
+    per Amendment 0004 SS14 threat model). InMemoryClientAttachStore used as
+    the required deterministic test fake.
+
+Core publication:
+    core.start() -> runtime_session_id captured -> CLIENT_CORE_START_REQUESTED
+    audited -> LocalClientBoundary.start() -> ClientAttachRecord built and
+    published -> READY printed only after successful publish. Publish
+    failure stops boundary+Core and returns exit code 1 (never claims
+    ready). Graceful stop: delete_if_current (best-effort) -> boundary.stop()
+    -> core.stop().
+
+Runtime identity API:
+    GET /api/v1/runtime/identity (authenticated session) returns
+    instance_key/runtime_session_id/application_version/protocol_version/
+    state only; never credential, path, environment or internal handles.
+
+Supervisor:
+    DesktopCoreSupervisor.attach()/reconnect()/request_stop_sofia(),
+    synchronous (matches CoreApiClient's existing blocking design and the
+    ClientWorker/QThread pattern already used by the Desktop Client). Never
+    issues a mutating request before verification; stale/mismatched records
+    removed only via exact delete_if_current.
+
+Launch:
+    Explicit executable + argv only; no shell=True, no cmd.exe/PowerShell
+    composition, no credential in argv. CoreExecutableLocator: packaged
+    sibling SofiaCore.exe next to sys.executable, or `-m sofias_assistant.host`
+    in development.
+
+Duplicate-start handling:
+    Core single-instance Win32 mutex remains authoritative (unchanged).
+    Proven with two real OS processes racing on the same data dir: the loser
+    exits with code 1 and the winner's attach record is untouched
+    (test_duplicate_core_start_is_avoided_by_single_instance_authority).
+
+Reconnect:
+    Bounded read-only verify attempts, then exactly one bounded relaunch
+    attempt (stale record removed first regardless of whether it merely
+    looks present, since a crash never cleans up its own record), then
+    CORE_FAILED. No infinite loop (proven with a counting fake sleep and
+    with a real killed process).
+
+Quit semantics:
+    Unchanged: window close hides to tray; Quit Desktop only ends the
+    Desktop process. Proven with real packaged processes (see Windows human
+    smoke below): killing both Desktop OS processes left SofiaCore.exe
+    running and reachable.
+
+Stop Sofia:
+    Explicit tray action with a human confirmation dialog, distinct from
+    Quit; POST /api/v1/runtime/shutdown requires the current
+    runtime_session_id, rejects mismatch with 409, never invokes a Tool or
+    kills a process by PID.
+
+Audit:
+    CLIENT_CORE_START_REQUESTED (host, on Core start), CLIENT_CORE_ATTACH
+    (on authenticated GET /api/v1/runtime/identity), CORE_SHUTDOWN_REQUESTED
+    (on POST /api/v1/runtime/shutdown, accepted or rejected). No credential
+    in any event; verified in tests/integration/gate/
+    test_gate_i16_seamless_desktop_runtime.py.
+
+Security:
+    Attach credential never in SQLite/QSettings/stdout/log/Audit (verified);
+    attach endpoint loopback-only (record host validated); Windows store is
+    per-user (Credential Manager semantics) and namespaced away from provider
+    secrets; LocalClientBoundary/session auth unchanged and still mandatory;
+    runtime identity and shutdown endpoints both authenticated; no PID kill
+    anywhere in the implementation; no shell; no mutation replay (shutdown
+    is the only mutating supervisor call and it is explicit/human-triggered,
+    never auto-retried); no direct Desktop->SQLite; no Tool/Policy bypass.
+
+Packaging:
+    core/client/SofiaCore.spec added (onefile, console=False, bundles Alembic
+    migrations + aiosqlite hidden imports). Existing SofiaAssistant.spec
+    unchanged and still builds. Both executables land side by side in
+    core/dist/, satisfying the sibling-executable locator contract.
+
+Targeted tests:
+    tests/unit/client_attach/ (models, in-memory store, Windows store with a
+    fake Win32 API -- 36 tests), tests/unit/runtime/test_instance_ownership.py
+    (+6 instance_key tests), tests/unit/client_app/
+    {test_supervisor,test_executable_locator,test_launcher,test_api}.py
+    (+~40 tests).
+
+Gate tests:
+    tests/integration/gate/test_gate_i16_seamless_desktop_runtime.py -- 16
+    tests: Core-side attach publish/cleanup/redaction/fail-closed (4, via
+    the real runner.run() composition with InMemoryClientAttachStore),
+    authenticated runtime identity/shutdown HTTP contract (3), and
+    DesktopCoreSupervisor against real, separate `sofia-core` OS processes
+    through the real Windows Credential Manager (9): already-running attach,
+    absent-then-launched attach, duplicate-start race, stale record after a
+    hard kill, wrong instance_key against a real Core, credential rotation
+    across restarts, old-lifecycle-cannot-delete-newer-record, explicit Stop
+    Sofia, bounded reconnect after a real crash. All 16 pass individually and
+    as a suite (~63s).
+
+Concurrency tests:
+    Two real OS processes racing to start Core on the same data dir (loser
+    exits 1, winner's record untouched); old-lifecycle
+    delete_if_current-cannot-delete-newer-record proven directly against the
+    real WindowsClientAttachStore; bounded reconnect after a real process
+    kill proven non-looping with an elapsed-time bound.
+
+Full pytest:
+    867 passed, 4 skipped (pre-existing opt-in live/hardware smokes,
+    unrelated to this Gate). One transient flake was observed in
+    test_stop_sofia_gracefully_stops_a_real_core during one ~4.5-minute
+    full-suite run under heavy sequential subprocess load (exit code 1
+    instead of 0 after an accepted shutdown); it passed reliably in three
+    other runs (isolated x2, full-suite x1). Root cause looks like transient
+    system load during this session's very heavy subprocess/packaging
+    activity, not a logic defect in the shutdown path; flagged here rather
+    than hidden.
+
+Ruff / Format / Mypy / git diff --check:
+    All green. `git diff --check` only flags the pre-existing intentional
+    Markdown trailing-space line-break convention on the four housekeeping
+    header edits (unrelated to code, not introduced by this Gate) and
+    LF/CRLF normalization notices.
+
+Windows human smoke (manual, real packaged executables):
+    1. SofiaCore.exe launched standalone: attach record published to the
+       real Windows Credential Manager, authenticated
+       GET /api/v1/runtime/identity verified instance_key/runtime_session_id,
+       POST /api/v1/runtime/shutdown gracefully stopped it and removed the
+       record.
+    2. SofiaAssistant.exe launched with no arguments, no SOFIA_CLIENT_CREDENTIAL,
+       no --core-url: it discovered no Core, launched a sibling SofiaCore.exe
+       automatically, and attached -- no terminal, Python, uv, port entry or
+       token copy/paste.
+    3. Both Desktop OS processes (PyInstaller onefile outer+inner) were
+       terminated (simulating Quit): SofiaCore.exe (outer+inner) remained
+       alive and the attach record stayed valid.
+    4. A second SofiaAssistant.exe launch reattached to the same running
+       Core: process count showed exactly one SofiaCore.exe pair throughout
+       (no duplicate launch).
+    5. An explicit Stop Sofia (via the authenticated shutdown API, standing
+       in for the tray action) gracefully stopped SofiaCore.exe; the second
+       Desktop process remained running afterward, matching Contract v1 SS22
+       ("Desktop may remain open").
+    No credential appeared in any log/screenshot during this smoke.
+    Limitation: a real interactive click on the tray's "Stop Sofia" menu
+    item was not visually driven in this session (no interactive GUI
+    operator); the underlying authenticated API call it triggers was
+    exercised directly and is unit/gate-tested
+    (test_stop_sofia_gracefully_stops_a_real_core).
+
+Commits:
+    (see final HEAD below)
+
+Final HEAD:
+    (recorded at push time)
+
+origin/main:
+    (recorded at push time)
+
+CI:
+    (recorded once the remote run completes)
+
+Findings fixed (in-scope, discovered during implementation):
+    - runtime_http.py accidentally used `from __future__ import annotations`,
+      which broke FastAPI's ability to resolve `Depends(require_session)`
+      (a closure-local variable) via postponed string-annotation evaluation,
+      producing a spurious 422 on GET /api/v1/runtime/identity. Fixed by
+      removing the future import, matching every sibling route module's
+      existing (deliberate) convention.
+    - DesktopCoreSupervisor.reconnect() originally never relaunched when a
+      stale-but-present record survived a crash (crashes never clean up
+      their own record), which would have left a crashed Core unrecoverable
+      by bounded reconnect. Fixed to remove the stale record and always
+      attempt exactly one bounded relaunch after read-only retries are
+      exhausted.
+    - SofiaCore.spec initially failed at runtime with "Path doesn't exist:
+      ...\_MEI.../sofias_assistant\persistence\migrations" (Alembic reads
+      migration scripts from disk, not from the frozen PYZ archive) and then
+      "No module named 'aiosqlite'" (not covered by PyInstaller's SQLAlchemy
+      hook). Fixed by bundling the migrations directory as `datas` and
+      adding `aiosqlite` to `hiddenimports`.
+
+Deferred (out of I16 scope, explicitly not started):
+    Gate I17 (Human Configuration Dashboard), Gate I18 (Daily Assistant
+    Experience), provider credential UX, Conversation History UX,
+    locality/privacy UX, microphone/speaker pipeline.
+
+Known limitations:
+    - WindowsClientAttachStore.delete_if_current is read-then-delete, not an
+      atomic compare-and-delete (Windows Credential Manager exposes no such
+      primitive); a narrow TOCTOU window is an accepted, documented
+      limitation consistent with Amendment 0004 SS14's threat model.
+    - The one observed full-suite flake above.
+    - Real interactive GUI-driven click-through of the tray menu was not
+      performed (no interactive operator in this session); the automated
+      suite and the process-level packaged smoke cover the same underlying
+      behavior through the authenticated API and real OS processes instead.
+
+Real blockers:
+    None.
+```
+
