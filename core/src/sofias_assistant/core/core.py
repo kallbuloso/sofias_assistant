@@ -9,6 +9,7 @@ from sofias_assistant.ai_config.service import AIConfigurationService
 from sofias_assistant.capabilities.registration import register_builtin_capabilities
 from sofias_assistant.config.models import RuntimeConfig, SofiasMemoryConfig
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
+from sofias_assistant.conversation.history import ConversationHistoryService
 from sofias_assistant.conversation.realtime_runtime import RealtimeConversationRuntime
 from sofias_assistant.conversation.runtime import TextConversationRuntime
 from sofias_assistant.core.composition import (
@@ -105,6 +106,7 @@ class SofiaCore:
         self._clock = clock
         self._proactivity: ProactivityRuntime | None = None
         self._ai_configuration_service: AIConfigurationService | None = None
+        self._conversation_history_service: ConversationHistoryService | None = None
 
     @property
     def state(self) -> CoreState:
@@ -234,6 +236,16 @@ class SofiaCore:
                 "AI Configuration Service is only available while SofiaCore is running"
             )
         return self._ai_configuration_service
+
+    @property
+    def conversation_history_service(self) -> ConversationHistoryService | None:
+        """Return the bounded Conversation History read service (Gate I18)."""
+
+        if self._state is not CoreState.RUNNING:
+            raise RuntimeError(
+                "Conversation History Service is only available while SofiaCore is running"
+            )
+        return self._conversation_history_service
 
     @property
     def realtime_conversation_runtime(self) -> RealtimeConversationRuntime:
@@ -420,6 +432,7 @@ class SofiaCore:
         self._realtime_conversation_runtime = None
         self._conversation_activity_coordinator = None
         self._ai_configuration_service = None
+        self._conversation_history_service = None
         self._memory_orchestrator = None
         self._resources = None
         self._session_lifecycle = None
@@ -508,6 +521,9 @@ class SofiaCore:
         if self._ai_configuration_service is not None and audit is not None:
             self._ai_configuration_service.attach_audit(audit)
 
+        self._conversation_history_service = ConversationHistoryService(
+            uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory)
+        )
         self._conversation_activity_coordinator = ConversationActivityCoordinator()
         self._conversation_runtime = TextConversationRuntime(
             uow_factory=lambda: SqlAlchemyUnitOfWork(resources.session_factory),

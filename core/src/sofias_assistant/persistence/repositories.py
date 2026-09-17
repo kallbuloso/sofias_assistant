@@ -1,10 +1,11 @@
 """Domain-oriented repositories for the Operational Store."""
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sofias_assistant.ai.contracts import (
@@ -96,6 +97,34 @@ class ConversationRepository:
         record.created_at = conversation.created_at
         record.updated_at = conversation.updated_at
 
+    async def list_page(
+        self, *, limit: int, before: tuple[datetime, UUID] | None
+    ) -> tuple[list[Conversation], bool]:
+        """Return one keyset-paginated page ordered by (updated_at, id) desc.
+
+        Fetches `limit + 1` rows to determine `has_more` without a second
+        COUNT query; only the first `limit` rows are returned.
+        """
+
+        query = select(ConversationRecord).order_by(
+            ConversationRecord.updated_at.desc(), ConversationRecord.id.desc()
+        )
+        if before is not None:
+            before_updated_at, before_id = before
+            query = query.where(
+                or_(
+                    ConversationRecord.updated_at < before_updated_at,
+                    and_(
+                        ConversationRecord.updated_at == before_updated_at,
+                        ConversationRecord.id < before_id,
+                    ),
+                )
+            )
+        records = list(await self._session.scalars(query.limit(limit + 1)))
+        has_more = len(records) > limit
+        page = records[:limit]
+        return [_conversation_from_record(record) for record in page], has_more
+
 
 class TurnRepository:
     """Explicit persistence mapping for ordered Core-owned Turn snapshots."""
@@ -132,6 +161,108 @@ class TurnRepository:
         if record is None:
             raise RepositoryEntityNotFoundError("Turn does not exist")
         _copy_turn_to_record(turn, record)
+
+    async def list_recent(
+        self, conversation_id: UUID, *, limit: int
+    ) -> tuple[list[Turn], bool]:
+        """Return the most recent `limit` Turns in chronological order.
+
+        Fetches `limit + 1` (by sequence desc) to determine `has_older`
+        without a second COUNT query, then reverses to chronological order.
+        """
+
+        records = list(
+            await self._session.scalars(
+                select(TurnRecord)
+                .where(TurnRecord.conversation_id == conversation_id)
+                .order_by(TurnRecord.sequence.desc())
+                .limit(limit + 1)
+            )
+        )
+        has_older = len(records) > limit
+        page = list(reversed(records[:limit]))
+        return [_turn_from_record(record) for record in page], has_older
+
+    async def list_before(
+        self, conversation_id: UUID, *, before_sequence: int, limit: int
+    ) -> tuple[list[Turn], bool]:
+        """Return an older bounded page strictly before `before_sequence`."""
+
+        records = list(
+            await self._session.scalars(
+                select(TurnRecord)
+                .where(
+                    TurnRecord.conversation_id == conversation_id,
+                    TurnRecord.sequence < before_sequence,
+                )
+                .order_by(TurnRecord.sequence.desc())
+                .limit(limit + 1)
+            )
+        )
+        has_older = len(records) > limit
+        page = list(reversed(records[:limit]))
+        return [_turn_from_record(record) for record in page], has_older
+
+    async def first_turns_for(
+        self, conversation_ids: Sequence[UUID]
+    ) -> dict[UUID, Turn]:
+        """Return the first non-blank-user-text Turn per conversation id.
+
+        Bounded to the given id set in one query (never per-conversation),
+        avoiding N+1 when building list previews for a page of Conversations.
+        """
+
+        if not conversation_ids:
+            return {}
+        first_sequence = (
+            select(
+                TurnRecord.conversation_id,
+                func.min(TurnRecord.sequence).label("first_sequence"),
+            )
+            .where(
+                TurnRecord.conversation_id.in_(conversation_ids),
+                TurnRecord.user_text != "",
+            )
+            .group_by(TurnRecord.conversation_id)
+            .subquery()
+        )
+        records = await self._session.scalars(
+            select(TurnRecord).join(
+                first_sequence,
+                and_(
+                    TurnRecord.conversation_id == first_sequence.c.conversation_id,
+                    TurnRecord.sequence == first_sequence.c.first_sequence,
+                ),
+            )
+        )
+        return {record.conversation_id: _turn_from_record(record) for record in records}
+
+    async def latest_turns_for(
+        self, conversation_ids: Sequence[UUID]
+    ) -> dict[UUID, Turn]:
+        """Return the latest Turn per conversation id, bounded to one query."""
+
+        if not conversation_ids:
+            return {}
+        latest_sequence = (
+            select(
+                TurnRecord.conversation_id,
+                func.max(TurnRecord.sequence).label("latest_sequence"),
+            )
+            .where(TurnRecord.conversation_id.in_(conversation_ids))
+            .group_by(TurnRecord.conversation_id)
+            .subquery()
+        )
+        records = await self._session.scalars(
+            select(TurnRecord).join(
+                latest_sequence,
+                and_(
+                    TurnRecord.conversation_id == latest_sequence.c.conversation_id,
+                    TurnRecord.sequence == latest_sequence.c.latest_sequence,
+                ),
+            )
+        )
+        return {record.conversation_id: _turn_from_record(record) for record in records}
 
 
 def _conversation_to_record(conversation: Conversation) -> ConversationRecord:

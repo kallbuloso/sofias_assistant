@@ -13,6 +13,9 @@ from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
 from sofias_assistant.ai_config.service import AIConfigurationService
 from sofias_assistant.client_boundary.ai_http import register_ai_configuration_routes
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
+from sofias_assistant.client_boundary.conversation_history_http import (
+    register_conversation_history_routes,
+)
 from sofias_assistant.client_boundary.integrations_http import (
     register_integration_routes,
 )
@@ -40,6 +43,7 @@ from sofias_assistant.conversation.events import (
     ConversationTurnStarted,
     ConversationUsageUpdated,
 )
+from sofias_assistant.conversation.history import ConversationHistoryService
 from sofias_assistant.conversation.models import Conversation, Turn
 from sofias_assistant.conversation.runtime import (
     ConversationNotFoundError,
@@ -522,6 +526,7 @@ def create_local_http_app(
     *,
     core: CoreReadApi | None = None,
     conversation: ConversationHttpApi | None = None,
+    conversation_history: ConversationHistoryService | None = None,
     realtime: RealtimeConversationApi | None = None,
     execution: ExecutionRuntime | None = None,
     tasks: TaskRuntime | None = None,
@@ -698,6 +703,9 @@ def create_local_http_app(
                 ),
                 media_type="application/x-ndjson",
             )
+
+    if conversation_history is not None:
+        register_conversation_history_routes(app, require_session, conversation_history)
 
     if execution is not None:
 

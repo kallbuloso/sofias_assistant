@@ -233,6 +233,21 @@ class RealtimeConversationRuntime:
                         session.id, session.conversation_id, session.model
                     ),
                 )
+                if self._audit is not None:
+                    await self._audit.record(
+                        event_type="PRIVACY_POLICY_APPLIED",
+                        actor="Sofia/root",
+                        subject=str(command.conversation_id),
+                        action="realtime.session.privacy_applied",
+                        resource=f"conversation/{command.conversation_id}/realtime/{session.id}",
+                        outcome="SUCCEEDED",
+                        origin="CONVERSATION",
+                        correlation_id=session.id,
+                        metadata={
+                            "locality": command.locality.value,
+                            "cloud_context_eligible": command.cloud_context_eligible,
+                        },
+                    )
                 return session
             except ProviderInvocationError as error:
                 raise InvalidRealtimeStateError(

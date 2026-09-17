@@ -159,6 +159,7 @@ class ConversationRecord(Base):
     """ORM record for a Core-owned durable Conversation."""
 
     __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_updated_at_id", "updated_at", "id"),)
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

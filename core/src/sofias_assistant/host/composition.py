@@ -237,6 +237,7 @@ def create_app_factory(
             proactivity=core.proactivity,
             memory=core.memory_orchestrator,
             ai_configuration=core.ai_configuration_service,
+            conversation_history=core.conversation_history_service,
             secret_service=core.secret_service,
             memory_config=core.memory_config,
             instance_key=instance_key,

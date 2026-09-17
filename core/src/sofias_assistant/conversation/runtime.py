@@ -246,6 +246,21 @@ class TextConversationRuntime:
         self, command: SendTextCommand
     ) -> AsyncGenerator[ConversationStreamEvent]:
         conversation, processing_turn = await self._persist_processing_turn(command)
+        if self._audit is not None:
+            await self._audit.record(
+                event_type="PRIVACY_POLICY_APPLIED",
+                actor="Sofia/root",
+                subject=str(conversation.id),
+                action="conversation.turn.privacy_applied",
+                resource=f"conversation/{conversation.id}/turn/{processing_turn.id}",
+                outcome="SUCCEEDED",
+                origin="CONVERSATION",
+                correlation_id=processing_turn.id,
+                metadata={
+                    "locality": command.locality.value,
+                    "cloud_context_eligible": command.cloud_context_eligible,
+                },
+            )
         partial_text: list[str] = []
         request: AIRequest | None = None
         model: ModelIdentity | None = None
