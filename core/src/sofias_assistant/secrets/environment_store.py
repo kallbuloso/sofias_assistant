@@ -10,7 +10,7 @@ and nothing here ever scans the environment for arbitrary variable names.
 from collections.abc import Mapping
 
 from sofias_assistant.secrets.models import SecretRef, SecretValue
-from sofias_assistant.secrets.store import SecretStore
+from sofias_assistant.secrets.store import SecretSource, SecretStore
 
 
 class EnvironmentSecretStore:
@@ -73,3 +73,17 @@ class LayeredSecretStore:
 
     def delete(self, ref: SecretRef) -> bool:
         return self._fallback.delete(ref)
+
+    def describe(self, ref: SecretRef) -> SecretSource:
+        """Safe, value-free provenance: environment|platform_store|missing.
+
+        Per Desktop/Core Interaction Contract v1 SS26, an implementation that
+        has already merged process environment and explicit env-file into
+        one primary layer MAY report that merged layer as `environment`.
+        """
+
+        if self._primary.get(ref) is not None:
+            return "environment"
+        if self._fallback.get(ref) is not None:
+            return "platform_store"
+        return "missing"

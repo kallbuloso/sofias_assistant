@@ -7,7 +7,7 @@ from uuid import UUID
 
 from sofias_assistant.ai_config.service import AIConfigurationService
 from sofias_assistant.capabilities.registration import register_builtin_capabilities
-from sofias_assistant.config.models import RuntimeConfig
+from sofias_assistant.config.models import RuntimeConfig, SofiasMemoryConfig
 from sofias_assistant.conversation.coordination import ConversationActivityCoordinator
 from sofias_assistant.conversation.realtime_runtime import RealtimeConversationRuntime
 from sofias_assistant.conversation.runtime import TextConversationRuntime
@@ -204,6 +204,16 @@ class SofiaCore:
         if self._conversation_runtime is None:
             raise RuntimeError("Conversation Runtime is not configured")
         return self._conversation_runtime
+
+    @property
+    def memory_config(self) -> SofiasMemoryConfig:
+        """Return the non-secret Sofias Memory bootstrap configuration.
+
+        Safe for Dashboard display: never includes the API key, which is
+        resolved separately through `SecretService`.
+        """
+
+        return self._config.memory
 
     @property
     def memory_orchestrator(self) -> MemoryOrchestrator | None:
@@ -495,6 +505,8 @@ class SofiaCore:
             )
         self._ai_configuration_service = dependencies.ai_configuration_service
         audit = execution_runtime.audit if execution_runtime is not None else None
+        if self._ai_configuration_service is not None and audit is not None:
+            self._ai_configuration_service.attach_audit(audit)
 
         self._conversation_activity_coordinator = ConversationActivityCoordinator()
         self._conversation_runtime = TextConversationRuntime(

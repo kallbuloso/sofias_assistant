@@ -13,6 +13,9 @@ from sofias_assistant.ai.contracts import DataLocality, ModelIdentity
 from sofias_assistant.ai_config.service import AIConfigurationService
 from sofias_assistant.client_boundary.ai_http import register_ai_configuration_routes
 from sofias_assistant.client_boundary.auth import LocalClientAuthenticator
+from sofias_assistant.client_boundary.integrations_http import (
+    register_integration_routes,
+)
 from sofias_assistant.client_boundary.memory_http import register_memory_routes
 from sofias_assistant.client_boundary.proactivity_http import (
     register_proactivity_routes,
@@ -26,6 +29,7 @@ from sofias_assistant.client_boundary.sessions import (
     ClientSession,
     ClientSessionRegistry,
 )
+from sofias_assistant.config.models import SofiasMemoryConfig
 from sofias_assistant.conversation.events import (
     ConversationStreamEvent,
     ConversationTextDelta,
@@ -55,6 +59,7 @@ from sofias_assistant.memory.orchestrator import MemoryOrchestrator
 from sofias_assistant.proactivity.runtime import ProactivityRuntime
 from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 from sofias_assistant.secrets.models import SecretValue
+from sofias_assistant.secrets.service import SecretService
 
 _AUTHENTICATION_FAILURE_DETAIL = "Local client authentication failed"
 
@@ -523,6 +528,8 @@ def create_local_http_app(
     proactivity: ProactivityRuntime | None = None,
     memory: MemoryOrchestrator | None = None,
     ai_configuration: AIConfigurationService | None = None,
+    secret_service: SecretService | None = None,
+    memory_config: SofiasMemoryConfig | None = None,
     instance_key: str | None = None,
     application_version: str | None = None,
     shutdown_signal: RuntimeShutdownSignal | None = None,
@@ -573,6 +580,16 @@ def create_local_http_app(
 
     if ai_configuration is not None:
         register_ai_configuration_routes(app, require_session, ai_configuration)
+
+    if secret_service is not None and memory_config is not None:
+        register_integration_routes(
+            app,
+            require_session,
+            secret_service=secret_service,
+            memory_config=memory_config,
+            memory_health=lambda: core.health.components if core is not None else (),
+            audit=execution.audit if execution is not None else None,
+        )
 
     if (
         core is not None

@@ -56,3 +56,20 @@ def describe_secret_source(
     if secret_service.get(ref) is not None:
         return "platform_store"
     return "missing"
+
+
+def credential_write_status(
+    ref: SecretRef, secret_service: SecretService
+) -> tuple[str, bool, bool]:
+    """Return (effective_source, configured, shadowed) for a write/delete response.
+
+    Desktop/Core Interaction Contract v1 SS26-SS27: writes always target the
+    writable platform store; a higher-priority environment-backed secret may
+    still shadow it. `shadowed` is true exactly when the environment layer,
+    not the platform store we just wrote/deleted, is the effective source.
+    """
+
+    source = secret_service.describe(ref)
+    configured = source != "missing"
+    shadowed = source == "environment"
+    return source, configured, shadowed

@@ -50,8 +50,13 @@ from sofias_assistant.ai_config.models import (
     ProfileModelBinding,
     ProviderConfiguration,
 )
+from sofias_assistant.config.models import require_safe_http_url
+from sofias_assistant.host.secret_bridge import (
+    credential_write_status,
+    provider_api_key_ref,
+)
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
-from sofias_assistant.secrets.models import SecretRef
+from sofias_assistant.secrets.models import SecretRef, SecretValue
 from sofias_assistant.secrets.service import SecretService
 
 if TYPE_CHECKING:
@@ -99,6 +104,10 @@ class ProfileNotFoundError(AIConfigurationError):
     """Raised when an operation references an unknown InferenceProfile key."""
 
 
+class ProviderNotFoundError(AIConfigurationError):
+    """Raised when an operation references an unknown ProviderConfiguration id."""
+
+
 class SnapshotPublicationError(RuntimeError):
     """Raised when a rebuilt snapshot cannot be published; previous snapshot stands."""
 
@@ -126,6 +135,33 @@ class ProfileBindingInput:
     model_id: str
     priority: int
     enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPatch:
+    """Sparse non-secret update for `PATCH /api/v1/ai/providers/{id}` (Slice 10 SS23).
+
+    Only the fields Contract v1 SS16 marks safe to mutate from a human
+    dashboard: display metadata, non-secret base URL and enabled state.
+    `adapter_type`, `execution_location` and `credential_ref` are never
+    mutated through this patch.
+    """
+
+    display_name: str | None = None
+    base_url: str | None = None
+    enabled: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCredentialStatus:
+    """Safe write/delete outcome for a provider credential (Contract v1 SS26)."""
+
+    provider_id: str
+    credential_ref: str
+    configured: bool
+    effective_source: str
+    writable_source: str
+    shadowed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +262,22 @@ class AIConfigurationService:
         )
 
     # -- lifecycle -----------------------------------------------------
+
+    def attach_audit(self, audit: AuditService) -> None:
+        """Bind the Core-composed `AuditService` after construction.
+
+        `build_conversation_dependencies_factory` (host composition) builds
+        this service before `ExecutionRuntime`/`AuditService` are threaded
+        through the shared `ConversationDependenciesFactory` signature, so
+        `SofiaCore._compose_conversation_runtime` calls this once the real
+        `AuditService` is available. Safe to call more than once; every safe
+        Audit event this service emits (`AI_PROVIDER_CONFIG_CHANGED`,
+        `AI_MODEL_CATALOG_REFRESHED`, `AI_PROFILE_CHANGED`,
+        `PROVIDER_CREDENTIAL_UPDATED`, `PROVIDER_CREDENTIAL_DELETED`) is a
+        no-op until this is called.
+        """
+
+        self._audit = audit
 
     async def bootstrap(self, canonical: CanonicalBootstrap) -> None:
         """Idempotently seed canonical provider/model/profiles, then publish."""
@@ -470,6 +522,158 @@ class AIConfigurationService:
             metadata={"provider_id": provider_id, "discovered_count": len(discovered)},
         )
         return refreshed
+
+    async def update_provider(
+        self, provider_id: str, patch: ProviderPatch
+    ) -> ProviderConfiguration:
+        """Validate, persist and republish a non-secret provider config change.
+
+        `enabled`/`base_url` affect routing eligibility and adapter
+        construction, so this always rebuilds and atomically republishes the
+        `RoutingSnapshot` (Amendment 0003 SS13/SS17), exactly like
+        `update_profile`.
+        """
+
+        async with self._lock:
+            async with self._uow_factory() as uow:
+                current = await uow.provider_configurations.get_by_id(provider_id)
+                if current is None:
+                    raise ProviderNotFoundError(f"Unknown provider: {provider_id}")
+                if patch.base_url is not None:
+                    try:
+                        require_safe_http_url(patch.base_url, field_name="base_url")
+                    except ValueError as error:
+                        raise AIConfigurationError(str(error)) from error
+                now = self._clock()
+                updated = ProviderConfiguration(
+                    id=current.id,
+                    display_name=(
+                        patch.display_name
+                        if patch.display_name is not None
+                        else current.display_name
+                    ),
+                    adapter_type=current.adapter_type,
+                    base_url=(
+                        patch.base_url
+                        if patch.base_url is not None
+                        else current.base_url
+                    ),
+                    enabled=(
+                        patch.enabled if patch.enabled is not None else current.enabled
+                    ),
+                    execution_location=current.execution_location,
+                    credential_ref=current.credential_ref,
+                    created_at=current.created_at,
+                    updated_at=now,
+                )
+                await uow.provider_configurations.save(updated)
+                await uow.commit()
+            try:
+                await self._rebuild_and_publish()
+            except Exception as error:
+                raise SnapshotPublicationError(
+                    "Routing snapshot rebuild failed after provider update"
+                ) from error
+        await self._emit(
+            event_type="AI_PROVIDER_CONFIG_CHANGED",
+            actor="dashboard",
+            subject=provider_id,
+            action="ai.provider.update",
+            resource=f"provider/{provider_id}",
+            outcome="SUCCEEDED",
+            origin="AI_CONFIGURATION_API",
+            correlation_id=_fresh_uuid(),
+            metadata={
+                "provider_id": provider_id,
+                "enabled": updated.enabled,
+            },
+        )
+        return updated
+
+    async def set_provider_credential(
+        self, provider_id: str, value: SecretValue
+    ) -> ProviderCredentialStatus:
+        """Write a provider credential through `SecretService` (Contract v1 SS25-28).
+
+        The `SecretRef` is always derived server-side from the known
+        `provider_id`; the caller never supplies or chooses one. Never
+        rebuilds the routing snapshot: adapters resolve the secret value
+        through `SecretService` at call time, not at snapshot-build time.
+        """
+
+        async with self._uow_factory() as uow:
+            provider = await uow.provider_configurations.get_by_id(provider_id)
+        if provider is None:
+            raise ProviderNotFoundError(f"Unknown provider: {provider_id}")
+        ref = provider_api_key_ref(provider_id)
+        self._secret_service.set(ref, value)
+        status = self._credential_status(provider_id, ref)
+        await self._emit(
+            event_type="PROVIDER_CREDENTIAL_UPDATED",
+            actor="dashboard",
+            subject=provider_id,
+            action="ai.provider.credential.update",
+            resource=f"provider/{provider_id}",
+            outcome="SUCCEEDED",
+            origin="AI_CONFIGURATION_API",
+            correlation_id=_fresh_uuid(),
+            metadata={
+                "provider_id": provider_id,
+                "credential_ref": ref.identifier,
+                "configured": status.configured,
+                "effective_source": status.effective_source,
+            },
+        )
+        return status
+
+    async def delete_provider_credential(
+        self, provider_id: str
+    ) -> ProviderCredentialStatus:
+        """Delete a durable platform-store provider credential (Contract v1 SS25-28).
+
+        Deleting the writable platform-store copy never removes a
+        higher-priority environment-backed secret (Amendment 0004 SS22).
+        """
+
+        async with self._uow_factory() as uow:
+            provider = await uow.provider_configurations.get_by_id(provider_id)
+        if provider is None:
+            raise ProviderNotFoundError(f"Unknown provider: {provider_id}")
+        ref = provider_api_key_ref(provider_id)
+        self._secret_service.delete(ref)
+        status = self._credential_status(provider_id, ref)
+        await self._emit(
+            event_type="PROVIDER_CREDENTIAL_DELETED",
+            actor="dashboard",
+            subject=provider_id,
+            action="ai.provider.credential.delete",
+            resource=f"provider/{provider_id}",
+            outcome="SUCCEEDED",
+            origin="AI_CONFIGURATION_API",
+            correlation_id=_fresh_uuid(),
+            metadata={
+                "provider_id": provider_id,
+                "credential_ref": ref.identifier,
+                "configured": status.configured,
+                "effective_source": status.effective_source,
+            },
+        )
+        return status
+
+    def _credential_status(
+        self, provider_id: str, ref: SecretRef
+    ) -> ProviderCredentialStatus:
+        source, configured, shadowed = credential_write_status(
+            ref, self._secret_service
+        )
+        return ProviderCredentialStatus(
+            provider_id=provider_id,
+            credential_ref=ref.identifier,
+            configured=configured,
+            effective_source=source,
+            writable_source="platform_store",
+            shadowed=shadowed,
+        )
 
     async def update_profile(self, key: str, patch: ProfilePatch) -> InferenceProfile:
         """Validate, persist, rebuild and atomically publish a profile change."""

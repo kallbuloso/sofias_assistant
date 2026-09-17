@@ -23,9 +23,13 @@ from sofias_assistant.ai_config.service import (
     ProfileBindingInput,
     ProfileNotFoundError,
     ProfilePatch,
+    ProviderCredentialStatus,
+    ProviderNotFoundError,
+    ProviderPatch,
     SnapshotPublicationError,
 )
 from sofias_assistant.client_boundary.sessions import ClientSession
+from sofias_assistant.secrets.models import SecretValue
 
 
 class CredentialRepresentation(BaseModel):
@@ -59,6 +63,38 @@ class ModelResponse(BaseModel):
     discovery_source: str
     capabilities: list[CapabilityClaimResponse]
     last_seen_at: datetime | None
+
+
+class ProviderPatchRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: str | None = None
+    base_url: str | None = None
+    enabled: bool | None = None
+
+
+class ProviderCredentialRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str = Field(min_length=1)
+
+
+class ProviderCredentialResponse(BaseModel):
+    credential_ref: str
+    configured: bool
+    effective_source: str
+    writable_source: str
+    shadowed: bool
+
+    @classmethod
+    def from_status(
+        cls, status: ProviderCredentialStatus
+    ) -> "ProviderCredentialResponse":
+        return cls(
+            credential_ref=status.credential_ref,
+            configured=status.configured,
+            effective_source=status.effective_source,
+            writable_source=status.writable_source,
+            shadowed=status.shadowed,
+        )
 
 
 class ModelRefreshRequestBody(BaseModel):
@@ -215,6 +251,55 @@ def register_ai_configuration_routes(
     ) -> list[ModelResponse]:
         models = await service.list_models()
         return [_model_response(entry) for entry in models]
+
+    @app.patch("/api/v1/ai/providers/{provider_id}")
+    async def patch_provider(
+        provider_id: str,
+        body: ProviderPatchRequestBody,
+        _: Annotated[ClientSession, Depends(require_session)],
+    ) -> ProviderResponse:
+        patch = ProviderPatch(
+            display_name=body.display_name,
+            base_url=body.base_url,
+            enabled=body.enabled,
+        )
+        try:
+            await service.update_provider(provider_id, patch)
+        except ProviderNotFoundError:
+            raise HTTPException(404, "Provider not found") from None
+        except (AIConfigurationError, SnapshotPublicationError) as error:
+            raise HTTPException(422, str(error)) from None
+        providers = await service.list_providers()
+        updated = next(
+            (provider for provider in providers if provider.id == provider_id), None
+        )
+        assert updated is not None
+        return _provider_response(updated, service)
+
+    @app.put("/api/v1/ai/providers/{provider_id}/credential")
+    async def set_provider_credential(
+        provider_id: str,
+        body: ProviderCredentialRequestBody,
+        _: Annotated[ClientSession, Depends(require_session)],
+    ) -> ProviderCredentialResponse:
+        try:
+            status = await service.set_provider_credential(
+                provider_id, SecretValue(body.value)
+            )
+        except ProviderNotFoundError:
+            raise HTTPException(404, "Provider not found") from None
+        return ProviderCredentialResponse.from_status(status)
+
+    @app.delete("/api/v1/ai/providers/{provider_id}/credential")
+    async def delete_provider_credential(
+        provider_id: str,
+        _: Annotated[ClientSession, Depends(require_session)],
+    ) -> ProviderCredentialResponse:
+        try:
+            status = await service.delete_provider_credential(provider_id)
+        except ProviderNotFoundError:
+            raise HTTPException(404, "Provider not found") from None
+        return ProviderCredentialResponse.from_status(status)
 
     @app.post("/api/v1/ai/models/refresh")
     async def refresh_models(
