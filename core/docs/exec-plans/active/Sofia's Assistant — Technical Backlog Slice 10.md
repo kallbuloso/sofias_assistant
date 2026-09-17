@@ -2012,3 +2012,367 @@ Real blockers:
     None.
 ```
 
+---
+
+# 64. Gate I17 — Closure Ledger
+
+```text
+Gate:
+    I17 — Human Configuration Dashboard (SA-B039 — Human Configuration Dashboard)
+
+Status:
+    IMPLEMENTED — AWAITING REMOTE VERIFICATION
+
+Baseline:
+    a8638fc1354e9bfca952d412e0ed916c0b4b1dd2
+
+What changed:
+    - secrets/store.py: SecretSourceAwareStore (runtime-checkable Protocol,
+      describe() -> environment|platform_store|missing).
+      secrets/environment_store.py: LayeredSecretStore.describe() reports
+      the merged-environment layer as "environment" per Contract v1 SS26
+      (environment + explicit env-file are already merged into one primary
+      layer, so no separate env_file distinction is fabricated).
+      secrets/service.py: SecretService.describe() delegates when the
+      injected store is source-aware, else falls back to a two-state
+      platform_store/missing diagnostic (covers InMemorySecretStore/CLI
+      fakes that only ever implement plain get/set/delete).
+    - host/secret_bridge.py: credential_write_status(ref, secret_service) ->
+      (effective_source, configured, shadowed) -- the one shared helper used
+      by both the provider and Sofias Memory credential endpoints so their
+      shadowing semantics can never drift apart.
+    - ai_config/service.py: ProviderNotFoundError; ProviderPatch (display_name
+      /base_url/enabled) + update_provider() (validates base_url via the
+      existing require_safe_http_url, republishes the routing snapshot since
+      enabled/base_url affect eligibility); ProviderCredentialStatus +
+      set_provider_credential()/delete_provider_credential() (SecretRef
+      always re-derived server-side via provider_api_key_ref(), never
+      accepted from the caller; never rebuilds the snapshot, since adapters
+      resolve secrets from SecretService at call time). New
+      attach_audit(audit) lets SofiaCore bind the real AuditService after
+      construction (see Finding below).
+    - client_boundary/ai_http.py: PATCH /api/v1/ai/providers/{id}; PUT/DELETE
+      /api/v1/ai/providers/{id}/credential. 404 for an unknown provider_id,
+      422 for a deterministically invalid patch; response never contains a
+      secret value.
+    - client_boundary/integrations_http.py (new): GET
+      /api/v1/integrations/sofias-memory (enabled, non-secret base_url,
+      credential status, live Memory component health from
+      core.health.components); PUT/DELETE
+      /api/v1/integrations/sofias-memory/credential -- identical no-echo/
+      write-only/safe-source rules as the provider surface, using the
+      existing SOFIAS_MEMORY_API_KEY_REF. No generic secret-enumeration
+      endpoint was introduced.
+    - client_boundary/http_api.py: create_local_http_app gains
+      secret_service/memory_config params, wired from host/composition.py
+      (core.secret_service, new core.memory_config property on SofiaCore).
+    - client_app/api.py: CoreApiClient gains list/refresh/update methods for
+      providers, models, profiles and routing preview, plus provider/Memory
+      credential set/delete. A new CoreValidationError(CoreApiError) carries
+      only the bounded `detail` string from a 404/422 AI-configuration
+      response (Contract-guaranteed secret-free and deterministic); every
+      other status keeps the existing generic, body-redacted CoreApiError
+      untouched, so Gate I16's "never echoes a response body" invariant for
+      auth/transport failures is preserved exactly.
+    - client_app/qt_app.py: ClientWorker/DesktopController gain the matching
+      request_*/ready signals and slots, reusing the existing QThread worker
+      pattern; AI-config/Memory calls go straight through
+      CoreApiClient (bypassing ClientApplicationService), mirroring the
+      existing start_voice()/service.api.realtime() precedent since this is
+      transport-shaped read/write, not Conversation orchestration.
+    - client_app/dashboard.py (new): HomeTab, AIModelsTab,
+      MemoryIntegrationsTab -- see "Dashboard architecture" below.
+    - core/core.py: new memory_config property (non-secret
+      SofiasMemoryConfig, safe for Dashboard display); attach_audit() wired
+      into _compose_conversation_runtime() once the real AuditService
+      exists (see Finding below).
+
+Reference Harvest:
+    REUSED -- existing ClientWorker/QThread pattern (client_app/qt_app.py)
+        for every new AI-config/Memory call: no blocking HTTP on the GUI
+        thread.
+    REUSED -- start_voice()/service.api.realtime() precedent of calling
+        CoreApiClient directly from ClientWorker for transport-shaped
+        operations ClientApplicationService doesn't wrap.
+    REUSED -- QLineEdit(EchoMode.Password) precedent already used for the
+        dev/test manual-credential-entry path in client_app/__main__.py,
+        applied to the new provider/Memory credential input fields.
+    REUSED -- imperative QListWidget clear-and-rebuild-on-snapshot rendering
+        (Tasks/Notifications tabs) for the new provider/model/binding lists,
+        instead of introducing a QAbstractItemModel abstraction that has no
+        precedent anywhere else in this codebase.
+    REJECTED -- a new QAbstractTableModel/QAbstractItemModel layer for
+        provider/model/binding lists: no existing consumer of that pattern
+        in this repository; would have added a second UI-list architecture
+        for one Gate's worth of widgets (CLAUDE.md SS15, avoid overbuilding).
+    REJECTED -- growing the shared ConversationDependenciesFactory type
+        signature to thread AuditService through host/composition.py's
+        factory: would have forced matching signature changes in every
+        Gate I2/I3/I6/I13/test_core.py fake factory for a single missing
+        wiring call; attach_audit() (called once, after construction, from
+        the one real call site) fixes the same gap with a much smaller
+        blast radius.
+    REJECTED -- a sidebar/stacked-widget navigation shell replacing the
+        existing flat QTabWidget: the existing shell already works and nothing
+        in Slice 10 SS29/SS21 requires replacing it; Home/AI & Models/
+        Memory were added as three more tabs, consistent with "bounded UX
+        polish over redesign".
+
+Dashboard architecture: preserved without exception --
+    Dashboard != authority, Dashboard != Operational Store, Dashboard !=
+    routing engine, Dashboard != SecretStore. Every new widget renders
+    Core-published state and emits a `DesktopController.request_*` intent;
+    none of them import a repository, open SQLite, or select a routing
+    result locally (grep-verified: no `sqlite`/`secrets.service`/
+    `secrets.store`/`SecretService` import anywhere under client_app/).
+    QSettings is untouched by this Gate (still only
+    "notifications/enabled").
+
+Home:
+    HomeTab derives "Sofia ready" / "AI needs configuration" / "Memory
+    degraded" / "Core reconnecting" purely client-side from already-safe
+    reads (GET /api/v1/ai/providers' credential.configured, GET
+    /api/v1/integrations/sofias-memory's health) plus the existing
+    ConnectionState -- never a new Core authority, never altering Core
+    state by inference (Slice 10 SS "Home/readiness composition").
+
+Provider UX:
+    AIModelsTab lists providers/models in one splitter view; selecting a
+    provider shows enabled/base_url (editable, PATCH
+    /api/v1/ai/providers/{id}) and its model catalog with capability +
+    provenance. "Refresh models from provider" calls
+    POST /api/v1/ai/models/refresh through the existing discovery adapter;
+    a freshly DISCOVERED model is rendered with an empty capability list
+    (never invented as proven), matching Amendment 0003 SS11.
+
+Credential UX:
+    Password-masked input, cleared immediately after the write intent is
+    emitted (never retained by the widget); a safe status line
+    ("Configured — source: saved in Sofia" / "...source:
+    environment/deployment (a saved credential exists but is currently
+    overridden)") replaces the internal environment|platform_store|missing
+    vocabulary. Delete requires an explicit QMessageBox confirmation. The
+    same pattern is reused verbatim for the Sofias Memory credential.
+
+Secret precedence/shadowing:
+    Amendment 0004 SS22 proven end to end (Gate I17 test
+    test_environment_secret_shadows_a_newly_written_platform_credential /
+    test_memory_credential_environment_shadowing_is_shown_safely): a
+    Dashboard write to a provider/Memory credential always succeeds durably
+    against the platform store, but a higher-priority environment secret
+    remains the effective source; the response says so
+    (effective_source="environment", shadowed=true) without ever exposing
+    either value. Deleting the platform-store copy never touches the
+    environment-backed secret.
+
+Models:
+    Model catalog UX shows provider/model id, display name, availability,
+    enabled, context window and capability list; discovery refresh reuses
+    the existing bounded OpenAIModelDiscoveryAdapter. No routing/eligibility
+    logic is duplicated client-side.
+
+Capability provenance:
+    Rendered as "capability[provenance]" per model; DISCOVERED-only entries
+    show zero capabilities, matching AIConfigurationService's
+    trusted_capabilities() semantics exactly (proven by
+    test_model_discovery_refresh_adds_discovered_models_without_proven_capabilities).
+
+Profiles:
+    Profile selector shows required/preferred capabilities, locality and an
+    editable fallback-policy dropdown (ORDERED_ONLY / ORDERED_THEN_CANONICAL),
+    each change sent as its own sparse PATCH.
+
+Bindings:
+    Reorder is a single QListWidget with Move-up/Move-down plus one "Save
+    order" action that recomputes priorities 1..N and sends the *entire*
+    ordered binding list in one PATCH body -- AIConfigurationService.
+    update_profile() already performs this atomically via
+    ProfileModelBindingRepository.replace_for_profile() (delete + re-insert
+    in one transaction); the Dashboard never emulates reorder as a sequence
+    of single-binding priority writes (proven by
+    test_binding_reorder_is_a_single_atomic_profile_update).
+
+Routing preview:
+    "Routing preview" panel sends profile + locality to
+    POST /api/v1/ai/routing/preview and renders selected provider/model,
+    fallback flag and the bounded human-readable reason; no inference is
+    invoked, no prompt/Memory content/secret is ever requested or rendered.
+
+Memory/Integrations:
+    New tab shows enabled/base_url/health (from the real Memory component
+    health, not the pre-existing generic health_items() mapping, which
+    turns out to key on "memory"/"ai-provider" while Core's actual
+    component names are "sofias-memory" and a separate
+    "llm-provider"/"llm-provider-credential" pair -- a latent, pre-existing
+    mismatch in client_app/models.py's Health tab left as a documented,
+    out-of-scope Deferred item below, since Gate I17 already gets accurate
+    Memory health through the new purpose-specific endpoint instead) plus
+    the credential lifecycle.
+
+Reconnect:
+    AIModelsTab/MemoryIntegrationsTab writes are disabled
+    (set_writes_enabled(False)) whenever connection state is not CONNECTED;
+    the dashboard bundle is reloaded once per transition into CONNECTED
+    (including reconnect), so a reattach always re-renders Core-
+    authoritative state rather than stale cached data. No write is ever
+    auto-retried after a transport failure (unchanged Gate I16 invariant).
+
+Validation UX:
+    A 404 ("Provider not found", "Profile not found") or 422 (a
+    deterministic AIConfigurationError message such as "Binding does not
+    satisfy the profile's required capabilities...") is raised client-side
+    as CoreValidationError and surfaced verbatim through the existing
+    failure -> statusBar() path; no traceback, no generic
+    "Something went wrong" wrapping a safe, already-bounded reason.
+
+Security:
+    - Provider/Memory raw credential values are never persisted Desktop-
+      side (verified: widget input fields are cleared synchronously after
+      emitting the write intent; no attribute retains the value).
+    - Neither credential is ever echoed by any endpoint (only
+      `configured`/`effective_source`/`shadowed`/`credential_ref`; proven by
+      dedicated "never echoed" assertions in every layer of tests).
+    - No generic secret endpoint: both new credential surfaces derive their
+      SecretRef server-side from a validated provider_id / the fixed
+      Sofias Memory ref; a client cannot request an arbitrary SecretRef.
+    - LocalClientBoundary/require_session unchanged and mandatory on every
+      new route.
+    - No direct SQLite/SecretStore import anywhere under client_app/
+      (grep-verified).
+    - No routing logic duplicated/authoritative in the Desktop; routing
+      preview only renders Core's own deterministic decision.
+    - Every write is Core-validated (AIConfigurationService) before
+      persistence; UI-side checks are ergonomics only.
+    - Reconnect never blindly replays a mutation (unchanged from I16).
+    - Logs: no new logging statements were added; CoreApiError/
+      CoreValidationError messages are transport-status-derived or
+      Contract-guaranteed-safe `detail` text only.
+    - Audit: PROVIDER_CREDENTIAL_UPDATED/DELETED and
+      INTEGRATION_CREDENTIAL_UPDATED/DELETED metadata carry only
+      provider_id/credential_ref/configured/effective_source -- never a
+      value (proven by test_no_secret_appears_in_audit_for_any_credential_write).
+    - QSettings: no new keys; still only "notifications/enabled".
+    - Attach credential/ClientAttachStore: untouched by this Gate.
+
+Packaging:
+    No PyInstaller spec changes required (both specs already use
+    collect_submodules("sofias_assistant.client_app") /
+    collect_submodules("sofias_assistant"), confirmed by reading both
+    specs). core/client/SofiaAssistant.spec and core/client/SofiaCore.spec
+    rebuilt locally; `dist\SofiaAssistant.exe --smoke` (offscreen) exit 0;
+    `scripts/ci_core_smoke.py` against the rebuilt `dist\SofiaCore.exe`
+    exit 0 ("attach + authenticated identity verified",
+    "graceful shutdown and attach cleanup verified"). CI builds and smokes
+    both executables on every push (unchanged workflow from Gate I16).
+
+Targeted tests:
+    tests/unit/secrets/{test_service,test_environment_store}.py (+5),
+    tests/unit/host/test_secret_bridge.py (+3),
+    tests/integration/ai_config/test_ai_configuration_service.py (+8:
+    update_provider x3, set/delete_provider_credential x4, attach_audit x1),
+    tests/unit/client_app/test_api.py (+14: every new CoreApiClient method,
+    CoreValidationError, no-echo assertions),
+    tests/unit/client_app/test_dashboard.py (new file, 17 offscreen Qt
+    tests: HomeTab readiness derivation x4, AIModelsTab provider/profile/
+    binding/routing-preview rendering and intent-emission x9,
+    MemoryIntegrationsTab x2, write-disable x1, fallback-policy x2).
+
+Gate tests:
+    tests/integration/gate/test_gate_i17_human_configuration_dashboard.py
+    -- 19 tests against the real production host (sofias_assistant.host.
+    runner.run, the exact composition sofia-core uses) driven through the
+    real, blocking CoreApiClient via asyncio.to_thread (same template as
+    Gate I15's human-facing HTTP smoke): attach, Home-readiness inputs,
+    provider non-secret update (+ unknown-id rejection), provider
+    credential write/replace/delete (+ unknown-id rejection), environment
+    shadowing, model catalog + discovery refresh with unproven DISCOVERED
+    capabilities (+ unknown-provider rejection), profile list/detail,
+    atomic binding reorder, invalid-binding rejection, fallback-policy
+    update, unknown-profile rejection, routing preview, Memory credential
+    write/replace/delete lifecycle, Memory credential environment
+    shadowing, a second fresh session observing the same Core-authoritative
+    state (reattach stand-in), and no secret leakage in Audit for any
+    credential write. All 19 pass individually and as a suite (~22s).
+
+Full pytest:
+    928 passed, 4 skipped (pre-existing opt-in live/hardware smokes,
+    unrelated to this Gate) in ~361s.
+
+Ruff / Format / Mypy / git diff --check:
+    All green (`uv run ruff check .`, `uv run ruff format --check .`,
+    `uv run mypy src tests` -- 221 source files, `git diff --check` only
+    flags pre-existing LF/CRLF normalization notices, no trailing
+    whitespace).
+
+Windows human smoke (manual, real packaged executables):
+    An ad-hoc script (not committed; mirrors scripts/ci_core_smoke.py's
+    exact real-process/real-Windows-Credential-Manager pattern) launched
+    the rebuilt dist\SofiaCore.exe as a genuine separate OS process,
+    attached through the real Windows Credential Manager, and drove every
+    new I17 endpoint through the real CoreApiClient:
+      - providers list (openai, credential initially not configured);
+      - provider credential write -> configured=true, never echoed in the
+        printed response;
+      - provider credential delete -> configured=false;
+      - model catalog reflects the canonical bootstrap model;
+      - all 5 baseline profiles present;
+      - routing preview selects the canonical model for chat.general;
+      - Sofias Memory integration status/health readable;
+      - Memory credential write/delete, never echoed;
+      - graceful Stop-Sofia-equivalent shutdown via
+        POST /api/v1/runtime/shutdown, process exit 0.
+    All checks passed (`i17_smoke: ALL CHECKS PASSED`). No credential value
+    appeared in any printed output. A real interactive click-through of the
+    Qt "AI & Models"/"Memory / Integrations" tabs was not performed (no
+    interactive GUI operator in this session, same limitation documented in
+    the Gate I16 ledger); the offscreen Qt widget tests plus this real
+    end-to-end API smoke cover the same underlying behavior.
+
+Commits:
+    d24f69c feat(ai): add purpose-specific provider/Memory credential write surfaces
+    a477db9 feat(dashboard): add Home, AI & Models and Memory/Integrations pages
+    d4eeb99 test(ai): validate Gate I17 human configuration dashboard
+
+Final HEAD (code-complete):
+    d4eeb99
+
+Findings fixed (in-scope, discovered during implementation):
+    - AIConfigurationService was constructed in host/composition.py without
+      an AuditService, so AI_PROVIDER_CONFIG_CHANGED / AI_MODEL_CATALOG_
+      REFRESHED / AI_PROFILE_CHANGED (and this Gate's new
+      PROVIDER_CREDENTIAL_UPDATED/DELETED) were silently no-ops in
+      production -- a pre-existing Gate I15 gap only surfaced because Gate
+      I17 is the first place that asserts these events end to end through
+      the real host. Fixed with AIConfigurationService.attach_audit(),
+      called once from SofiaCore._compose_conversation_runtime() after the
+      real AuditService exists, without touching the widely-reused
+      ConversationDependenciesFactory signature or any of its five existing
+      Gate-test fake factories.
+
+Deferred (out of I17 scope, explicitly not started):
+    Gate I18 (Conversation History & Privacy UX, Voice & Operational UX).
+    client_app/models.py's generic health_items() "ai-provider"/"memory"
+    key mismatch against Core's real "llm-provider"/"sofias-memory"
+    component names (pre-existing, predates this Gate; the Health tab it
+    feeds always showed a placeholder for those two rows; Home/Memory tab
+    in this Gate work around it with accurate purpose-specific reads
+    instead of fixing the shared mapping, which is unrelated Health-tab
+    scope). Provider display_name editing has a working PATCH field but no
+    dedicated UI control (not required by Slice 10 SS23's UX list, which
+    only requires displaying identity). No QAbstractItemModel/
+    QAbstractTableModel introduced for provider/model/binding lists
+    (imperative QListWidget rendering, consistent with the rest of this
+    codebase).
+
+Known limitations:
+    - Real interactive GUI-driven click-through of the new Qt tabs was not
+      performed (no interactive operator in this session); covered instead
+      by 17 offscreen Qt widget tests plus the real packaged end-to-end API
+      smoke above.
+    - The pre-existing health_items() key mismatch noted above remains
+      unfixed (Deferred).
+
+Real blockers:
+    None.
+```
+
