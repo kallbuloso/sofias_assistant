@@ -21,6 +21,7 @@ from sofias_assistant.client_boundary.realtime_ws import (
     RealtimeConversationApi,
     register_realtime_websocket,
 )
+from sofias_assistant.client_boundary.runtime_http import register_runtime_routes
 from sofias_assistant.client_boundary.sessions import (
     ClientSession,
     ClientSessionRegistry,
@@ -52,6 +53,7 @@ from sofias_assistant.health.models import (
 )
 from sofias_assistant.memory.orchestrator import MemoryOrchestrator
 from sofias_assistant.proactivity.runtime import ProactivityRuntime
+from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 from sofias_assistant.secrets.models import SecretValue
 
 _AUTHENTICATION_FAILURE_DETAIL = "Local client authentication failed"
@@ -521,6 +523,9 @@ def create_local_http_app(
     proactivity: ProactivityRuntime | None = None,
     memory: MemoryOrchestrator | None = None,
     ai_configuration: AIConfigurationService | None = None,
+    instance_key: str | None = None,
+    application_version: str | None = None,
+    shutdown_signal: RuntimeShutdownSignal | None = None,
 ) -> FastAPI:
     """Create an unbound ASGI app for one explicitly composed local boundary."""
 
@@ -568,6 +573,22 @@ def create_local_http_app(
 
     if ai_configuration is not None:
         register_ai_configuration_routes(app, require_session, ai_configuration)
+
+    if (
+        core is not None
+        and instance_key is not None
+        and application_version is not None
+        and shutdown_signal is not None
+    ):
+        register_runtime_routes(
+            app,
+            require_session,
+            instance_key=instance_key,
+            application_version=application_version,
+            core=core,
+            shutdown_signal=shutdown_signal,
+            audit=execution.audit if execution is not None else None,
+        )
 
     @app.post(
         "/api/v1/client-sessions",

@@ -14,6 +14,7 @@ from sofias_assistant.runtime._winmutex import (
 from sofias_assistant.runtime.instance_ownership import (
     CoreAlreadyRunningError,
     CoreInstanceOwnership,
+    instance_key_for_data_dir,
     mutex_name_for_data_dir,
 )
 
@@ -75,6 +76,44 @@ def test_mutex_name_is_global_prefixed_and_hides_path_plaintext(tmp_path: Path) 
     assert name.startswith("Global\\SofiasAssistant.Core.v1.")
     assert str(data_dir) not in name
     assert not data_dir.exists()
+
+
+def test_instance_key_is_stable_for_the_same_data_dir() -> None:
+    assert instance_key_for_data_dir(
+        Path("C:/Sofia/data")
+    ) == instance_key_for_data_dir(Path("C:/Sofia/data"))
+
+
+def test_instance_key_ignores_windows_path_case() -> None:
+    assert instance_key_for_data_dir(
+        Path("C:/Sofia/Data")
+    ) == instance_key_for_data_dir(Path("c:/sofia/data"))
+
+
+def test_instance_key_differs_for_different_data_dirs() -> None:
+    assert instance_key_for_data_dir(Path("C:/Sofia/one")) != instance_key_for_data_dir(
+        Path("C:/Sofia/two")
+    )
+
+
+def test_instance_key_hides_path_plaintext_and_is_not_secret(tmp_path: Path) -> None:
+    data_dir = tmp_path / "private-store"
+
+    key = instance_key_for_data_dir(data_dir)
+
+    assert str(data_dir) not in key
+    assert not data_dir.exists()
+    # Non-secret, stable lookup key: plain lowercase hex digest, no prefix.
+    assert len(key) == 64
+    assert key == key.lower()
+
+
+def test_mutex_name_embeds_the_instance_key(tmp_path: Path) -> None:
+    data_dir = tmp_path / "store"
+
+    assert mutex_name_for_data_dir(data_dir) == (
+        f"Global\\SofiasAssistant.Core.v1.{instance_key_for_data_dir(data_dir)}"
+    )
 
 
 @pytest.mark.parametrize("wait_result", [WAIT_OBJECT_0, WAIT_ABANDONED])

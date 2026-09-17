@@ -34,14 +34,28 @@ class InstanceOwnership(Protocol):
     def release(self) -> None: ...
 
 
-def mutex_name_for_data_dir(data_dir: Path) -> str:
-    """Return a stable, non-plaintext Win32 mutex name for a data directory."""
+def instance_key_for_data_dir(data_dir: Path) -> str:
+    """Return the stable, non-secret canonical identity of a data directory.
+
+    Shared by Win32 single-instance ownership (this module) and the Desktop
+    Client attach lookup (Architecture Review Amendment 0004 SS8, Desktop/Core
+    Interaction Contract v1 SS5), so both sides agree on exactly one
+    normalization/hashing rule instead of duplicating it. The result is a
+    lookup key, not a secret and not authentication authority: it never
+    embeds the plaintext path and is deterministic for the same canonical
+    data directory across processes.
+    """
 
     absolute_path = os.path.abspath(os.fspath(data_dir))
     normalized_path = os.path.normcase(os.path.normpath(absolute_path))
     windows_identity = normalized_path.replace("/", "\\").casefold()
-    store_key = hashlib.sha256(windows_identity.encode("utf-8")).hexdigest()
-    return f"{_MUTEX_PREFIX}{store_key}"
+    return hashlib.sha256(windows_identity.encode("utf-8")).hexdigest()
+
+
+def mutex_name_for_data_dir(data_dir: Path) -> str:
+    """Return a stable, non-plaintext Win32 mutex name for a data directory."""
+
+    return f"{_MUTEX_PREFIX}{instance_key_for_data_dir(data_dir)}"
 
 
 class CoreInstanceOwnership:

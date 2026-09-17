@@ -53,6 +53,7 @@ from sofias_assistant.host.secret_bridge import (
     provider_api_key_ref,
 )
 from sofias_assistant.persistence.unit_of_work import SqlAlchemyUnitOfWork
+from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 from sofias_assistant.secrets.environment_store import (
     EnvironmentSecretStore,
     LayeredSecretStore,
@@ -210,6 +211,10 @@ def build_conversation_dependencies_factory(
 
 def create_app_factory(
     core: SofiaCore,
+    *,
+    instance_key: str,
+    application_version: str,
+    shutdown_signal: RuntimeShutdownSignal,
 ) -> Callable[[LocalClientAuthenticator, ClientSessionRegistry], FastAPI]:
     """Wire every Core-owned service the authenticated boundary may expose.
 
@@ -232,6 +237,9 @@ def create_app_factory(
             proactivity=core.proactivity,
             memory=core.memory_orchestrator,
             ai_configuration=core.ai_configuration_service,
+            instance_key=instance_key,
+            application_version=application_version,
+            shutdown_signal=shutdown_signal,
         )
 
     return app_factory

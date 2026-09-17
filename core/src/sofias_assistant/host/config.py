@@ -118,7 +118,7 @@ def load_production_runtime_config(
     resolved_platform_name = os.name if platform_name is None else platform_name
     return ProductionRuntimeConfig(
         core_host=_resolve_core_host(resolved),
-        data_dir=_resolve_data_dir(resolved, resolved_platform_name),
+        data_dir=resolve_core_data_dir(resolved, resolved_platform_name),
         llm=_resolve_llm(resolved),
         memory=_resolve_memory(resolved),
     )
@@ -139,7 +139,15 @@ def _resolve_core_host(environment: Mapping[str, str]) -> CoreHostConfig:
     return CoreHostConfig(host=host, port=port)
 
 
-def _resolve_data_dir(environment: Mapping[str, str], platform_name: str) -> Path:
+def resolve_core_data_dir(environment: Mapping[str, str], platform_name: str) -> Path:
+    """Resolve the production Core's canonical data directory.
+
+    Public and reused by the Desktop Client (Architecture Review Amendment
+    0004 SS8, Desktop/Core Interaction Contract v1 SS5) so both processes
+    derive the identical `instance_key` from the identical data directory
+    input instead of duplicating this precedence rule.
+    """
+
     raw = environment.get(DATA_DIR_ENVIRONMENT_VARIABLE)
     override = raw.strip() if raw is not None else ""
     if override:

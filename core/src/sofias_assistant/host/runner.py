@@ -34,7 +34,14 @@ from collections.abc import Callable, Mapping
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from sofias_assistant.client_attach.models import (
+    CONTRACT_VERSION as CLIENT_ATTACH_CONTRACT_VERSION,
+)
+from sofias_assistant.client_attach.models import ClientAttachRecord
+from sofias_assistant.client_attach.store import ClientAttachStore
+from sofias_assistant.client_attach.windows_store import WindowsClientAttachStore
 from sofias_assistant.client_boundary.boundary import (
     LocalClientAccess,
     LocalClientBoundary,
@@ -59,7 +66,9 @@ from sofias_assistant.host.secret_bridge import (
 from sofias_assistant.runtime.instance_ownership import (
     CoreInstanceOwnership,
     InstanceOwnership,
+    instance_key_for_data_dir,
 )
+from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 from sofias_assistant.secrets.service import SecretService
 from sofias_assistant.secrets.store import SecretStore
 from sofias_assistant.secrets.windows_store import WindowsCredentialStore
@@ -101,6 +110,7 @@ async def run(
     instance_ownership_factory: Callable[
         [Path], InstanceOwnership
     ] = CoreInstanceOwnership,
+    attach_store_factory: Callable[[], ClientAttachStore] = WindowsClientAttachStore,
     client_factory: Callable[[str], Any] | None = None,
     shutdown_event: asyncio.Event | None = None,
     on_ready: Callable[[LocalClientAccess, SofiaCore], None] | None = None,
@@ -131,9 +141,12 @@ async def run(
         platform_secret_store_factory=platform_secret_store_factory,
     )
 
+    application_version_value = application_version or _application_version()
+    instance_key = instance_key_for_data_dir(config.data_dir)
+
     core = SofiaCore(
         build_runtime_config(config),
-        application_version=application_version or _application_version(),
+        application_version=application_version_value,
         secret_store_factory=secret_store_factory,
         instance_ownership_factory=instance_ownership_factory,
         conversation_dependencies_factory=build_conversation_dependencies_factory(
@@ -147,17 +160,69 @@ async def run(
         print(f"{_PROGRAM_NAME}: failed to start Core: {error}", file=sys.stderr)
         return 1
 
-    boundary = LocalClientBoundary(
-        port=config.core_host.port, app_factory=create_app_factory(core)
+    runtime_session_id = core.runtime_session_id
+    if runtime_session_id is None:
+        print(
+            f"{_PROGRAM_NAME}: Core did not produce a runtime_session_id",
+            file=sys.stderr,
+        )
+        await core.stop()
+        return 1
+
+    await core.execution_runtime.audit.record(
+        event_type="CLIENT_CORE_START_REQUESTED",
+        actor="host",
+        subject="core",
+        action="core.start",
+        resource=f"instance/{instance_key}",
+        outcome="SUCCEEDED",
+        origin="host",
+        correlation_id=uuid4(),
+        metadata={"runtime_session_id": str(runtime_session_id)},
     )
+
+    effective_shutdown_event = (
+        shutdown_event if shutdown_event is not None else asyncio.Event()
+    )
+    shutdown_signal = RuntimeShutdownSignal(
+        event=effective_shutdown_event,
+        runtime_session_id_provider=lambda: core.runtime_session_id,
+    )
+    boundary = LocalClientBoundary(
+        port=config.core_host.port,
+        app_factory=create_app_factory(
+            core,
+            instance_key=instance_key,
+            application_version=application_version_value,
+            shutdown_signal=shutdown_signal,
+        ),
+    )
+    attach_store = attach_store_factory()
+    access: LocalClientAccess | None = None
     try:
         await _report_ai_readiness(core, config, core.secret_service)
         access = await boundary.start()
+        attach_record = ClientAttachRecord(
+            contract_version=CLIENT_ATTACH_CONTRACT_VERSION,
+            instance_key=instance_key,
+            runtime_session_id=runtime_session_id,
+            host=access.host,
+            port=access.port,
+            credential=access.credential,
+            application_version=application_version_value,
+            process_id=os.getpid(),
+        )
+        attach_store.publish(instance_key, attach_record)
     except Exception as error:
         print(
             f"{_PROGRAM_NAME}: failed to start Local Client Boundary: {error}",
             file=sys.stderr,
         )
+        if access is not None:
+            try:
+                await boundary.stop()
+            except Exception:
+                pass
         await core.stop()
         return 1
 
@@ -166,9 +231,17 @@ async def run(
         on_ready(access, core)
 
     await _wait_for_shutdown(
-        shutdown_event=shutdown_event,
+        shutdown_event=effective_shutdown_event,
         install_signal_handlers=install_signal_handlers,
     )
+
+    try:
+        attach_store.delete_if_current(instance_key, runtime_session_id)
+    except Exception as error:
+        print(
+            f"{_PROGRAM_NAME}: attach record cleanup failed: {error}",
+            file=sys.stderr,
+        )
 
     try:
         await boundary.stop()
@@ -209,9 +282,9 @@ async def _report_ai_readiness(
 
 
 async def _wait_for_shutdown(
-    *, shutdown_event: asyncio.Event | None, install_signal_handlers: bool
+    *, shutdown_event: asyncio.Event, install_signal_handlers: bool
 ) -> None:
-    event = shutdown_event if shutdown_event is not None else asyncio.Event()
+    event = shutdown_event
     handlers_installed: list[signal.Signals] = []
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
