@@ -1955,16 +1955,22 @@ Commits:
     2e63520 ci: build and smoke-test the packaged SofiaCore.exe
 
 Final HEAD:
-    2e635207b20131c2115cfc1ac02d146e6ef46d76
+    2b7f79f3e34ce7f2ac1a09e8415fc064bec4fbc7
+    (2e635207b20131c2115cfc1ac02d146e6ef46d76 carries every code/test
+    change; 2b7f79f is this ledger's own docs-only follow-up commit)
 
 origin/main:
-    2e635207b20131c2115cfc1ac02d146e6ef46d76 (pushed; matches Final HEAD)
+    2b7f79f3e34ce7f2ac1a09e8415fc064bec4fbc7 (pushed; matches Final HEAD)
 
 CI:
     https://github.com/kallbuloso/sofias_assistant/actions/runs/35176427233
-    conclusion: success (Lint, format check, mypy, full pytest, Desktop
-    package baseline + packaged smoke, Core package baseline + packaged
-    smoke all green on windows-latest)
+    (HEAD 2e63520, code-complete) -- success
+    https://github.com/kallbuloso/sofias_assistant/actions/runs/35177847772
+    (HEAD 2b7f79f, this ledger update, docs-only) -- success
+    Both: Lint, format check, mypy, full pytest (Test step ~15-27min on
+    windows-latest, variance between runner instances), Desktop package
+    baseline + packaged smoke, Core package baseline + packaged smoke all
+    green.
 
 Findings fixed (in-scope, discovered during implementation):
     - runtime_http.py accidentally used `from __future__ import annotations`,
