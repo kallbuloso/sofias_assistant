@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QStatusBar,
     QSystemTrayIcon,
@@ -55,10 +56,16 @@ class ClientWorker(QObject):
     failure = Signal(str)
     stopped = Signal()
 
-    def __init__(self, base_url: str, credential: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        credential: str,
+        runtime_session_id: UUID | None = None,
+    ) -> None:
         super().__init__()
         self._base_url = base_url
         self._credential = credential
+        self._runtime_session_id = runtime_session_id
         self._service: ClientApplicationService | None = None
         self._voice: RealtimeVoiceConnection | None = None
         self._voice_status = VoiceState.IDLE
@@ -193,6 +200,32 @@ class ClientWorker(QObject):
             self._service.api.close()
         self.stopped.emit()
 
+    @Slot()
+    def stop_sofia(self) -> None:
+        """Request an explicit authenticated graceful Core shutdown.
+
+        This is the only path that may stop Core; ordinary window close and
+        Quit Desktop never call it (Desktop/Core Interaction Contract v1
+        SS24). It requires an active session and a known `runtime_session_id`
+        obtained during attach.
+        """
+
+        service = self._service
+        if service is None or self._runtime_session_id is None:
+            self.failure.emit("Sofia is not attached to a running Core")
+            return
+        try:
+            accepted = service.api.request_runtime_shutdown(
+                self._runtime_session_id, reason="user_requested"
+            )
+        except Exception:
+            self.failure.emit("Stop Sofia request failed")
+            return
+        if not accepted:
+            self.failure.emit("Stop Sofia was rejected (Core lifecycle changed)")
+            return
+        self._state(ConnectionState.DISCONNECTED)
+
     def _publish(self, snapshot: ClientSnapshot) -> None:
         self._state(snapshot.connection)
         self.snapshot_ready.emit(snapshot)
@@ -218,6 +251,7 @@ class DesktopController(QObject):
     request_voice_stop = Signal()
     request_voice_interrupt = Signal()
     request_shutdown = Signal()
+    request_stop_sofia = Signal()
 
     def __init__(
         self,
@@ -226,10 +260,11 @@ class DesktopController(QObject):
         parent: QObject | None = None,
         *,
         auto_connect: bool = True,
+        runtime_session_id: UUID | None = None,
     ):
         super().__init__(parent)
         self._thread = QThread(self)
-        self.worker = ClientWorker(base_url, credential)
+        self.worker = ClientWorker(base_url, credential, runtime_session_id)
         self.worker.moveToThread(self._thread)
         if auto_connect:
             self._thread.started.connect(self.worker.connect_core)
@@ -242,6 +277,7 @@ class DesktopController(QObject):
         self.request_voice_stop.connect(self.worker.stop_voice)
         self.request_voice_interrupt.connect(self.worker.interrupt_voice)
         self.request_shutdown.connect(self.worker.shutdown)
+        self.request_stop_sofia.connect(self.worker.stop_sofia)
         self.worker.stopped.connect(self._thread.quit)
         self._thread_started = auto_connect
         if auto_connect:
@@ -401,11 +437,14 @@ class MainWindow(QMainWindow):
         self._tray_status.setEnabled(False)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit)
+        stop_sofia_action = QAction("Stop Sofia", self)
+        stop_sofia_action.triggered.connect(self._confirm_stop_sofia)
         menu.addAction(open_action)
         menu.addAction(chat_action)
         menu.addSeparator()
         menu.addAction(self._tray_status)
         menu.addSeparator()
+        menu.addAction(stop_sofia_action)
         menu.addAction(quit_action)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(
@@ -550,6 +589,25 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _confirm_stop_sofia(self) -> None:
+        """Require explicit human confirmation before requesting Core shutdown.
+
+        Ordinary window close and Quit Desktop never reach this path
+        (Desktop/Core Interaction Contract v1 SS24); only this explicit,
+        separate action does.
+        """
+
+        answer = QMessageBox.question(
+            self,
+            "Stop Sofia",
+            "This stops Sofia's Core: background reminders, tasks and "
+            "notifications will stop until Sofia is started again. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._controller.request_stop_sofia.emit()
+
     def _quit(self) -> None:
         self._quitting = True
         self._refresh_timer.stop()
@@ -568,14 +626,23 @@ class MainWindow(QMainWindow):
 
 
 def create_application(
-    base_url: str, credential: str, *, auto_connect: bool = True
+    base_url: str,
+    credential: str,
+    *,
+    auto_connect: bool = True,
+    runtime_session_id: UUID | None = None,
 ) -> tuple[QApplication, MainWindow]:
     current = QApplication.instance()
     app = current if isinstance(current, QApplication) else QApplication([])
     app.setApplicationName("Sofia's Assistant")
     app.setOrganizationName("Sofia")
     app.setQuitOnLastWindowClosed(False)
-    controller = DesktopController(base_url, credential, auto_connect=auto_connect)
+    controller = DesktopController(
+        base_url,
+        credential,
+        auto_connect=auto_connect,
+        runtime_session_id=runtime_session_id,
+    )
     window = MainWindow(controller, base_url)
     app.aboutToQuit.connect(controller.close)
     window.show()

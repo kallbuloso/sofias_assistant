@@ -35,6 +35,14 @@ class FakeHttp:
     def __init__(self) -> None:
         self.session_id = uuid4()
         self.conversation_id = uuid4()
+        self.shutdown_status_code = 202
+        self.runtime_identity: dict[str, object] = {
+            "instance_key": "a" * 64,
+            "runtime_session_id": str(uuid4()),
+            "application_version": "0.1.0",
+            "protocol_version": 1,
+            "state": "running",
+        }
 
     def post(self, path: str, **_: object) -> Response:
         if path == "/api/v1/client-sessions":
@@ -43,6 +51,8 @@ class FakeHttp:
             return Response(201, {"id": str(self.conversation_id)})
         if path.endswith("/acknowledge"):
             return Response(200, {"acknowledged": True})
+        if path == "/api/v1/runtime/shutdown":
+            return Response(self.shutdown_status_code, {"accepted": True})
         raise AssertionError(path)
 
     def get(self, path: str, **_: object) -> Response:
@@ -71,6 +81,8 @@ class FakeHttp:
                     "turns": [],
                 },
             )
+        if path == "/api/v1/runtime/identity":
+            return Response(200, self.runtime_identity)
         raise AssertionError(path)
 
     def stream(self, *_: object, **__: object) -> Stream:
@@ -106,6 +118,37 @@ def test_client_authenticates_and_uses_single_transport_adapter() -> None:
 def test_client_rejects_non_loopback_or_credential_bearing_urls(url: str) -> None:
     with pytest.raises(ValueError):
         CoreApiClient(url, "credential")
+
+
+def test_get_runtime_identity_returns_the_safe_payload() -> None:
+    fake = FakeHttp()
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+
+    identity = client.get_runtime_identity()
+
+    assert identity == fake.runtime_identity
+
+
+def test_request_runtime_shutdown_accepted_returns_true() -> None:
+    fake = FakeHttp()
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+
+    accepted = client.request_runtime_shutdown(uuid4(), reason="user_requested")
+
+    assert accepted is True
+
+
+def test_request_runtime_shutdown_lifecycle_mismatch_returns_false() -> None:
+    fake = FakeHttp()
+    fake.shutdown_status_code = 409
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+
+    accepted = client.request_runtime_shutdown(uuid4())
+
+    assert accepted is False
 
 
 def test_authentication_failure_is_safe() -> None:

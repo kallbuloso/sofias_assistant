@@ -138,6 +138,32 @@ class CoreApiClient:
     def cancel_task(self, task_id: UUID) -> dict[str, Any]:
         return self._post(f"/api/v1/tasks/{task_id}/cancel", {})
 
+    def get_runtime_identity(self) -> dict[str, Any]:
+        """Return the authenticated runtime identity used for attach verification."""
+
+        return cast(dict[str, Any], self._get("/api/v1/runtime/identity"))
+
+    def request_runtime_shutdown(
+        self, runtime_session_id: UUID, *, reason: str = "user_requested"
+    ) -> bool:
+        """Request an explicit authenticated graceful Core shutdown.
+
+        Returns whether the current lifecycle accepted the request; a
+        lifecycle mismatch (`409`) returns `False` instead of raising, since
+        it is an expected outcome the caller (`DesktopCoreSupervisor`) must
+        be able to distinguish without exception-driven control flow.
+        """
+
+        response = self._http.post(
+            "/api/v1/runtime/shutdown",
+            headers=self._headers(),
+            json={"runtime_session_id": str(runtime_session_id), "reason": reason},
+        )
+        if response.status_code == 409:
+            return False
+        self._decode(response)
+        return True
+
     def realtime(self) -> RealtimeVoiceConnection:
         self._require_session()
         if self.session_id is None:
