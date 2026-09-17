@@ -43,7 +43,13 @@ jobs:
       - name: Desktop package baseline
         run: uv run python -m PyInstaller --noconfirm client/SofiaAssistant.spec
 
-      - name: Packaged executable smoke
+      - name: Packaged Desktop executable smoke
         run: dist\SofiaAssistant.exe --smoke
         env:
           QT_QPA_PLATFORM: offscreen
+
+      - name: Core package baseline
+        run: uv run python -m PyInstaller --noconfirm client/SofiaCore.spec
+
+      - name: Packaged Core executable smoke
+        run: uv run python scripts/ci_core_smoke.py
