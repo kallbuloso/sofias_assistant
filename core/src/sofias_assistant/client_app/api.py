@@ -17,6 +17,18 @@ class CoreApiError(RuntimeError):
     """Safe transport error that never includes credentials or response bodies."""
 
 
+class CoreValidationError(CoreApiError):
+    """A Core-rejected write, carrying only its bounded deterministic reason.
+
+    Populated exclusively from `detail` on a `404`/`422` AI-configuration
+    response, which Contract v1 guarantees is a safe, secret-free,
+    deterministic validation message (e.g. "Unknown provider", "Binding
+    does not satisfy the profile's required capabilities") -- never a
+    credential, prompt or hidden reasoning. Ordinary transport failures
+    still raise the generic `CoreApiError`.
+    """
+
+
 class CoreApiClient:
     """One authenticated, transport-only Client adapter.
 
@@ -164,6 +176,88 @@ class CoreApiClient:
         self._decode(response)
         return True
 
+    # -- AI configuration / routing (Gate I17) --------------------------
+
+    def list_ai_providers(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self._get("/api/v1/ai/providers"))
+
+    def list_ai_models(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self._get("/api/v1/ai/models"))
+
+    def update_ai_provider(
+        self, provider_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._patch_validated(f"/api/v1/ai/providers/{provider_id}", patch),
+        )
+
+    def refresh_ai_models(self, provider_id: str) -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            self._post_validated(
+                "/api/v1/ai/models/refresh", {"provider_id": provider_id}
+            ),
+        )
+
+    def list_ai_profiles(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self._get("/api/v1/ai/profiles"))
+
+    def get_ai_profile(self, key: str) -> dict[str, Any]:
+        return cast(dict[str, Any], self._get(f"/api/v1/ai/profiles/{key}"))
+
+    def update_ai_profile(self, key: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """Apply a sparse profile patch; `patch["bindings"]`, when present,
+
+        replaces the full ordered binding list in one atomic Core call
+        (Contract v1 SS33) -- callers must never emulate reorder through a
+        sequence of single-binding updates.
+        """
+
+        return cast(
+            dict[str, Any], self._patch_validated(f"/api/v1/ai/profiles/{key}", patch)
+        )
+
+    def preview_ai_routing(self, request: dict[str, Any]) -> dict[str, Any]:
+        return cast(
+            dict[str, Any], self._post_validated("/api/v1/ai/routing/preview", request)
+        )
+
+    def set_ai_provider_credential(
+        self, provider_id: str, value: str
+    ) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._put_validated(
+                f"/api/v1/ai/providers/{provider_id}/credential", {"value": value}
+            ),
+        )
+
+    def delete_ai_provider_credential(self, provider_id: str) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._delete_validated(f"/api/v1/ai/providers/{provider_id}/credential"),
+        )
+
+    # -- Memory / integrations (Gate I17) -------------------------------
+
+    def get_memory_integration(self) -> dict[str, Any]:
+        return cast(dict[str, Any], self._get("/api/v1/integrations/sofias-memory"))
+
+    def set_memory_credential(self, value: str) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._put_validated(
+                "/api/v1/integrations/sofias-memory/credential", {"value": value}
+            ),
+        )
+
+    def delete_memory_credential(self) -> dict[str, Any]:
+        return cast(
+            dict[str, Any],
+            self._delete_validated("/api/v1/integrations/sofias-memory/credential"),
+        )
+
     def realtime(self) -> RealtimeVoiceConnection:
         self._require_session()
         if self.session_id is None:
@@ -183,6 +277,47 @@ class CoreApiClient:
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = self._http.post(path, headers=self._headers(), json=body)
         return self._decode(response)
+
+    def _post_validated(self, path: str, body: dict[str, Any]) -> Any:
+        response = self._http.post(path, headers=self._headers(), json=body)
+        return self._decode_validated(response)
+
+    def _patch_validated(self, path: str, body: dict[str, Any]) -> Any:
+        response = self._http.patch(path, headers=self._headers(), json=body)
+        return self._decode_validated(response)
+
+    def _put_validated(self, path: str, body: dict[str, Any]) -> Any:
+        response = self._http.put(path, headers=self._headers(), json=body)
+        return self._decode_validated(response)
+
+    def _delete_validated(self, path: str) -> Any:
+        response = self._http.delete(path, headers=self._headers())
+        return self._decode_validated(response)
+
+    @staticmethod
+    def _decode_validated(response: Any) -> Any:
+        """Decode a Core-config write response, surfacing a safe rejection reason.
+
+        `404`/`422` from the AI-configuration and integration-credential
+        surfaces always carry a bounded, secret-free `detail` string
+        (Contract v1); every other status keeps the generic transport-only
+        `_decode` behavior.
+        """
+
+        if response.status_code in (404, 422):
+            raise CoreValidationError(CoreApiClient._safe_detail(response))
+        return CoreApiClient._decode(response)
+
+    @staticmethod
+    def _safe_detail(response: Any) -> str:
+        try:
+            payload = response.json()
+        except Exception:
+            return "Core rejected the request"
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, str) and detail.strip():
+            return detail
+        return "Core rejected the request"
 
     def _headers(self) -> dict[str, str]:
         self._require_session()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
@@ -33,7 +34,13 @@ from PySide6.QtWidgets import (
 from sofias_assistant.client_app.api import (
     CoreApiClient,
     CoreApiError,
+    CoreValidationError,
     RealtimeVoiceConnection,
+)
+from sofias_assistant.client_app.dashboard import (
+    AIModelsTab,
+    HomeTab,
+    MemoryIntegrationsTab,
 )
 from sofias_assistant.client_app.models import (
     ClientSnapshot,
@@ -55,6 +62,9 @@ class ClientWorker(QObject):
     voice_changed = Signal(str)
     failure = Signal(str)
     stopped = Signal()
+    ai_dashboard_ready = Signal(object)
+    routing_preview_ready = Signal(object)
+    credential_write_succeeded = Signal(str)
 
     def __init__(
         self,
@@ -226,6 +236,136 @@ class ClientWorker(QObject):
             return
         self._state(ConnectionState.DISCONNECTED)
 
+    # -- AI configuration / Memory integration (Gate I17) ----------------
+    #
+    # These bypass `ClientApplicationService` and call `CoreApiClient`
+    # directly, matching the existing `start_voice`/`service.api.realtime()`
+    # precedent: the service layer only wraps Conversation/Task/Notification
+    # orchestration, while transport-shaped reads/writes go straight through
+    # the authenticated `CoreApiClient`. A write never replays automatically
+    # on failure (Contract v1 SS21); the caller must re-trigger explicitly.
+
+    def _ai_dashboard_snapshot(self) -> dict[str, Any]:
+        service = self._service
+        assert service is not None
+        return {
+            "providers": service.api.list_ai_providers(),
+            "models": service.api.list_ai_models(),
+            "profiles": service.api.list_ai_profiles(),
+            "memory": service.api.get_memory_integration(),
+        }
+
+    @Slot()
+    def load_ai_dashboard(self) -> None:
+        if self._service is None:
+            self.failure.emit("Connect to Core before loading AI configuration")
+            return
+        try:
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except Exception:
+            self.failure.emit("AI configuration could not be loaded")
+
+    @Slot(str, object)
+    def update_ai_provider(self, provider_id: str, patch: dict[str, Any]) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.update_ai_provider(provider_id, patch)
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Provider configuration could not be updated")
+
+    @Slot(str)
+    def refresh_ai_models(self, provider_id: str) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.refresh_ai_models(provider_id)
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Model discovery refresh failed")
+
+    @Slot(str, object)
+    def update_ai_profile(self, key: str, patch: dict[str, Any]) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.update_ai_profile(key, patch)
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Profile update failed")
+
+    @Slot(object)
+    def preview_ai_routing(self, request: dict[str, Any]) -> None:
+        if self._service is None:
+            return
+        try:
+            self.routing_preview_ready.emit(
+                self._service.api.preview_ai_routing(request)
+            )
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Routing preview failed")
+
+    @Slot(str, str)
+    def set_ai_provider_credential(self, provider_id: str, value: str) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.set_ai_provider_credential(provider_id, value)
+            self.credential_write_succeeded.emit(f"provider:{provider_id}")
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Provider credential could not be saved")
+
+    @Slot(str)
+    def delete_ai_provider_credential(self, provider_id: str) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.delete_ai_provider_credential(provider_id)
+            self.credential_write_succeeded.emit(f"provider:{provider_id}")
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Provider credential could not be removed")
+
+    @Slot(str)
+    def set_memory_credential(self, value: str) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.set_memory_credential(value)
+            self.credential_write_succeeded.emit("memory")
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Memory credential could not be saved")
+
+    @Slot()
+    def delete_memory_credential(self) -> None:
+        if self._service is None:
+            return
+        try:
+            self._service.api.delete_memory_credential()
+            self.credential_write_succeeded.emit("memory")
+            self.ai_dashboard_ready.emit(self._ai_dashboard_snapshot())
+        except CoreValidationError as error:
+            self.failure.emit(str(error))
+        except Exception:
+            self.failure.emit("Memory credential could not be removed")
+
     def _publish(self, snapshot: ClientSnapshot) -> None:
         self._state(snapshot.connection)
         self.snapshot_ready.emit(snapshot)
@@ -252,6 +392,15 @@ class DesktopController(QObject):
     request_voice_interrupt = Signal()
     request_shutdown = Signal()
     request_stop_sofia = Signal()
+    request_ai_dashboard = Signal()
+    request_provider_update = Signal(str, object)
+    request_model_refresh = Signal(str)
+    request_profile_update = Signal(str, object)
+    request_routing_preview = Signal(object)
+    request_set_provider_credential = Signal(str, str)
+    request_delete_provider_credential = Signal(str)
+    request_set_memory_credential = Signal(str)
+    request_delete_memory_credential = Signal()
 
     def __init__(
         self,
@@ -278,6 +427,21 @@ class DesktopController(QObject):
         self.request_voice_interrupt.connect(self.worker.interrupt_voice)
         self.request_shutdown.connect(self.worker.shutdown)
         self.request_stop_sofia.connect(self.worker.stop_sofia)
+        self.request_ai_dashboard.connect(self.worker.load_ai_dashboard)
+        self.request_provider_update.connect(self.worker.update_ai_provider)
+        self.request_model_refresh.connect(self.worker.refresh_ai_models)
+        self.request_profile_update.connect(self.worker.update_ai_profile)
+        self.request_routing_preview.connect(self.worker.preview_ai_routing)
+        self.request_set_provider_credential.connect(
+            self.worker.set_ai_provider_credential
+        )
+        self.request_delete_provider_credential.connect(
+            self.worker.delete_ai_provider_credential
+        )
+        self.request_set_memory_credential.connect(self.worker.set_memory_credential)
+        self.request_delete_memory_credential.connect(
+            self.worker.delete_memory_credential
+        )
         self.worker.stopped.connect(self._thread.quit)
         self._thread_started = auto_connect
         if auto_connect:
@@ -325,6 +489,7 @@ class MainWindow(QMainWindow):
         self._seen_native: set[UUID] = set()
         self._notification_rows: dict[UUID, QWidget] = {}
         self._task_rows: dict[UUID, QWidget] = {}
+        self._last_connection_state: str | None = None
         self._build_ui()
         self._build_tray()
         self._wire_controller()
@@ -350,12 +515,53 @@ class MainWindow(QMainWindow):
         menu.addAction(quit_action)
 
         tabs = QTabWidget(self)
+        tabs.addTab(self._home_tab(), "Home")
         tabs.addTab(self._chat_tab(), "Chat")
+        tabs.addTab(self._ai_models_tab(), "AI & Models")
+        tabs.addTab(self._memory_tab(), "Memory / Integrations")
         tabs.addTab(self._tasks_tab(), "Tasks")
         tabs.addTab(self._notifications_tab(), "Notifications")
         tabs.addTab(self._voice_tab(), "Voice")
         tabs.addTab(self._health_tab(), "Health")
         self.setCentralWidget(tabs)
+
+    def _home_tab(self) -> QWidget:
+        self._home = HomeTab()
+        return self._home
+
+    def _ai_models_tab(self) -> QWidget:
+        self._ai_models = AIModelsTab()
+        self._ai_models.provider_update_requested.connect(
+            self._controller.request_provider_update.emit
+        )
+        self._ai_models.provider_credential_set_requested.connect(
+            self._controller.request_set_provider_credential.emit
+        )
+        self._ai_models.provider_credential_deleted_requested.connect(
+            self._controller.request_delete_provider_credential.emit
+        )
+        self._ai_models.model_refresh_requested.connect(
+            self._controller.request_model_refresh.emit
+        )
+        self._ai_models.profile_update_requested.connect(
+            self._controller.request_profile_update.emit
+        )
+        self._ai_models.routing_preview_requested.connect(
+            self._controller.request_routing_preview.emit
+        )
+        self._ai_models.set_writes_enabled(False)
+        return self._ai_models
+
+    def _memory_tab(self) -> QWidget:
+        self._memory = MemoryIntegrationsTab()
+        self._memory.credential_set_requested.connect(
+            self._controller.request_set_memory_credential.emit
+        )
+        self._memory.credential_deleted_requested.connect(
+            self._controller.request_delete_memory_credential.emit
+        )
+        self._memory.set_writes_enabled(False)
+        return self._memory
 
     def _chat_tab(self) -> QWidget:
         tab = QWidget()
@@ -469,12 +675,32 @@ class MainWindow(QMainWindow):
         worker.stream_finished.connect(lambda: self._chat.append(""))
         worker.voice_changed.connect(self._voice_label.setText)
         worker.failure.connect(self._show_error)
+        worker.ai_dashboard_ready.connect(self._on_ai_dashboard)
+        worker.routing_preview_ready.connect(self._ai_models.show_routing_preview)
+        worker.credential_write_succeeded.connect(self._on_credential_write_succeeded)
 
     @Slot(str)
     def _on_state(self, state: str) -> None:
         value = state.rsplit(".", 1)[-1]
         self._connection.setText(value)
         self._tray_status.setText(value)
+        self._home.update_connection(value)
+        writes_enabled = value == "CONNECTED"
+        self._ai_models.set_writes_enabled(writes_enabled)
+        self._memory.set_writes_enabled(writes_enabled)
+        if writes_enabled and value != self._last_connection_state:
+            self._controller.request_ai_dashboard.emit()
+        self._last_connection_state = value
+
+    @Slot(object)
+    def _on_ai_dashboard(self, bundle: dict[str, object]) -> None:
+        self._home.update_ai_dashboard(bundle)
+        self._ai_models.update_ai_dashboard(bundle)
+        self._memory.update_ai_dashboard(bundle)
+
+    @Slot(str)
+    def _on_credential_write_succeeded(self, _: str) -> None:
+        self.statusBar().showMessage("Credential saved", 4000)
 
     @Slot(object)
     def _on_snapshot(self, snapshot: ClientSnapshot) -> None:
