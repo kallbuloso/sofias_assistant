@@ -4,7 +4,11 @@ from uuid import uuid4
 
 import pytest
 
-from sofias_assistant.client_app.api import CoreApiClient, CoreApiError
+from sofias_assistant.client_app.api import (
+    CoreApiClient,
+    CoreApiError,
+    CoreValidationError,
+)
 
 
 class Response:
@@ -53,6 +57,84 @@ class FakeHttp:
             return Response(200, {"acknowledged": True})
         if path == "/api/v1/runtime/shutdown":
             return Response(self.shutdown_status_code, {"accepted": True})
+        if path == "/api/v1/ai/models/refresh":
+            return Response(200, [])
+        if path == "/api/v1/ai/routing/preview":
+            return Response(
+                200,
+                {
+                    "profile": "coding",
+                    "selected": {"provider_id": "openai", "model_id": "gpt-x"},
+                    "fallback": False,
+                    "reason_code": "PROFILE_BINDING_SELECTED",
+                    "reason": "Highest-priority eligible profile binding selected.",
+                },
+            )
+        raise AssertionError(path)
+
+    def put(self, path: str, **_: object) -> Response:
+        if path == "/api/v1/ai/providers/openai/credential":
+            return Response(
+                200,
+                {
+                    "credential_ref": "providers/openai/api-key",
+                    "configured": True,
+                    "effective_source": "platform_store",
+                    "writable_source": "platform_store",
+                    "shadowed": False,
+                },
+            )
+        if path == "/api/v1/ai/providers/does-not-exist/credential":
+            return Response(404, {"detail": "Provider not found"})
+        if path == "/api/v1/integrations/sofias-memory/credential":
+            return Response(
+                200,
+                {
+                    "credential_ref": "integrations/sofias-memory/api-key",
+                    "configured": True,
+                    "effective_source": "platform_store",
+                    "writable_source": "platform_store",
+                    "shadowed": False,
+                },
+            )
+        raise AssertionError(path)
+
+    def patch(self, path: str, **_: object) -> Response:
+        if path == "/api/v1/ai/providers/openai":
+            return Response(
+                200,
+                {
+                    "id": "openai",
+                    "display_name": "OpenAI",
+                    "adapter_type": "openai",
+                    "base_url": "https://api.openai.com/v1",
+                    "enabled": False,
+                    "execution_location": "cloud",
+                    "credential": {
+                        "ref": "providers/openai/api-key",
+                        "configured": True,
+                    },
+                },
+            )
+        if path == "/api/v1/ai/providers/does-not-exist":
+            return Response(404, {"detail": "Provider not found"})
+        if path == "/api/v1/ai/profiles/coding":
+            return Response(
+                200,
+                {
+                    "key": "coding",
+                    "display_name": "coding",
+                    "description": "Baseline coding workload profile",
+                    "required_capabilities": ["text_generation", "tool_calling"],
+                    "preferred_capabilities": [],
+                    "locality": "cloud_allowed",
+                    "enabled": True,
+                    "fallback_policy": "ordered_then_canonical",
+                    "bindings": [],
+                },
+            )
+        if path == "/api/v1/ai/profiles/incompatible":
+            return Response(422, {"detail": "Binding is not LOCAL_ONLY compatible"})
         raise AssertionError(path)
 
     def get(self, path: str, **_: object) -> Response:
@@ -83,12 +165,87 @@ class FakeHttp:
             )
         if path == "/api/v1/runtime/identity":
             return Response(200, self.runtime_identity)
+        if path == "/api/v1/ai/providers":
+            return Response(
+                200,
+                [
+                    {
+                        "id": "openai",
+                        "display_name": "OpenAI",
+                        "adapter_type": "openai",
+                        "base_url": "https://api.openai.com/v1",
+                        "enabled": True,
+                        "execution_location": "cloud",
+                        "credential": {
+                            "ref": "providers/openai/api-key",
+                            "configured": True,
+                        },
+                    }
+                ],
+            )
+        if path == "/api/v1/ai/models":
+            return Response(200, [])
+        if path == "/api/v1/ai/profiles":
+            return Response(200, [])
+        if path == "/api/v1/ai/profiles/coding":
+            return Response(
+                200,
+                {
+                    "key": "coding",
+                    "display_name": "coding",
+                    "description": "Baseline coding workload profile",
+                    "required_capabilities": ["text_generation", "tool_calling"],
+                    "preferred_capabilities": [],
+                    "locality": "cloud_allowed",
+                    "enabled": True,
+                    "fallback_policy": "ordered_then_canonical",
+                    "bindings": [],
+                },
+            )
+        if path == "/api/v1/integrations/sofias-memory":
+            return Response(
+                200,
+                {
+                    "enabled": True,
+                    "base_url": "https://memory.invalid",
+                    "credential": {
+                        "credential_ref": "integrations/sofias-memory/api-key",
+                        "configured": True,
+                        "effective_source": "platform_store",
+                        "writable_source": "platform_store",
+                        "shadowed": False,
+                    },
+                    "health": {"status": "healthy", "detail": None},
+                },
+            )
         raise AssertionError(path)
 
     def stream(self, *_: object, **__: object) -> Stream:
         return Stream(Response(200, None), ['{"type":"text_delta","text":"hi"}'])
 
-    def delete(self, *_: object, **__: object) -> Response:
+    def delete(self, path: str = "", **_: object) -> Response:
+        if path == "/api/v1/ai/providers/openai/credential":
+            return Response(
+                200,
+                {
+                    "credential_ref": "providers/openai/api-key",
+                    "configured": False,
+                    "effective_source": "missing",
+                    "writable_source": "platform_store",
+                    "shadowed": False,
+                },
+            )
+        if path == "/api/v1/integrations/sofias-memory/credential":
+            return Response(
+                200,
+                {
+                    "credential_ref": "integrations/sofias-memory/api-key",
+                    "configured": False,
+                    "effective_source": "missing",
+                    "writable_source": "platform_store",
+                    "shadowed": False,
+                },
+            )
         return Response(204, {})
 
     def close(self) -> None:
@@ -163,3 +320,89 @@ def test_authentication_failure_is_safe() -> None:
         client.connect()
     assert "secret-token" not in str(error.value)
     assert "credential leaked" not in str(error.value)
+
+
+def _connected_client() -> CoreApiClient:
+    fake = FakeHttp()
+    client = CoreApiClient("http://127.0.0.1:8989", "secret-token", http_client=fake)
+    client.connect()
+    return client
+
+
+def test_list_ai_providers_returns_the_decoded_payload() -> None:
+    providers = _connected_client().list_ai_providers()
+    assert providers[0]["id"] == "openai"
+    assert "credential" in providers[0]
+
+
+def test_update_ai_provider_applies_a_sparse_patch() -> None:
+    updated = _connected_client().update_ai_provider("openai", {"enabled": False})
+    assert updated["enabled"] is False
+
+
+def test_update_ai_provider_unknown_id_raises_validation_error() -> None:
+    client = _connected_client()
+    with pytest.raises(CoreValidationError, match="Provider not found"):
+        client.update_ai_provider("does-not-exist", {"enabled": False})
+
+
+def test_list_ai_models_and_profiles_return_decoded_payloads() -> None:
+    client = _connected_client()
+    assert client.list_ai_models() == []
+    assert client.list_ai_profiles() == []
+
+
+def test_refresh_ai_models_posts_the_provider_id() -> None:
+    assert _connected_client().refresh_ai_models("openai") == []
+
+
+def test_get_and_update_ai_profile_round_trip() -> None:
+    client = _connected_client()
+    profile = client.get_ai_profile("coding")
+    assert profile["key"] == "coding"
+    updated = client.update_ai_profile("coding", {"enabled": True})
+    assert updated["key"] == "coding"
+
+
+def test_update_ai_profile_surfaces_a_safe_validation_reason() -> None:
+    client = _connected_client()
+    with pytest.raises(CoreValidationError, match="LOCAL_ONLY"):
+        client.update_ai_profile("incompatible", {"bindings": []})
+
+
+def test_preview_ai_routing_returns_the_decoded_decision() -> None:
+    decision = _connected_client().preview_ai_routing(
+        {"profile": "coding", "locality": "cloud_allowed"}
+    )
+    assert decision["selected"]["provider_id"] == "openai"
+
+
+def test_set_and_delete_ai_provider_credential_never_echo_the_value() -> None:
+    client = _connected_client()
+
+    written = client.set_ai_provider_credential("openai", "sk-super-secret")
+    assert written["configured"] is True
+    assert "sk-super-secret" not in str(written)
+
+    deleted = client.delete_ai_provider_credential("openai")
+    assert deleted["configured"] is False
+
+
+def test_set_ai_provider_credential_unknown_provider_raises_validation_error() -> None:
+    client = _connected_client()
+    with pytest.raises(CoreValidationError, match="Provider not found"):
+        client.set_ai_provider_credential("does-not-exist", "sk-x")
+
+
+def test_memory_integration_round_trip_never_echoes_credential_value() -> None:
+    client = _connected_client()
+
+    integration = client.get_memory_integration()
+    assert integration["enabled"] is True
+    assert integration["credential"]["configured"] is True
+
+    written = client.set_memory_credential("sk-memory-secret")
+    assert "sk-memory-secret" not in str(written)
+
+    deleted = client.delete_memory_credential()
+    assert deleted["configured"] is False

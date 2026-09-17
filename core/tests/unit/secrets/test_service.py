@@ -2,6 +2,10 @@
 
 import pytest
 
+from sofias_assistant.secrets.environment_store import (
+    EnvironmentSecretStore,
+    LayeredSecretStore,
+)
 from sofias_assistant.secrets.models import SecretRef, SecretValue
 from sofias_assistant.secrets.service import SecretService
 
@@ -49,3 +53,25 @@ def test_service_uses_injected_store_for_set_get_delete_and_missing() -> None:
     assert service.delete(ref) is True
     assert service.get(ref) is None
     assert service.delete(ref) is False
+
+
+def test_describe_falls_back_to_two_state_for_a_plain_store() -> None:
+    store = InMemorySecretStore()
+    service = SecretService(store)
+    ref = SecretRef("provider/test")
+
+    assert service.describe(ref) == "missing"
+    service.set(ref, SecretValue("value"))
+    assert service.describe(ref) == "platform_store"
+
+
+def test_describe_delegates_to_a_layered_store() -> None:
+    ref = SecretRef("providers/openai/api-key")
+    fallback = InMemorySecretStore()
+    layered = LayeredSecretStore(
+        EnvironmentSecretStore({"LLM_API_KEY": "from-env"}, {"LLM_API_KEY": ref}),
+        fallback,
+    )
+    service = SecretService(layered)
+
+    assert service.describe(ref) == "environment"

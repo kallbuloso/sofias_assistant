@@ -26,6 +26,8 @@ from sofias_assistant.ai_config.service import (
     ProfileBindingInput,
     ProfileNotFoundError,
     ProfilePatch,
+    ProviderNotFoundError,
+    ProviderPatch,
 )
 from sofias_assistant.execution.audit import AuditService
 from sofias_assistant.persistence.database import (
@@ -420,3 +422,173 @@ async def test_no_secret_leakage_in_provider_repr_or_listing(tmp_path: Path) -> 
     assert provider.credential_ref is not None
     assert provider.credential_ref.identifier == "providers/fake/api-key"
     assert service.is_credential_configured(provider.credential_ref) is True
+
+
+@pytest.mark.asyncio
+async def test_update_provider_applies_enabled_and_base_url_and_republishes(
+    tmp_path: Path,
+) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    updated = await service.update_provider(
+        "fake",
+        ProviderPatch(base_url="https://fake.invalid/v2", enabled=False),
+    )
+
+    assert updated.base_url == "https://fake.invalid/v2"
+    assert updated.enabled is False
+    providers = await service.list_providers()
+    assert providers[0].base_url == "https://fake.invalid/v2"
+    assert providers[0].enabled is False
+    # A disabled provider makes its model ineligible: routing must reflect it.
+    decision = service.preview_routing(
+        "chat.general",
+        AIRequestRequirements(
+            required_capabilities=frozenset({Capability.TEXT_GENERATION}),
+            preferred_capabilities=frozenset(),
+            locality=DataLocality.CLOUD_ALLOWED,
+        ),
+    )
+    assert decision.route is None
+
+
+@pytest.mark.asyncio
+async def test_update_provider_rejects_unknown_provider_id(tmp_path: Path) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    with pytest.raises(ProviderNotFoundError):
+        await service.update_provider("does-not-exist", ProviderPatch(enabled=False))
+
+
+@pytest.mark.asyncio
+async def test_update_provider_rejects_an_unsafe_base_url(tmp_path: Path) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    with pytest.raises(AIConfigurationError):
+        await service.update_provider(
+            "fake", ProviderPatch(base_url="https://user:pass@fake.invalid")
+        )
+
+
+@pytest.mark.asyncio
+async def test_set_provider_credential_derives_ref_and_writes_through_secret_service(
+    tmp_path: Path,
+) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    status = await service.set_provider_credential("fake", SecretValue("sk-new"))
+
+    assert status.provider_id == "fake"
+    assert status.credential_ref == "providers/fake/api-key"
+    assert status.configured is True
+    assert status.effective_source == "platform_store"
+    assert status.writable_source == "platform_store"
+    assert status.shadowed is False
+
+
+@pytest.mark.asyncio
+async def test_set_provider_credential_rejects_unknown_provider_id(
+    tmp_path: Path,
+) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    with pytest.raises(ProviderNotFoundError):
+        await service.set_provider_credential("does-not-exist", SecretValue("sk-x"))
+
+
+@pytest.mark.asyncio
+async def test_delete_provider_credential_removes_the_platform_store_value(
+    tmp_path: Path,
+) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+    await service.set_provider_credential("fake", SecretValue("sk-new"))
+
+    status = await service.delete_provider_credential("fake")
+
+    assert status.configured is False
+    assert status.effective_source == "missing"
+
+
+@pytest.mark.asyncio
+async def test_delete_provider_credential_rejects_unknown_provider_id(
+    tmp_path: Path,
+) -> None:
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+
+    with pytest.raises(ProviderNotFoundError):
+        await service.delete_provider_credential("does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_provider_credential_write_never_reaches_snapshot_rebuild_lock(
+    tmp_path: Path,
+) -> None:
+    """Credential writes never invalidate the routing snapshot: adapters
+    resolve the secret through SecretService at call time, not at
+    snapshot-build time, so the previously published snapshot stays valid.
+    """
+
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())
+    snapshot_before = service.current_snapshot()
+
+    await service.set_provider_credential("fake", SecretValue("sk-new"))
+
+    assert service.current_snapshot() is snapshot_before
+
+
+@pytest.mark.asyncio
+async def test_attach_audit_enables_previously_silent_audit_emission(
+    tmp_path: Path,
+) -> None:
+    """`build_conversation_dependencies_factory` constructs this service
+
+    before the Core-composed `AuditService` exists; `attach_audit` is how
+    `SofiaCore._compose_conversation_runtime` binds it afterwards. Before
+    that call, Audit emission is a safe no-op rather than an error.
+    """
+
+    service = await _build_service(tmp_path)
+    await service.bootstrap(_canonical())  # audit is None: must not raise
+
+    url = f"sqlite+aiosqlite:///{(tmp_path / 'operational.sqlite').as_posix()}"
+    engine = create_async_engine(url)
+    session_factory = create_session_factory(engine)
+    audit = AuditService(session_factory)
+    service.attach_audit(audit)
+
+    await service.update_provider("fake", ProviderPatch(enabled=False))
+
+    entries = await audit.query()
+    assert any(entry.event_type == "AI_PROVIDER_CONFIG_CHANGED" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_provider_credential_audit_never_contains_secret_value(
+    tmp_path: Path,
+) -> None:
+    url = f"sqlite+aiosqlite:///{(tmp_path / 'operational.sqlite').as_posix()}"
+    await to_thread(upgrade_to_head, url)
+    engine = create_async_engine(url)
+    session_factory = create_session_factory(engine)
+    audit = AuditService(session_factory)
+    service = await _build_service(tmp_path, audit=audit)
+    await service.bootstrap(_canonical())
+
+    await service.set_provider_credential("fake", SecretValue("sk-super-secret-value"))
+    await service.delete_provider_credential("fake")
+
+    entries = await audit.query()
+    event_types = {entry.event_type for entry in entries}
+    assert "PROVIDER_CREDENTIAL_UPDATED" in event_types
+    assert "PROVIDER_CREDENTIAL_DELETED" in event_types
+    for entry in entries:
+        assert "sk-super-secret-value" not in str(entry.metadata)
+        assert "sk-super-secret-value" not in str(entry.authority_context)

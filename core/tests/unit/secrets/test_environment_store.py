@@ -120,6 +120,33 @@ def test_layered_store_writes_target_the_platform_store() -> None:
     assert fallback.delete_calls == [_LLM_REF]
 
 
+def test_layered_store_describe_reports_environment_when_present() -> None:
+    fallback = FakeSecretStore()
+    fallback.values[_LLM_REF] = SecretValue("from-platform-store")
+    environment_store = EnvironmentSecretStore(
+        {"LLM_API_KEY": "from-environment"}, _MAPPINGS
+    )
+    layered = LayeredSecretStore(environment_store, fallback)
+
+    assert layered.describe(_LLM_REF) == "environment"
+
+
+def test_layered_store_describe_reports_platform_store_when_only_durable() -> None:
+    fallback = FakeSecretStore()
+    fallback.values[_MEMORY_REF] = SecretValue("from-platform-store")
+    layered = LayeredSecretStore(EnvironmentSecretStore({}, _MAPPINGS), fallback)
+
+    assert layered.describe(_MEMORY_REF) == "platform_store"
+
+
+def test_layered_store_describe_reports_missing() -> None:
+    layered = LayeredSecretStore(
+        EnvironmentSecretStore({}, _MAPPINGS), FakeSecretStore()
+    )
+
+    assert layered.describe(_LLM_REF) == "missing"
+
+
 def test_secret_value_repr_never_leaks() -> None:
     store = EnvironmentSecretStore({"LLM_API_KEY": "sk-super-secret"}, _MAPPINGS)
 

@@ -5,8 +5,13 @@ from sofias_assistant.host.secret_bridge import (
     SOFIAS_MEMORY_API_KEY_ENVIRONMENT_VARIABLE,
     SOFIAS_MEMORY_API_KEY_REF,
     bootstrap_secret_mappings,
+    credential_write_status,
     describe_secret_source,
     provider_api_key_ref,
+)
+from sofias_assistant.secrets.environment_store import (
+    EnvironmentSecretStore,
+    LayeredSecretStore,
 )
 from sofias_assistant.secrets.models import SecretRef, SecretValue
 from sofias_assistant.secrets.service import SecretService
@@ -87,3 +92,34 @@ def test_describe_secret_source_reports_missing() -> None:
     )
 
     assert source == "missing"
+
+
+def test_credential_write_status_reports_fresh_platform_write() -> None:
+    ref = SecretRef("providers/openai/api-key")
+    service = SecretService(_FakeStore({ref: SecretValue("stored")}))
+
+    source, configured, shadowed = credential_write_status(ref, service)
+
+    assert (source, configured, shadowed) == ("platform_store", True, False)
+
+
+def test_credential_write_status_reports_shadowing_by_environment() -> None:
+    ref = SecretRef("providers/openai/api-key")
+    fallback = _FakeStore({ref: SecretValue("stored")})
+    environment = EnvironmentSecretStore(
+        {"LLM_API_KEY": "sk-real"}, {"LLM_API_KEY": ref}
+    )
+    service = SecretService(LayeredSecretStore(environment, fallback))
+
+    source, configured, shadowed = credential_write_status(ref, service)
+
+    assert (source, configured, shadowed) == ("environment", True, True)
+
+
+def test_credential_write_status_reports_missing_after_delete() -> None:
+    ref = SecretRef("providers/openai/api-key")
+    service = SecretService(_FakeStore())
+
+    source, configured, shadowed = credential_write_status(ref, service)
+
+    assert (source, configured, shadowed) == ("missing", False, False)
