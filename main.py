@@ -6,19 +6,54 @@ Usage:
 SAS-02 deliberately reuses the existing Desktop/Core implementation while
 removing build/dist/PyInstaller from the development critical path.
 
-The unpackaged Desktop supervisor already knows how to launch the Core with
-the current Python interpreter. SAS-03 will replace that temporary two-process
-transport path with the approved single-process SofiaApplication composition.
+The script automatically re-launches itself inside the project .venv created
+by setup.py, then exposes core/src to both the Desktop process and the
+temporary supervised Core child.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CORE_SRC = ROOT / "core" / "src"
+VENV_DIR = ROOT / ".venv"
+
+
+def _venv_python() -> Path:
+    if os.name == "nt":
+        return VENV_DIR / "Scripts" / "python.exe"
+    return VENV_DIR / "bin" / "python"
+
+
+def _running_inside_project_venv() -> bool:
+    try:
+        return Path(sys.prefix).resolve() == VENV_DIR.resolve()
+    except OSError:
+        return False
+
+
+def _run_in_project_venv() -> int | None:
+    """Re-launch through .venv when main.py was started with system Python."""
+
+    if _running_inside_project_venv():
+        return None
+
+    python = _venv_python()
+    if not python.is_file():
+        raise SystemExit(
+            "Project environment not found. Run 'py setup.py' first."
+        )
+
+    completed = subprocess.run(
+        [str(python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        check=False,
+        cwd=ROOT,
+    )
+    return completed.returncode
 
 
 def _prepare_source_path() -> None:
@@ -46,4 +81,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    relaunched = _run_in_project_venv()
+    if relaunched is not None:
+        raise SystemExit(relaunched)
     raise SystemExit(main())
