@@ -3,12 +3,13 @@
 Usage:
     py main.py
 
-SAS-02 deliberately reuses the existing Desktop/Core implementation while
-removing build/dist/PyInstaller from the development critical path.
-
 The script automatically re-launches itself inside the project .venv created
-by setup.py, then exposes core/src to both the Desktop process and the
-temporary supervised Core child.
+by setup.py and exposes core/src directly from the working tree.
+
+SAS-03A starts Sofia Core inside the same OS process as the Desktop. The
+existing loopback HTTP/WebSocket adapter remains temporarily available for
+dashboard/history/voice compatibility, while text Conversation creation and
+streaming bypass HTTP and call the Core runtime directly.
 
 For source-first human startup, a conservative default bootstrap model is
 provided only when LLM_MODEL is completely absent. Explicit user/environment
@@ -88,9 +89,12 @@ def main(argv: list[str] | None = None) -> int:
     _prepare_source_path()
     _prepare_source_bootstrap()
 
-    from sofias_assistant.client_app.__main__ import main as desktop_main
+    if argv:
+        raise SystemExit("source-first main.py does not accept runtime arguments yet")
 
-    return desktop_main(argv)
+    from sofias_assistant.client_app.in_process import run_source_desktop
+
+    return run_source_desktop()
 
 
 if __name__ == "__main__":
