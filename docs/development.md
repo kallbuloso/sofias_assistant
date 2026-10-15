@@ -1,0 +1,106 @@
+# Sofia's Assistant — Development
+
+**Status:** APPROVED  
+**Baseline date:** 2026-10-14
+
+## 1. Development principle
+
+Sofia's Assistant is source-first.
+
+A developer must be able to reach human validation without building an
+executable.
+
+Approved canonical flow:
+
+```powershell
+py setup.py
+py main.py
+```
+
+SAS-02 is responsible for making that flow real and reproducible.
+
+## 2. Dependency interfaces
+
+`requirements.txt` is the human-facing dependency installation interface.
+
+`pyproject.toml` may remain for package metadata, pytest, Ruff, mypy and
+other tooling. `uv` may remain an optional contributor tool, but it is not a
+conceptual prerequisite for running Sofia.
+
+## 3. Generated artifacts
+
+The following are never source of truth and must stay out of Git:
+
+```text
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+build/
+dist/
+*.egg-info/
+```
+
+## 4. Build policy
+
+Do not require PyInstaller or any release build to perform ordinary
+development, automated tests or human MVP validation.
+
+Packaging work is deferred until the MVP validation gate is explicitly closed.
+
+## 5. Quality
+
+Preserve behavior with focused tests.
+
+Existing contributor commands remain valid during migration where useful:
+
+```powershell
+cd core
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src tests
+uv run pytest
+```
+
+The source-first migration may add equivalent plain-Python/pip commands; it
+must not weaken the test baseline merely to simplify startup.
+
+## 6. Human validation
+
+Tests are evidence, not the product.
+
+A slice that changes user interaction is not complete until a human can prove
+the promised behavior in the relevant visual/runtime path.
+
+The immediate target is:
+
+```text
+setup
+  ↓
+main.py
+  ↓
+visual Sofia
+  ↓
+real conversation
+  ↓
+confirmation/tool flow
+  ↓
+observable result/error
+```
+
+## 7. Documentation rule
+
+Living documentation is authoritative.
+
+Keep:
+
+- `README.md` — what the project is and how to start;
+- `product/docs/Sofia's Assistant — Product Requirements Document.md` — product intent and requirements;
+- `docs/architecture.md` — current architecture;
+- `docs/security.md` — current security baseline;
+- `docs/development.md` — developer workflow.
+
+Historical ADRs, amendments, completed execution plans and gate ledgers belong
+to Git history, not the current documentation surface.
