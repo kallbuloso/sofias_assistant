@@ -9,16 +9,20 @@ runtime to an **APPROVED source-first modular-monolith baseline**.
 
 ## Current direction
 
-The target developer experience is intentionally simple:
+The source-first developer flow is now implemented:
 
 ```powershell
 py setup.py
 py main.py
 ```
 
-That flow is the next implementation slice. Until it lands, the existing
-`core/` package and its `uv` entry points remain as temporary compatibility
-paths.
+`setup.py` creates/updates `.venv` and installs only runtime dependencies from
+`requirements.txt`. `main.py` automatically re-launches through that project
+environment and starts Sofia from the working tree.
+
+The existing `core/` package and its `uv` entry points remain available as
+contributor compatibility paths while SAS-03 removes the temporary two-process
+Desktop/Core transport from the normal desktop runtime.
 
 The architectural target is one application process for normal desktop use:
 
@@ -79,8 +83,14 @@ Executor acts.
 
 ## Development today
 
-The legacy contributor workflow is still available while the source-first
-bootstrap is implemented:
+For normal source-first use:
+
+```powershell
+py setup.py
+py main.py
+```
+
+For contributor tooling, the existing workflow remains available:
 
 ```powershell
 cd core
