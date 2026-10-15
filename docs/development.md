@@ -17,11 +17,13 @@ py setup.py
 py main.py
 ```
 
-SAS-02 is responsible for making that flow real and reproducible.
+SAS-02 implements this flow. `setup.py` creates/updates the project `.venv`,
+installs `requirements.txt`, and `main.py` automatically uses that environment.
 
 ## 2. Dependency interfaces
 
-`requirements.txt` is the human-facing dependency installation interface.
+`requirements.txt` is the human-facing runtime dependency installation interface.
+It intentionally excludes release-only tooling such as PyInstaller.
 
 `pyproject.toml` may remain for package metadata, pytest, Ruff, mypy and
 other tooling. `uv` may remain an optional contributor tool, but it is not a
@@ -64,8 +66,8 @@ uv run mypy src tests
 uv run pytest
 ```
 
-The source-first migration may add equivalent plain-Python/pip commands; it
-must not weaken the test baseline merely to simplify startup.
+The source-first runtime is independent from those contributor commands; the
+migration must not weaken the test baseline merely to simplify startup.
 
 ## 6. Human validation
 
