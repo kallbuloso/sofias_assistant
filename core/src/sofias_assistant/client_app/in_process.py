@@ -20,7 +20,6 @@ from sofias_assistant.client_boundary.http_api import _conversation_event_to_rec
 from sofias_assistant.conversation.runtime import SendTextCommand
 from sofias_assistant.core.core import SofiaCore
 from sofias_assistant.host.runner import run
-from sofias_assistant.secrets.models import SecretValue
 
 _STREAM_END = object()
 
@@ -68,7 +67,6 @@ class InProcessRuntimeHost:
         )
         self._thread.start()
 
-        deadline = threading.Event()
         # Poll both events so an early startup failure does not wait the whole timeout.
         elapsed = 0.0
         interval = 0.05
@@ -78,8 +76,6 @@ class InProcessRuntimeHost:
             if self._stopped.is_set():
                 break
             elapsed += interval
-        deadline.set()
-
         if self._error is not None:
             raise RuntimeError("Sofia Core failed to start in-process") from self._error
         raise RuntimeError("Sofia Core did not become ready in time")
@@ -176,6 +172,32 @@ class InProcessRuntimeHost:
         )
         if exit_code != 0 and self._core is None:
             raise RuntimeError(f"in-process Core exited with code {exit_code}")
+
+
+def run_source_desktop() -> int:
+    """Run the source-first Desktop and Core inside one OS process."""
+
+    from sofias_assistant.client_app.qt_app import create_application
+
+    host = InProcessRuntimeHost()
+    host.start()
+    access = host.access
+    base_url = f"http://{access.host}:{access.port}"
+    credential = access.credential.reveal()
+
+    def api_factory(url: str, token: str) -> CoreApiClient:
+        return InProcessCoreApiClient(host, url, token)
+
+    try:
+        app, _window = create_application(
+            base_url,
+            credential,
+            runtime_session_id=host.runtime_session_id,
+            api_factory=api_factory,
+        )
+        return app.exec()
+    finally:
+        host.stop()
 
 
 class InProcessCoreApiClient(CoreApiClient):
