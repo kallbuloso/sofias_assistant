@@ -42,6 +42,26 @@ def test_main_exposes_core_source_to_current_and_child_process(monkeypatch) -> N
     assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == source
 
 
+def test_main_provides_default_bootstrap_model_when_unset(monkeypatch) -> None:
+    module = _load_module("source_first_main_default_model", ROOT / "main.py")
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    module._prepare_source_bootstrap()
+
+    assert os.environ["LLM_MODEL"] == module.DEFAULT_SOURCE_MODEL
+
+
+def test_main_preserves_explicit_model_configuration(monkeypatch) -> None:
+    module = _load_module("source_first_main_explicit_model", ROOT / "main.py")
+
+    monkeypatch.setenv("LLM_MODEL", "user-selected-model")
+
+    module._prepare_source_bootstrap()
+
+    assert os.environ["LLM_MODEL"] == "user-selected-model"
+
+
 def test_setup_uses_project_venv_and_requirements(monkeypatch, tmp_path) -> None:
     module = _load_module("source_first_setup", ROOT / "setup.py")
     calls: list[list[str]] = []
