@@ -72,7 +72,14 @@ class InProcessRuntimeHost:
         interval = 0.05
         while elapsed < timeout:
             if self._ready.wait(interval):
-                return
+                if self._error is not None:
+                    raise RuntimeError(
+                        "Sofia Core failed to start in-process"
+                    ) from self._error
+                if self._core is not None and self._access is not None:
+                    return
+                if self._stopped.is_set():
+                    break
             if self._stopped.is_set():
                 break
             elapsed += interval
