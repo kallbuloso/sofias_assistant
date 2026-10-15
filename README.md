@@ -1,107 +1,120 @@
 # Sofia's Assistant
 
-Sofia's Assistant is a local-first personal AI assistant under early development.
-The repository currently provides the implementation foundation: project metadata,
-the installable Python package, and its initial quality checks.
+Sofia's Assistant is a local-first, single-user personal AI assistant focused
+on real human use: text and realtime voice, persistent cognitive memory,
+tools, tasks, agents, proactive events and protected execution.
 
-The Product Requirements Document (PRD) and Architecture Decision Records (ADRs)
-are the project's architectural baseline.
+The project is moving from a previously implemented two-process Desktop/Core
+runtime to an **APPROVED source-first modular-monolith baseline**.
 
-## Requirements
+## Current direction
 
-- Python `>=3.13,<3.14`
-- [uv](https://docs.astral.sh/uv/)
+The target developer experience is intentionally simple:
 
-## Setup
+```powershell
+py setup.py
+py main.py
+```
+
+That flow is the next implementation slice. Until it lands, the existing
+`core/` package and its `uv` entry points remain as temporary compatibility
+paths.
+
+The architectural target is one application process for normal desktop use:
+
+```text
+SofiaApplication
+├── Desktop UI
+├── Conversation / Context
+├── AI routing
+├── Policy / Grants
+├── Tools / Tasks / Agents
+├── Memory
+├── Persistence
+├── Secrets
+└── Audit
+```
+
+A separate `SofiaCore.exe` is no longer part of the target architecture.
+
+## Product principles
+
+- local-first and single-user per installation;
+- provider-independent Sofia identity;
+- Sofias Memory as long-term cognitive-memory authority;
+- SQLite for operational persistence;
+- deterministic authorization before protected actions;
+- least privilege for Tools and Agents;
+- source-first development;
+- human validation before packaging.
+
+The core security invariant is:
+
+```text
+AI proposes.
+Runtime authorizes.
+Executor acts.
+```
+
+## Repository
+
+```text
+/
+├── README.md
+├── LICENSE
+├── CLAUDE.md
+├── docs/
+│   ├── architecture.md
+│   ├── development.md
+│   └── security.md
+├── product/
+│   └── docs/
+│       └── Sofia's Assistant — Product Requirements Document.md
+└── core/
+    ├── pyproject.toml
+    ├── .env.example
+    ├── src/
+    └── tests/
+```
+
+## Development today
+
+The legacy contributor workflow is still available while the source-first
+bootstrap is implemented:
 
 ```powershell
 cd core
 uv sync
-```
-
-## Run
-
-The standalone production Core host (`sofia-core`) starts Sofia Core as a
-real, persistent process independent from the Desktop Client, and binds an
-authenticated, loopback-only local API. It never exposes the LAN or the
-public internet.
-
-With an explicit `.env` file:
-
-```powershell
-cd core
-copy .env.example .env
-# edit .env: at minimum set LLM_MODEL, and either LLM_API_KEY or store the
-# key durably via `uv run python -m sofias_assistant.secrets set providers/openai/api-key`
-uv run sofia-core --env-file .env
-```
-
-Or entirely through the real process environment, with no `.env` file at
-all (`.env` is never loaded implicitly):
-
-```powershell
-cd core
-$env:LLM_MODEL = "gpt-4o-mini"
-$env:LLM_API_KEY = "sk-..."
-uv run sofia-core
-```
-
-`sofia-core` prints `READY` once the local API is listening, stays alive
-until Ctrl+C (or SIGINT/SIGTERM where supported), and then shuts down
-cleanly. It does not require the Desktop Client to be running.
-
-`uv run python -m sofias_assistant` remains available for printing the
-installed application identity and version only; it does not start Core.
-
-## Development configuration (Sofias Memory)
-
-Local, non-secret configuration lives in `core/.env` (git-ignored):
-
-```powershell
-cd core
-copy .env.example .env
-# edit .env if your Sofias Memory URL/timeouts differ from the defaults
-```
-
-The Sofias Memory API key is never stored in `.env`. Store it via the
-Secret CLI, which prompts interactively and never echoes or logs the value:
-
-```powershell
-uv run python -m sofias_assistant.secrets set integrations/sofias-memory/api-key
-uv run python -m sofias_assistant.secrets exists integrations/sofias-memory/api-key
-uv run python -m sofias_assistant.secrets delete integrations/sofias-memory/api-key
-```
-
-With `.env` configured and the key stored, the opt-in live Sofias Memory
-smoke can run against a real instance:
-
-```powershell
-uv run pytest tests/integration/memory/test_memory_live_smoke.py -v
-```
-
-It stays SKIPPED by default (including in CI) unless
-`SOFIAS_ASSISTANT_RUN_MEMORY_INTEGRATION_TESTS=1` is set in `.env` or the
-real environment.
-
-## Quality commands
-
-```powershell
-cd core
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src tests
 uv run pytest
 ```
 
-Format files with:
+Do not build executables merely to validate development changes.
 
-```powershell
-cd core
-uv run ruff format .
-```
+Packaging, installer work and a future single `SofiasAssistant.exe` are
+**deferred until the MVP is validated humanly**.
 
 ## Documentation
 
-- `product/docs/` — product requirements and engineering conventions.
-- `product/docs/adr/` — architectural decisions and amendments.
-- `core/docs/exec-plans/active/` — active technical backlog slices.
+Current authority:
+
+1. explicit user decision;
+2. Product Requirements Document;
+3. `docs/architecture.md`;
+4. `docs/security.md`;
+5. `docs/development.md`;
+6. implementation and tests.
+
+Historical ADRs, amendments, completed Slices and gate ledgers were removed
+from the current documentation surface and remain available through Git
+history.
+
+## License
+
+Sofia's Assistant is source-available under the **PolyForm Noncommercial
+License 1.0.0**.
+
+Non-commercial use, modification and redistribution are allowed subject to the
+license terms. Commercial use requires separate authorization from the
+licensor.
+
+See `LICENSE` for the official license reference.
