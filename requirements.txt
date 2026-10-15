@@ -1,0 +1,18 @@
+# Sofia's Assistant — source-first runtime dependencies
+#
+# Human-facing installation path:
+#   py -m pip install -r requirements.txt
+#
+# Release/packaging tooling is intentionally excluded. PyInstaller is not
+# required to run or validate Sofia from source.
+
+aiosqlite>=0.22,<1
+alembic>=1.19,<2
+fastapi>=0.141,<0.142
+httpx2>=2.12,<3
+openai>=3.8,<4
+PySide6>=6.8,<7
+sqlalchemy>=2.0,<2.1
+tzdata>=2025.2
+uvicorn>=0.52,<0.53
+websockets>=15,<16
