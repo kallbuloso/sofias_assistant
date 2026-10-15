@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -104,6 +105,7 @@ class ClientWorker(QObject):
         credential: str,
         runtime_session_id: UUID | None = None,
         *,
+        api_factory: Callable[[str, str], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
     ) -> None:
@@ -111,6 +113,7 @@ class ClientWorker(QObject):
         self._base_url = base_url
         self._credential = credential
         self._runtime_session_id = runtime_session_id
+        self._api_factory = api_factory or CoreApiClient
         self._service: ClientApplicationService | None = None
         self._voice: RealtimeVoiceConnection | None = None
         self._voice_status = VoiceState.IDLE
@@ -125,7 +128,7 @@ class ClientWorker(QObject):
         self._state(ConnectionState.CONNECTING)
         try:
             self._service = ClientApplicationService(
-                CoreApiClient(self._base_url, self._credential)
+                self._api_factory(self._base_url, self._credential)
             )
             snapshot = self._service.connect()
             self._publish(snapshot)
@@ -652,6 +655,7 @@ class DesktopController(QObject):
         *,
         auto_connect: bool = True,
         runtime_session_id: UUID | None = None,
+        api_factory: Callable[[str, str], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
     ):
@@ -661,6 +665,7 @@ class DesktopController(QObject):
             base_url,
             credential,
             runtime_session_id,
+            api_factory=api_factory,
             input_device_factory=input_device_factory,
             output_device_factory=output_device_factory,
         )
@@ -1403,6 +1408,7 @@ def create_application(
     *,
     auto_connect: bool = True,
     runtime_session_id: UUID | None = None,
+    api_factory: Callable[[str, str], CoreApiClient] | None = None,
 ) -> tuple[QApplication, MainWindow]:
     current = QApplication.instance()
     app = current if isinstance(current, QApplication) else QApplication([])
@@ -1414,6 +1420,7 @@ def create_application(
         credential,
         auto_connect=auto_connect,
         runtime_session_id=runtime_session_id,
+        api_factory=api_factory,
     )
     window = MainWindow(controller, base_url)
     app.aboutToQuit.connect(controller.close)
