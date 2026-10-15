@@ -9,6 +9,10 @@ removing build/dist/PyInstaller from the development critical path.
 The script automatically re-launches itself inside the project .venv created
 by setup.py, then exposes core/src to both the Desktop process and the
 temporary supervised Core child.
+
+For source-first human startup, a conservative default bootstrap model is
+provided only when LLM_MODEL is completely absent. Explicit user/environment
+configuration always wins.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CORE_SRC = ROOT / "core" / "src"
 VENV_DIR = ROOT / ".venv"
+DEFAULT_SOURCE_MODEL = "gpt-4o-mini"
 
 
 def _venv_python() -> Path:
@@ -72,8 +77,16 @@ def _prepare_source_path() -> None:
         os.environ["PYTHONPATH"] = os.pathsep.join([source, *paths])
 
 
+def _prepare_source_bootstrap() -> None:
+    """Provide only the minimum bootstrap needed for a visual source run."""
+
+    if "LLM_MODEL" not in os.environ:
+        os.environ["LLM_MODEL"] = DEFAULT_SOURCE_MODEL
+
+
 def main(argv: list[str] | None = None) -> int:
     _prepare_source_path()
+    _prepare_source_bootstrap()
 
     from sofias_assistant.client_app.__main__ import main as desktop_main
 
