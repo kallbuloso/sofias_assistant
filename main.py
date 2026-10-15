@@ -19,7 +19,6 @@ configuration always wins.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -54,12 +53,12 @@ def _run_in_project_venv() -> int | None:
             "Project environment not found. Run 'py setup.py' first."
         )
 
-    completed = subprocess.run(
+    os.chdir(ROOT)
+    os.execv(
+        str(python),
         [str(python), str(Path(__file__).resolve()), *sys.argv[1:]],
-        check=False,
-        cwd=ROOT,
     )
-    return completed.returncode
+    raise AssertionError("os.execv returned unexpectedly")
 
 
 def _prepare_source_path() -> None:
