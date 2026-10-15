@@ -114,11 +114,13 @@ Uma Tool não deverá ser substituída desnecessariamente por um Agent.
 
 Memórias persistentes deverão preservar origem e significado cognitivo.
 
-## 4.8 UI is a client
+## 4.8 UI is an adapter
 
 A interface gráfica não será a autoridade do sistema.
 
-O Sofia Core deverá continuar operacional independentemente da janela principal.
+No runtime desktop canônico, UI e aplicação poderão operar no mesmo processo,
+desde que a UI não assuma autoridade sobre Policy, persistence, routing,
+Secrets ou execução de Tools.
 
 ## 4.9 Plugins are untrusted by default
 
@@ -783,43 +785,46 @@ Execution
 
 # 18. Runtime e Client Architecture
 
-## 18.1 Sofia Core
+## 18.1 Modular monolith
 
-O MVP utilizará inicialmente uma arquitetura de modular monolith.
+O runtime desktop canônico será um modular monolith executado como uma única
+aplicação.
 
-O Core poderá utilizar subprocessos ou workers isolados quando houver justificativa de segurança ou estabilidade.
+A composição interna deverá preservar boundaries claros entre UI, domínio,
+Policy, execution, persistence, Memory, Secrets e Audit.
 
-## 18.2 Core independente
+Subprocessos ou workers isolados poderão existir quando houver justificativa
+concreta de segurança, estabilidade ou operação, mas não serão requisito para
+a comunicação normal entre UI e aplicação.
 
-Sofia Core continuará executando independentemente da janela gráfica.
+## 18.2 Source-first
 
-Isso permitirá:
+O desenvolvimento deverá permitir execução direta do código-fonte sem build de
+executável como pré-requisito.
 
-- tasks em background;
-- reminders;
-- wake word;
-- monitoring;
-- proatividade;
-- event processing.
+O fluxo canônico aprovado é:
 
-## 18.3 UI como Client
+```text
+py setup.py
+py main.py
+```
 
-A interface Desktop será cliente do Core.
+## 18.3 UI como adapter
+
+A interface Desktop é um adapter da aplicação e não sua autoridade.
 
 A lógica de negócio não dependerá diretamente da UI.
 
-A arquitetura deverá permitir futuros clients como:
+A arquitetura poderá permitir adapters futuros como CLI, Web, mobile
+companion ou API remota sem exigir que o Desktop local atravesse HTTP/WS.
 
-- CLI;
-- Web;
-- mobile companion;
-- remote client.
+## 18.4 API opcional
 
-## 18.4 Interface local
+HTTP/WebSocket/IPC podem existir como adapters opcionais para integrações ou
+clients externos quando houver necessidade concreta.
 
-Deverá existir uma interface formal de comunicação entre clients e Sofia Core.
-
-A tecnologia concreta será decidida em ADR.
+A API local não é boundary obrigatória entre a UI Desktop e o runtime
+canônico.
 
 ---
 
@@ -1011,15 +1016,18 @@ O MVP deverá possuir um Agent experimental para validar:
 
 O Agent específico será definido durante detalhamento técnico.
 
-## 24.10 Desktop Client
+## 24.10 Desktop Interface
 
 O MVP deverá possuir inicialmente:
 
-- tray;
-- chat;
+- chat visual utilizável;
 - estado da voz;
 - interface de confirmação;
-- visualização básica de Tasks/status.
+- visualização básica de Tasks/status;
+- erros e estado operacional observáveis.
+
+Tray poderá permanecer como conveniência, mas não define a arquitetura de
+processos.
 
 ---
 
@@ -1171,7 +1179,11 @@ A integração será realizada através de contrato explícito.
 
 ## NFR-008 — UI independence
 
-O Sofia Core deverá funcionar sem interface gráfica ativa.
+O domínio e os serviços de aplicação não deverão depender de widgets ou estado
+visual para manter sua lógica e persistência.
+
+Isso não exige processo separado: o runtime desktop canônico poderá hospedar UI
+e aplicação no mesmo processo.
 
 ## NFR-009 — Auditability
 
@@ -1225,14 +1237,13 @@ O sistema utiliza providers diferentes para capabilities diferentes sem alterar 
 
 ---
 
-# 29. Questões Explicitamente Transferidas para ADRs
+# 29. Questões Técnicas Deferidas
 
-O PRD não decide:
+O PRD não decide, enquanto não houver necessidade concreta:
 
-- framework da API local;
-- HTTP/WebSocket/socket/IPC concreto;
-- desktop shell;
-- Tauri ou alternativa;
+- framework de API opcional;
+- HTTP/WebSocket/socket/IPC para adapters externos;
+- detalhes finais do desktop shell;
 - ORM;
 - biblioteca de migrations;
 - Event Bus implementation;
