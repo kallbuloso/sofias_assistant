@@ -93,7 +93,6 @@ def test_main_uses_sofia_application_root() -> None:
     assert "host.runner" not in main_text
 
 
-
 def test_application_adapter_close_is_local_and_nonblocking() -> None:
     application = _FakeApplication()
     http = _UnusedHttp()
