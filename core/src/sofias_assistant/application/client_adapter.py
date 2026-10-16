@@ -47,6 +47,20 @@ class ApplicationCoreApiClient(CoreApiClient):
         )
         self._application = application
 
+    def close(self) -> None:
+        """Close Desktop transport state without a shutdown-time HTTP round trip.
+
+        The canonical Desktop and runtime share one application lifecycle. The
+        temporary compatibility boundary is torn down by SofiaApplication, so
+        deleting the client session over HTTP during Qt shutdown is unnecessary
+        and can keep the worker thread alive until the HTTP timeout expires.
+        """
+
+        self.session_id = None
+        close = getattr(self._http, "close", None)
+        if close is not None:
+            close()
+
     def create_conversation(self) -> UUID:
         conversation = self._application.call(
             self._application.core.conversation_runtime.create_conversation()
