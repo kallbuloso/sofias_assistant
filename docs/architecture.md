@@ -180,20 +180,23 @@ tests. Repository-root Python environments or caches are invalid local state.
 Ordinary development and human validation do not use PyInstaller, `build/`,
 `dist/` or prebuilt executables.
 
-## 7. Legacy topology
+## 7. Runtime migration state
 
-The repository currently contains a previously implemented two-process
-Desktop/Core topology with authenticated loopback HTTP/WebSocket transport.
+`core/main.py` now enters `SofiaApplication`, which owns the normal Desktop
+lifecycle and the existing runtime services in one Python application.
 
-That implementation is valid historical work but no longer defines the target
-runtime topology.
+The former process-supervision path is no longer on the canonical startup path.
+A loopback HTTP/WebSocket boundary still exists temporarily inside
+`SofiaApplication` as a compatibility adapter for Desktop surfaces not yet
+migrated to direct application services.
 
-During migration:
+During the remaining SAS-03 migration:
 
 - preserve domain behavior and security invariants;
 - avoid deleting useful services merely because their transport changes;
-- remove process supervision and localhost transport from the Desktop critical
-  path only when an equivalent in-process application path is working;
+- move Desktop surfaces from the compatibility boundary to application services;
+- remove localhost transport from the Desktop critical path once its last
+  consumer is migrated;
 - keep an optional API adapter only where it provides concrete value.
 
 ## 8. MVP validation gate
