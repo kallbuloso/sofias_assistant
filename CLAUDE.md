@@ -26,17 +26,20 @@ specifically requires historical evidence.
 
 The approved target is a **source-first modular monolith**.
 
-Canonical developer flow to implement:
+Canonical developer flow:
 
 ```powershell
+cd core
 py setup.py
 py main.py
 ```
 
+`core/` is the only Python application root.
+
 Normal desktop use must run through one application composition root.
 
-A separate `SofiaCore.exe` and build-first development are not target
-architecture.
+Native executable packaging is not target architecture. Do not introduce
+PyInstaller, `.exe` build flows, `build/` or `dist/` as product paths.
 
 The existing two-process Desktop/Core implementation is migration input, not
 the authority for future topology.
@@ -59,7 +62,7 @@ process topology changes.
 - Recovery does not blindly retry uncertain side effects.
 - Audit never persists hidden chain-of-thought or raw credentials.
 - LOCAL_ONLY data never silently falls back to cloud execution.
-- Packaging remains deferred until human MVP validation.
+- The product runs from Python source; native executable packaging is not a target.
 
 ## Engineering behavior
 
@@ -91,11 +94,16 @@ SAS-01 Repository Cleaner & License
   ↓
 SAS-02 Source-First Bootstrap
   ↓
-SAS-03 Single-Process Application
+SAS-02B Application Root Consolidation
   ↓
-SAS-04 Human Validation Interface
+SAS-03 Native Python Application Runtime
   ↓
-SAS-05 MVP Validation
+SAS-04 Sofia Desktop Experience
+  ↓
+SAS-05 Cross-platform Baseline
+  ↓
+MVP Human Validation
 ```
 
-Do not start release packaging before SAS-05 is explicitly closed.
+Do not add a native executable packaging track unless the user explicitly changes
+the approved product direction.
