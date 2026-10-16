@@ -805,6 +805,7 @@ executável como pré-requisito.
 O fluxo canônico aprovado é:
 
 ```text
+cd core
 py setup.py
 py main.py
 ```
