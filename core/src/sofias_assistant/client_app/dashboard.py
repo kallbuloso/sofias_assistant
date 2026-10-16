@@ -3,7 +3,7 @@
 Every widget here is presentation + user-intent only. It renders whatever
 `ClientWorker.ai_dashboard_ready`/`routing_preview_ready` last published and
 emits `DesktopController.request_*` signals for writes; it never talks to
-`CoreApiClient` directly, never decides routing, and never persists
+`SofiaApplication` services directly, never decides routing, and never persists
 provider/model/profile/secret state locally (Desktop/Core Interaction
 Contract v1 SS20/SS43-SS44). QSettings is not touched here: nothing on this
 page is a Desktop-local preference.
