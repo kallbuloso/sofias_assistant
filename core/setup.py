@@ -19,16 +19,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
 REQUIREMENTS = ROOT / "requirements.txt"
-SUPPORTED_MAJOR = 3
-SUPPORTED_MINOR = 13
+MIN_PYTHON = (3, 13)
+MAX_PYTHON_EXCLUSIVE = (3, 15)
 
 
 def _check_python() -> None:
     current = sys.version_info
-    if (current.major, current.minor) != (SUPPORTED_MAJOR, SUPPORTED_MINOR):
+    version = (current.major, current.minor)
+    if not (MIN_PYTHON <= version < MAX_PYTHON_EXCLUSIVE):
         raise SystemExit(
-            "Sofia's Assistant currently requires Python "
-            f"{SUPPORTED_MAJOR}.{SUPPORTED_MINOR}.x; "
+            "Sofia's Assistant currently supports Python 3.13.x or 3.14.x; "
             f"detected {current.major}.{current.minor}.{current.micro}."
         )
 
