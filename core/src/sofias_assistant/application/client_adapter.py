@@ -7,7 +7,7 @@ HTTP boundary. Conversation creation and text streaming are direct.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sofias_assistant.client_app.api import CoreApiClient
