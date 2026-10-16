@@ -34,6 +34,9 @@ class FakeApi:
         self.cancel_calls: list[UUID] = []
         self.turns_page: dict[str, Any] = {"turns": [], "has_older": False}
         self.stream_should_fail = False
+        self.stream_events: list[dict[str, Any]] = [
+            {"type": "text_delta", "text": "hi"}
+        ]
         self.realtime_connection: Any = None
 
     def connect(self) -> dict[str, Any]:
@@ -55,7 +58,7 @@ class FakeApi:
     def stream_text(self, conversation_id, text, *, locality, cloud_context_eligible):
         if self.stream_should_fail:
             raise RuntimeError("transport dropped")
-        return iter([{"type": "text_delta", "text": "hi"}])
+        return iter(self.stream_events)
 
     def cancel_task(self, task_id: UUID) -> dict[str, Any]:
         self.cancel_calls.append(task_id)
@@ -127,6 +130,54 @@ def test_send_text_failure_recovers_without_resending(
 
     assert len(recovered) == 1
     assert recovered[0]["turns"][0]["assistant_text"] == "hi there"
+
+
+
+def test_send_text_surfaces_safe_turn_failure_details(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    api.stream_events = [
+        {
+            "type": "turn_failed",
+            "error_code": "authentication_error",
+            "error_message": "OpenAI authentication failed",
+        }
+    ]
+    worker = _worker_with_service(api)
+    failures: list[tuple[str, str]] = []
+    worker.conversation_failed.connect(
+        lambda code, message: failures.append((code, message))
+    )
+
+    worker.send_text("hello", "cloud_allowed", False)
+
+    assert failures == [
+        ("authentication_error", "OpenAI authentication failed")
+    ]
+
+
+def test_send_text_local_only_routing_failure_is_actionable(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    api.stream_events = [
+        {
+            "type": "turn_failed",
+            "error_code": "routing_error",
+            "error_message": "No compatible text model is available",
+        }
+    ]
+    worker = _worker_with_service(api)
+    failures: list[tuple[str, str]] = []
+    worker.conversation_failed.connect(
+        lambda code, message: failures.append((code, message))
+    )
+
+    worker.send_text("hello", "local_only", False)
+
+    assert failures[0][0] == "routing_error"
+    assert "Allow cloud" in failures[0][1]
 
 
 def test_handle_voice_event_assistant_audio_chunk_writes_to_output(
