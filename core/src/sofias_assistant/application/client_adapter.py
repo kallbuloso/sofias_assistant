@@ -7,13 +7,24 @@ HTTP boundary. Conversation creation and text streaming are direct.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from sofias_assistant.client_app.api import CoreApiClient
 
-if TYPE_CHECKING:
-    from sofias_assistant.application.app import SofiaApplication
+class ApplicationRuntime(Protocol):
+    core: Any
+
+    def call(self, coroutine: Any, *, timeout: float = 60.0) -> Any: ...
+
+    def stream_text(
+        self,
+        conversation_id: UUID,
+        text: str,
+        *,
+        locality: str,
+        cloud_context_eligible: bool,
+    ) -> Iterator[dict[str, Any]]: ...
 
 
 class ApplicationCoreApiClient(CoreApiClient):
@@ -21,7 +32,7 @@ class ApplicationCoreApiClient(CoreApiClient):
 
     def __init__(
         self,
-        application: SofiaApplication,
+        application: ApplicationRuntime,
         base_url: str,
         credential: str,
         *,
