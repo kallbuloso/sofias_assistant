@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -10,10 +11,32 @@ from sofias_assistant.application.client_adapter import ApplicationCoreApiClient
 CORE_ROOT = Path(__file__).resolve().parents[3]
 
 
+class _FakeDesktop:
+    def __init__(self) -> None:
+        self.session_id = uuid4()
+        self.sync_calls = 0
+
+    async def sync(self):
+        self.sync_calls += 1
+        return {
+            "core": {
+                "state": "running",
+                "health": {"status": "healthy", "components": []},
+            },
+            "notifications": [],
+            "tasks": [],
+        }
+
+
 class _FakeApplication:
     def __init__(self) -> None:
         self.conversation_id = uuid4()
         self.stream_calls: list[tuple[UUID, str, str, bool]] = []
+        self.desktop = _FakeDesktop()
+
+    def call(self, coroutine, *, timeout: float = 60.0):
+        del timeout
+        return asyncio.run(coroutine)
 
     def create_conversation(self) -> UUID:
         return self.conversation_id
@@ -109,3 +132,20 @@ def test_application_adapter_close_is_local_and_nonblocking() -> None:
     assert client.session_id is None
     assert http.closed is True
     assert http.delete_calls == 0
+
+
+def test_application_adapter_connects_without_http() -> None:
+    application = _FakeApplication()
+    http = _UnusedHttp()
+    client = ApplicationCoreApiClient(
+        application,
+        "http://127.0.0.1:8989",
+        "test-credential",
+        http_client=http,
+    )
+
+    payload = client.connect()
+
+    assert payload["core"]["state"] == "running"
+    assert application.desktop.sync_calls == 1
+    assert client.session_id == application.desktop.session_id
