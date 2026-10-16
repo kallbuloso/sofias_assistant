@@ -507,12 +507,11 @@ class ClientWorker(QObject):
 
     # -- AI configuration / Memory integration (Gate I17) ----------------
     #
-    # These bypass `ClientApplicationService` and call `CoreApiClient`
-    # directly, matching the existing `start_voice`/`service.api.realtime()`
-    # precedent: the service layer only wraps Conversation/Task/Notification
-    # orchestration, while transport-shaped reads/writes go straight through
-    # the authenticated `CoreApiClient`. A write never replays automatically
-    # on failure (Contract v1 SS21); the caller must re-trigger explicitly.
+    # These bypass `ClientApplicationService` but now resolve through the
+    # native SofiaApplication adapter. Only realtime voice still uses the
+    # temporary authenticated localhost compatibility boundary (SAS-03D).
+    # A write never replays automatically on failure (Contract v1 SS21);
+    # the caller must re-trigger explicitly.
 
     def _ai_dashboard_snapshot(self) -> dict[str, Any]:
         service = self._service
