@@ -8,6 +8,7 @@ the durable error category/message already owned by the Conversation runtime.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from uuid import UUID
 
 from sofias_assistant.conversation.events import (
     ConversationStreamEvent,
@@ -19,7 +20,10 @@ from sofias_assistant.conversation.events import (
     ConversationTurnStarted,
     ConversationUsageUpdated,
 )
-from sofias_assistant.conversation.runtime import SendTextCommand, TextConversationRuntime
+from sofias_assistant.conversation.runtime import (
+    SendTextCommand,
+    TextConversationRuntime,
+)
 
 
 class ConversationService:
@@ -28,7 +32,7 @@ class ConversationService:
     def __init__(self, runtime: TextConversationRuntime) -> None:
         self._runtime = runtime
 
-    async def create_conversation_id(self):
+    async def create_conversation_id(self) -> UUID:
         conversation = await self._runtime.create_conversation()
         return conversation.id
 
@@ -81,7 +85,9 @@ def _to_ui_record(event: ConversationStreamEvent) -> dict[str, object]:
             "conversation_id": event.conversation.id,
             "turn_id": event.turn.id,
             "error_code": event.turn.error_category or "conversation_failed",
-            "error_message": event.turn.error_message or "Conversation turn failed",
+            "error_message": (
+                event.turn.error_message or "Conversation turn failed"
+            ),
         }
     if isinstance(event, ConversationTurnInterrupted):
         return {
@@ -89,6 +95,8 @@ def _to_ui_record(event: ConversationStreamEvent) -> dict[str, object]:
             "conversation_id": event.conversation.id,
             "turn_id": event.turn.id,
             "error_code": event.turn.error_category or "conversation_interrupted",
-            "error_message": event.turn.error_message or "Conversation turn interrupted",
+            "error_message": (
+                event.turn.error_message or "Conversation turn interrupted"
+            ),
         }
     raise AssertionError(f"Unhandled conversation event: {type(event).__name__}")
