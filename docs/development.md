@@ -20,7 +20,8 @@ py main.py
 
 `core/` is the only Python project root. `setup.py` creates/updates
 `core/.venv`, installs `core/requirements.txt`, and `main.py` uses that
-environment.
+environment. Supported runtimes are CPython 3.13.x and 3.14.x; the current
+repository baseline uses Python 3.14.
 
 ## 2. Dependency interfaces
 
