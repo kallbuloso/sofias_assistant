@@ -95,9 +95,10 @@ SofiaApplication
 visual Sofia
 ```
 
-The remaining SAS-03 work migrates Desktop capabilities away from the temporary
-loopback compatibility adapter, beginning with the real conversation path and
-observable error handling.
+Conversation, history, tasks, confirmations, notifications, health, AI
+configuration and Memory integration now resolve through native application
+services. Realtime voice remains the only Desktop feature using the temporary
+loopback compatibility adapter and is the focus of SAS-03D.
 
 ## 7. Documentation rule
 
