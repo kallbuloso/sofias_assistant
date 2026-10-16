@@ -507,9 +507,9 @@ class ClientWorker(QObject):
 
     # -- AI configuration / Memory integration (Gate I17) ----------------
     #
-    # These bypass `ClientApplicationService` but now resolve through the
-    # native SofiaApplication adapter. Only realtime voice still uses the
-    # temporary authenticated localhost compatibility boundary (SAS-03D).
+    # These bypass `ClientApplicationService` but resolve through the
+    # native SofiaApplication adapter. Realtime voice is native as of SAS-03D;
+    # the Desktop no longer depends on localhost HTTP/WebSocket transport.
     # A write never replays automatically on failure (Contract v1 SS21);
     # the caller must re-trigger explicitly.
 
