@@ -182,6 +182,13 @@ class ClientWorker(QObject):
                             f"{message}. Privacy is set to Local only; choose "
                             "Sofia → Privacy… → Allow cloud or configure a local model."
                         )
+                    elif code == "context_locality_error":
+                        message = (
+                            f"{message}. The selected model runs in the cloud, but "
+                            "this turn is not marked as cloud-context eligible. Open "
+                            "Sofia → Privacy…, choose Allow cloud (or Prefer cloud) "
+                            "and enable cloud context for this conversation."
+                        )
                     print(
                         f"Sofia conversation failed [{code}]: {message}",
                         file=sys.stderr,
@@ -795,7 +802,8 @@ class PrivacyPreferenceDialog(QDialog):
         self._locality.setCurrentIndex(_LOCALITY_WIRE_VALUES.index(preference.locality))
         form.addRow("Inference location", self._locality)
         self._cloud_context = QCheckBox(
-            "Allow cognitive memory/context to be sent to cloud models"
+            "Allow this conversation's messages and cognitive context to be sent "
+            "to cloud models"
         )
         self._cloud_context.setChecked(preference.cloud_context_eligible)
         form.addRow(self._cloud_context)
