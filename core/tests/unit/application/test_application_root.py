@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from sofias_assistant.application.client_adapter import ApplicationCoreApiClient
@@ -12,25 +10,13 @@ from sofias_assistant.application.client_adapter import ApplicationCoreApiClient
 CORE_ROOT = Path(__file__).resolve().parents[3]
 
 
-class _FakeConversationRuntime:
-    def __init__(self, conversation_id: UUID) -> None:
-        self.conversation_id = conversation_id
-
-    async def create_conversation(self):
-        return SimpleNamespace(id=self.conversation_id)
-
-
 class _FakeApplication:
     def __init__(self) -> None:
         self.conversation_id = uuid4()
-        self.core = SimpleNamespace(
-            conversation_runtime=_FakeConversationRuntime(self.conversation_id)
-        )
         self.stream_calls: list[tuple[UUID, str, str, bool]] = []
 
-    def call(self, coroutine, *, timeout: float = 60.0):
-        del timeout
-        return asyncio.run(coroutine)
+    def create_conversation(self) -> UUID:
+        return self.conversation_id
 
     def stream_text(
         self,
