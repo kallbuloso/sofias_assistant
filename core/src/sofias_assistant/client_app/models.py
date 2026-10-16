@@ -177,12 +177,12 @@ class ClientSnapshot:
 
 
 _HEALTH_COMPONENTS = (
-    ("core", "Core"),
-    ("ai-provider", "AI provider"),
-    ("realtime", "Realtime"),
-    ("scheduler", "Scheduler"),
-    ("notifications", "Notifications"),
-    ("memory", "Memory"),
+    (("core",), "Core"),
+    (("llm-provider", "ai-provider"), "AI provider"),
+    (("realtime",), "Realtime"),
+    (("scheduler",), "Scheduler"),
+    (("notifications",), "Notifications"),
+    (("sofias-memory", "memory"), "Memory"),
 )
 
 
@@ -197,8 +197,8 @@ def health_items(core_payload: dict[str, Any]) -> tuple[HealthItem, ...]:
         if isinstance(item, dict)
     }
     result: list[HealthItem] = []
-    for key, label in _HEALTH_COMPONENTS:
-        if key == "core":
+    for keys, label in _HEALTH_COMPONENTS:
+        if "core" in keys:
             result.append(
                 HealthItem(
                     label,
@@ -207,10 +207,12 @@ def health_items(core_payload: dict[str, Any]) -> tuple[HealthItem, ...]:
                 )
             )
             continue
-        item = observed.get(key)
+        item = next((observed.get(key) for key in keys if key in observed), None)
         if item is None:
             detail = (
-                "Not configured" if key in {"ai-provider", "memory"} else "No probe"
+                "Not configured"
+                if any(key in {"llm-provider", "ai-provider", "sofias-memory", "memory"} for key in keys)
+                else "No probe"
             )
             result.append(HealthItem(label, "unavailable", detail))
         else:
@@ -228,11 +230,8 @@ def snapshot_from_wire(
     tasks: list[dict[str, Any]],
 ) -> ClientSnapshot:
     core_state = str(core_payload.get("state", "unknown"))
-    aggregate = str((core_payload.get("health") or {}).get("status", "unknown"))
     connection = (
         ConnectionState.CONNECTED
-        if core_state == "running" and aggregate == "healthy"
-        else ConnectionState.DEGRADED
         if core_state == "running"
         else ConnectionState.DISCONNECTED
     )
