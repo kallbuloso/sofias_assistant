@@ -28,15 +28,68 @@ class _FakeDesktop:
         }
 
 
+class _FakeVoice:
+    def __init__(self) -> None:
+        self.session_id = uuid4()
+        self.interaction_id = uuid4()
+        self.open_calls: list[tuple[UUID, str, bool]] = []
+        self.audio: list[bytes] = []
+        self.commits: list[UUID] = []
+        self.interrupts: list[tuple[UUID, UUID]] = []
+        self.cancels: list[tuple[UUID, UUID]] = []
+        self.closes: list[UUID] = []
+
+    async def open(
+        self,
+        conversation_id: UUID,
+        *,
+        locality: str,
+        cloud_context_eligible: bool,
+    ) -> UUID:
+        self.open_calls.append(
+            (conversation_id, locality, cloud_context_eligible)
+        )
+        return self.session_id
+
+    async def start(self, session_id: UUID) -> UUID:
+        assert session_id == self.session_id
+        return self.interaction_id
+
+    async def send_audio(self, session_id: UUID, audio: bytes) -> None:
+        assert session_id == self.session_id
+        self.audio.append(audio)
+
+    async def commit(self, session_id: UUID) -> None:
+        self.commits.append(session_id)
+
+    async def interrupt(self, session_id: UUID, interaction_id: UUID) -> None:
+        self.interrupts.append((session_id, interaction_id))
+
+    async def cancel(self, session_id: UUID, interaction_id: UUID) -> None:
+        self.cancels.append((session_id, interaction_id))
+
+    async def close(self, session_id: UUID) -> None:
+        self.closes.append(session_id)
+
+
 class _FakeApplication:
     def __init__(self) -> None:
         self.conversation_id = uuid4()
         self.stream_calls: list[tuple[UUID, str, str, bool]] = []
         self.desktop = _FakeDesktop()
+        self.voice = _FakeVoice()
+        self.voice_events = [
+            {"type": "assistant_audio_chunk", "audio": b"\x01\x02"},
+            {"type": "session.closed"},
+        ]
 
     def call(self, coroutine, *, timeout: float = 60.0):
         del timeout
         return asyncio.run(coroutine)
+
+    def stream_voice_events(self, session_id: UUID):
+        assert session_id == self.voice.session_id
+        yield from self.voice_events
 
     def create_conversation(self) -> UUID:
         return self.conversation_id
@@ -149,3 +202,38 @@ def test_application_adapter_connects_without_http() -> None:
     assert payload["core"]["state"] == "running"
     assert application.desktop.sync_calls == 1
     assert client.session_id == application.desktop.session_id
+
+
+
+def test_realtime_voice_uses_native_application_service() -> None:
+    application = _FakeApplication()
+    client = ApplicationCoreApiClient(
+        application,
+        "http://127.0.0.1:8989",
+        "test-credential",
+        http_client=_UnusedHttp(),
+    )
+
+    voice = client.realtime()
+    voice.open(
+        application.conversation_id,
+        locality="cloud_allowed",
+        cloud_context_eligible=True,
+    )
+    interaction_id = voice.start()
+    voice.send_audio(b"\x10\x20")
+    events = list(voice.pump_events())
+    voice.commit()
+    voice.stop()
+
+    assert interaction_id == application.voice.interaction_id
+    assert application.voice.open_calls == [
+        (application.conversation_id, "cloud_allowed", True)
+    ]
+    assert application.voice.audio == [b"\x10\x20"]
+    assert application.voice.commits == [application.voice.session_id]
+    assert application.voice.closes == [application.voice.session_id]
+    assert events == [
+        {"type": "assistant_audio_chunk", "audio": b"\x01\x02"},
+        {"type": "session.closed"},
+    ]
