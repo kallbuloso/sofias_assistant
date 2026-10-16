@@ -132,7 +132,6 @@ def test_send_text_failure_recovers_without_resending(
     assert recovered[0]["turns"][0]["assistant_text"] == "hi there"
 
 
-
 def test_send_text_surfaces_safe_turn_failure_details(
     qapplication: QApplication,
 ) -> None:
