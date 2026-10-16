@@ -13,9 +13,7 @@ from uuid import UUID
 from sofias_assistant.client_app.api import CoreApiClient
 
 class ApplicationRuntime(Protocol):
-    core: Any
-
-    def call(self, coroutine: Any, *, timeout: float = 60.0) -> Any: ...
+    def create_conversation(self) -> UUID: ...
 
     def stream_text(
         self,
@@ -62,10 +60,7 @@ class ApplicationCoreApiClient(CoreApiClient):
             close()
 
     def create_conversation(self) -> UUID:
-        conversation = self._application.call(
-            self._application.core.conversation_runtime.create_conversation()
-        )
-        return conversation.id
+        return self._application.create_conversation()
 
     def stream_text(
         self,
