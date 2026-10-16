@@ -187,9 +187,10 @@ lifecycle and the existing runtime services in one Python application.
 
 The former process-supervision path is no longer on the canonical startup path.
 A loopback HTTP/WebSocket boundary still exists temporarily inside
-`SofiaApplication`, but ordinary Desktop reads/writes now use native
-application services. The remaining localhost consumer is realtime voice,
-which is isolated for removal in SAS-03D.
+`SofiaApplication`, but the Desktop no longer consumes it. Conversation,
+configuration, history, tasks, notifications and realtime voice now use native
+in-process application services. The compatibility boundary is retained only
+for lifecycle/removal work in SAS-03E.
 
 During the remaining SAS-03 migration:
 
