@@ -23,9 +23,10 @@ from `core/requirements.txt`. `core/main.py` starts Sofia directly from the
 working tree. Python 3.13 and 3.14 are supported; the repository development
 baseline currently targets Python 3.14.
 
-The existing `core/` package and its `uv` entry points remain available as
-contributor compatibility paths while SAS-03 removes the temporary two-process
-Desktop/Core transport from the normal desktop runtime.
+`core/main.py` now starts `SofiaApplication` as the normal Desktop composition
+root. The old process-supervision path is no longer used by canonical startup.
+A loopback HTTP/WebSocket adapter remains temporarily for Desktop surfaces that
+have not yet migrated to direct application services.
 
 The architectural target is one application process for normal desktop use:
 
