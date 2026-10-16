@@ -14,8 +14,8 @@ from uuid import UUID
 from sofias_assistant.application.desktop_services import ApplicationValidationError
 from sofias_assistant.client_app.api import (
     CoreApiClient,
+    CoreApiError,
     CoreValidationError,
-    RealtimeVoiceConnection,
 )
 
 
@@ -23,7 +23,14 @@ class ApplicationRuntime(Protocol):
     @property
     def desktop(self) -> Any: ...
 
+    @property
+    def voice(self) -> Any: ...
+
     def call(self, coroutine: Any, *, timeout: float = 60.0) -> Any: ...
+
+    def stream_voice_events(
+        self, session_id: UUID
+    ) -> Iterator[dict[str, object]]: ...
 
     def create_conversation(self) -> UUID: ...
 
@@ -58,7 +65,6 @@ class ApplicationCoreApiClient(CoreApiClient):
             http_client=http_client,
         )
         self._application = application
-        self._voice_client: CoreApiClient | None = None
 
     def _call(self, coroutine: Any, *, validated: bool = False) -> Any:
         try:
@@ -79,9 +85,6 @@ class ApplicationCoreApiClient(CoreApiClient):
 
     def close(self) -> None:
         self.session_id = None
-        if self._voice_client is not None:
-            self._voice_client.close()
-            self._voice_client = None
         close = getattr(self._http, "close", None)
         if close is not None:
             close()
@@ -240,15 +243,110 @@ class ApplicationCoreApiClient(CoreApiClient):
             validated=True,
         )
 
-    def realtime(self) -> RealtimeVoiceConnection:
-        """Use the temporary localhost transport only for voice until SAS-03D."""
+    def realtime(self) -> "NativeRealtimeVoiceConnection":
+        """Return a native in-process realtime voice connection."""
 
-        if self._voice_client is None:
-            voice_client = CoreApiClient(
-                self.base_url,
-                self._credential,
-                timeout=self._timeout,
+        return NativeRealtimeVoiceConnection(self._application)
+
+
+class NativeRealtimeVoiceConnection:
+    """Synchronous Qt-facing facade over SofiaApplication's native voice service."""
+
+    def __init__(self, application: ApplicationRuntime) -> None:
+        self._application = application
+        self.session_id: UUID | None = None
+        self.interaction_id: UUID | None = None
+        self.committed = False
+
+    def open(
+        self,
+        conversation_id: UUID,
+        *,
+        locality: str,
+        cloud_context_eligible: bool,
+    ) -> None:
+        try:
+            self.session_id = self._application.call(
+                self._application.voice.open(
+                    conversation_id,
+                    locality=locality,
+                    cloud_context_eligible=cloud_context_eligible,
+                )
             )
-            voice_client.connect()
-            self._voice_client = voice_client
-        return self._voice_client.realtime()
+        except Exception as error:
+            raise CoreApiError("Realtime session could not be opened") from error
+
+    def start(self) -> UUID:
+        session_id = self._require_open()
+        try:
+            interaction_id = self._application.call(
+                self._application.voice.start(session_id)
+            )
+        except Exception as error:
+            raise CoreApiError("Realtime interaction could not be started") from error
+        self.interaction_id = interaction_id
+        self.committed = False
+        return interaction_id
+
+    def send_audio(self, audio: bytes) -> None:
+        session_id = self._require_open()
+        if self.interaction_id is None or self.committed:
+            raise CoreApiError("Realtime input is not active")
+        try:
+            self._application.call(
+                self._application.voice.send_audio(session_id, audio),
+                timeout=15.0,
+            )
+        except Exception as error:
+            raise CoreApiError("Realtime audio could not be sent") from error
+
+    def commit(self) -> None:
+        session_id = self._require_open()
+        if self.interaction_id is None:
+            raise CoreApiError("Realtime interaction is not active")
+        try:
+            self._application.call(self._application.voice.commit(session_id))
+        except Exception as error:
+            raise CoreApiError("Realtime input could not be committed") from error
+        self.committed = True
+
+    def interrupt(self) -> None:
+        session_id = self._require_open()
+        interaction_id = self.interaction_id
+        if interaction_id is None or not self.committed:
+            raise CoreApiError("Realtime response is not active")
+        try:
+            self._application.call(
+                self._application.voice.interrupt(session_id, interaction_id)
+            )
+        except Exception as error:
+            raise CoreApiError("Realtime response could not be interrupted") from error
+        self.committed = False
+
+    def stop(self) -> None:
+        session_id = self.session_id
+        if session_id is None:
+            return
+        interaction_id = self.interaction_id
+        try:
+            if interaction_id is not None and not self.committed:
+                self._application.call(
+                    self._application.voice.cancel(session_id, interaction_id)
+                )
+            self._application.call(self._application.voice.close(session_id))
+        except Exception:
+            pass
+        finally:
+            self.session_id = None
+            self.interaction_id = None
+            self.committed = False
+
+    def pump_events(self) -> Iterator[dict[str, Any]]:
+        session_id = self._require_open()
+        for event in self._application.stream_voice_events(session_id):
+            yield dict(event)
+
+    def _require_open(self) -> UUID:
+        if self.session_id is None:
+            raise CoreApiError("Realtime session is not open")
+        return self.session_id
