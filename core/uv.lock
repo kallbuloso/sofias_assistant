@@ -694,7 +694,6 @@ dependencies = [
 [package.dev-dependencies]
 client = [
     { name = "httpx2" },
-    { name = "pyinstaller" },
     { name = "pyside6" },
 ]
 dev = [
@@ -722,7 +721,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 client = [
     { name = "httpx2", specifier = ">=2.12,<3" },
-    { name = "pyinstaller", specifier = ">=6.10,<7" },
     { name = "pyside6", specifier = ">=6.8,<7" },
 ]
 dev = [
