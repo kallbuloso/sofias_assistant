@@ -1,8 +1,9 @@
 """Desktop adapter for the in-process SofiaApplication.
 
-SAS-03C routes every ordinary Desktop capability through native application
-services. The localhost client is retained only as a temporary, lazy voice
-transport until SAS-03D replaces the realtime WebSocket path.
+SAS-03C/SAS-03D route Desktop capabilities, including realtime voice,
+through native in-process application services. The adapter keeps the
+existing Client-facing shape only while the Qt layer is incrementally
+simplified.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from sofias_assistant.client_app.api import (
     CoreApiClient,
     CoreApiError,
     CoreValidationError,
+    RealtimeVoiceConnection,
 )
 
 
@@ -249,7 +251,7 @@ class ApplicationCoreApiClient(CoreApiClient):
         return NativeRealtimeVoiceConnection(self._application)
 
 
-class NativeRealtimeVoiceConnection:
+class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
     """Synchronous Qt-facing facade over SofiaApplication's native voice service."""
 
     def __init__(self, application: ApplicationRuntime) -> None:
@@ -328,11 +330,14 @@ class NativeRealtimeVoiceConnection:
         if session_id is None:
             return
         interaction_id = self.interaction_id
-        try:
-            if interaction_id is not None and not self.committed:
+        if interaction_id is not None and not self.committed:
+            try:
                 self._application.call(
                     self._application.voice.cancel(session_id, interaction_id)
                 )
+            except Exception:
+                pass
+        try:
             self._application.call(self._application.voice.close(session_id))
         except Exception:
             pass
