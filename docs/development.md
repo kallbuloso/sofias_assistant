@@ -13,12 +13,14 @@ executable.
 Approved canonical flow:
 
 ```powershell
+cd core
 py setup.py
 py main.py
 ```
 
-SAS-02 implements this flow. `setup.py` creates/updates the project `.venv`,
-installs `requirements.txt`, and `main.py` automatically uses that environment.
+`core/` is the only Python project root. `setup.py` creates/updates
+`core/.venv`, installs `core/requirements.txt`, and `main.py` uses that
+environment.
 
 ## 2. Dependency interfaces
 
@@ -31,7 +33,11 @@ conceptual prerequisite for running Sofia.
 
 ## 3. Generated artifacts
 
-The following are never source of truth and must stay out of Git:
+The repository root must not contain Python environments or tool caches.
+`core/.venv` is the only supported local virtual environment.
+
+The following are never source of truth and must stay out of Git anywhere in
+the repository:
 
 ```text
 .venv/
@@ -45,12 +51,12 @@ dist/
 *.egg-info/
 ```
 
-## 4. Build policy
+## 4. Execution policy
 
-Do not require PyInstaller or any release build to perform ordinary
-development, automated tests or human MVP validation.
+Sofia's Assistant runs as a Python application from source.
 
-Packaging work is deferred until the MVP validation gate is explicitly closed.
+PyInstaller, native executable packaging, `build/` and `dist/` are not part of
+the product roadmap or the development workflow.
 
 ## 5. Quality
 
