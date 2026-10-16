@@ -58,3 +58,34 @@ def test_snapshot_maps_transport_items() -> None:
     )
     assert snapshot.notifications[0].id == notification_id
     assert snapshot.tasks[0].id == task_id
+
+
+def test_health_items_maps_runtime_component_names() -> None:
+    snapshot = snapshot_from_wire(
+        {
+            "state": "running",
+            "health": {
+                "status": "unknown",
+                "components": [
+                    {
+                        "name": "llm-provider",
+                        "status": "healthy",
+                        "detail": "canonical provider=openai",
+                    },
+                    {
+                        "name": "sofias-memory",
+                        "status": "unknown",
+                        "detail": "Memory is not configured",
+                    },
+                ],
+            },
+        },
+        [],
+        [],
+    )
+
+    health = {item.name: item for item in snapshot.health}
+    assert health["AI provider"].status == "healthy"
+    assert health["AI provider"].detail == "canonical provider=openai"
+    assert health["Memory"].status == "unknown"
+    assert health["Memory"].detail == "Memory is not configured"
