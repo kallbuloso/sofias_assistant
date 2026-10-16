@@ -89,3 +89,34 @@ def test_setup_uses_core_local_venv_and_requirements(monkeypatch, tmp_path) -> N
 
     assert resolved == python
     assert calls == [[str(python), "-m", "pip", "install", "-r", str(module.REQUIREMENTS)]]
+
+
+def test_setup_accepts_python_314(monkeypatch) -> None:
+    module = _load_module("source_first_setup_python_314", CORE_ROOT / "setup.py")
+    fake_version = type(
+        "Version",
+        (),
+        {"major": 3, "minor": 14, "micro": 4},
+    )()
+
+    monkeypatch.setattr(module.sys, "version_info", fake_version)
+
+    module._check_python()
+
+
+def test_setup_rejects_python_outside_supported_range(monkeypatch) -> None:
+    module = _load_module("source_first_setup_python_unsupported", CORE_ROOT / "setup.py")
+    fake_version = type(
+        "Version",
+        (),
+        {"major": 3, "minor": 15, "micro": 0},
+    )()
+
+    monkeypatch.setattr(module.sys, "version_info", fake_version)
+
+    try:
+        module._check_python()
+    except SystemExit as error:
+        assert "Python 3.13.x or 3.14.x" in str(error)
+    else:
+        raise AssertionError("unsupported Python version was accepted")
