@@ -1,4 +1,4 @@
-"""Tests for the source-first repository entry points introduced by SAS-02."""
+"""Tests for the source-first application entry points."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-ROOT = Path(__file__).resolve().parents[3]
+CORE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -21,16 +21,16 @@ def _load_module(name: str, path: Path) -> ModuleType:
 
 
 def test_requirements_are_runtime_only() -> None:
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    requirements = (CORE_ROOT / "requirements.txt").read_text(encoding="utf-8")
 
     assert "PySide6" in requirements
     assert "PyInstaller" not in requirements
     assert "uv_build" not in requirements
 
 
-def test_main_exposes_core_source_to_current_and_child_process(monkeypatch) -> None:
-    module = _load_module("source_first_main", ROOT / "main.py")
-    source = str((ROOT / "core" / "src").resolve())
+def test_main_exposes_application_source(monkeypatch) -> None:
+    module = _load_module("source_first_main", CORE_ROOT / "main.py")
+    source = str((CORE_ROOT / "src").resolve())
 
     monkeypatch.setattr(module, "CORE_SRC", Path(source))
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -43,7 +43,7 @@ def test_main_exposes_core_source_to_current_and_child_process(monkeypatch) -> N
 
 
 def test_main_provides_default_bootstrap_model_when_unset(monkeypatch) -> None:
-    module = _load_module("source_first_main_default_model", ROOT / "main.py")
+    module = _load_module("source_first_main_default_model", CORE_ROOT / "main.py")
 
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
@@ -53,7 +53,7 @@ def test_main_provides_default_bootstrap_model_when_unset(monkeypatch) -> None:
 
 
 def test_main_preserves_explicit_model_configuration(monkeypatch) -> None:
-    module = _load_module("source_first_main_explicit_model", ROOT / "main.py")
+    module = _load_module("source_first_main_explicit_model", CORE_ROOT / "main.py")
 
     monkeypatch.setenv("LLM_MODEL", "user-selected-model")
 
@@ -62,8 +62,8 @@ def test_main_preserves_explicit_model_configuration(monkeypatch) -> None:
     assert os.environ["LLM_MODEL"] == "user-selected-model"
 
 
-def test_setup_uses_project_venv_and_requirements(monkeypatch, tmp_path) -> None:
-    module = _load_module("source_first_setup", ROOT / "setup.py")
+def test_setup_uses_core_local_venv_and_requirements(monkeypatch, tmp_path) -> None:
+    module = _load_module("source_first_setup", CORE_ROOT / "setup.py")
     calls: list[list[str]] = []
 
     module.VENV_DIR = tmp_path / ".venv"
