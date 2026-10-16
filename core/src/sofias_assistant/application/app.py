@@ -47,6 +47,7 @@ from sofias_assistant.runtime.instance_ownership import instance_key_for_data_di
 from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 
 _STREAM_END = object()
+_VOICE_STREAM_END = object()
 
 
 def _application_version() -> str:
@@ -225,6 +226,35 @@ class SofiaApplication:
             item = events.get()
             if item is _STREAM_END:
                 break
+            if isinstance(item, BaseException):
+                raise item
+            assert isinstance(item, dict)
+            yield item
+
+    def stream_voice_events(self, session_id: UUID) -> Iterator[dict[str, object]]:
+        """Bridge native realtime events from the application loop to Qt."""
+
+        events: queue.Queue[object] = queue.Queue()
+        loop = self._loop
+        if loop is None or self._stopped.is_set():
+            raise RuntimeError("SofiaApplication runtime is not available")
+
+        async def produce() -> None:
+            try:
+                async for event in self.voice.events(session_id):
+                    events.put(event)
+            except BaseException as error:
+                traceback.print_exc()
+                events.put(error)
+            finally:
+                events.put(_VOICE_STREAM_END)
+
+        asyncio.run_coroutine_threadsafe(produce(), loop)
+
+        while True:
+            item = events.get()
+            if item is _VOICE_STREAM_END:
+                return
             if isinstance(item, BaseException):
                 raise item
             assert isinstance(item, dict)
