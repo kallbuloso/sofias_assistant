@@ -1,4 +1,4 @@
-"""Client application service layer between Qt and the Core API adapter."""
+"""Client application service layer between Qt and Sofia application services."""
 
 from __future__ import annotations
 
