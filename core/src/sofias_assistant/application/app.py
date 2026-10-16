@@ -1,8 +1,9 @@
 """Canonical Python application composition root.
 
-SofiaApplication owns the runtime lifecycle for normal Desktop use. The legacy
-loopback boundary remains only as a temporary compatibility adapter while the
-Desktop surfaces are migrated to direct application services in SAS-03B+.
+SofiaApplication owns the runtime lifecycle for normal Desktop use. Desktop
+capabilities, including realtime voice, use native in-process application
+services. The legacy loopback boundary remains temporarily composed only for
+compatibility cleanup in SAS-03E; it is no longer a Desktop dependency.
 """
 
 from __future__ import annotations
