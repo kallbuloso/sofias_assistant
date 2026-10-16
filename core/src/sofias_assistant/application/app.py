@@ -15,10 +15,11 @@ import traceback
 from collections.abc import Iterator, Mapping
 from importlib.metadata import version
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sofias_assistant.ai.contracts import DataLocality
 from sofias_assistant.application.conversation import ConversationService
+from sofias_assistant.application.desktop_services import DesktopServices
 from sofias_assistant.client_boundary.boundary import (
     LocalClientAccess,
     LocalClientBoundary,
@@ -71,6 +72,7 @@ class SofiaApplication:
         self._boundary: LocalClientBoundary | None = None
         self._access: LocalClientAccess | None = None
         self._conversation: ConversationService | None = None
+        self._desktop: DesktopServices | None = None
 
     @property
     def core(self) -> SofiaCore:
@@ -95,6 +97,13 @@ class SofiaApplication:
         service = self._conversation
         if service is None:
             raise RuntimeError("Conversation service is not available")
+        return service
+
+    @property
+    def desktop(self) -> DesktopServices:
+        service = self._desktop
+        if service is None:
+            raise RuntimeError("Desktop application services are not available")
         return service
 
     def start(self, *, timeout: float = 30.0) -> None:
@@ -125,6 +134,18 @@ class SofiaApplication:
         if self._error is not None:
             raise RuntimeError("SofiaApplication failed to start") from self._error
         raise RuntimeError("SofiaApplication did not become ready in time")
+
+    def request_shutdown(self, runtime_session_id: UUID) -> bool:
+        """Request this exact runtime lifecycle to stop without localhost transport."""
+
+        if runtime_session_id != self.runtime_session_id:
+            return False
+        loop = self._loop
+        shutdown_event = self._shutdown_event
+        if loop is None or shutdown_event is None or self._stopped.is_set():
+            return False
+        loop.call_soon_threadsafe(shutdown_event.set)
+        return True
 
     def stop(self, *, timeout: float = 10.0) -> None:
         """Request graceful application shutdown and wait for owned resources."""
@@ -237,6 +258,7 @@ class SofiaApplication:
 
         await core.start()
         self._conversation = ConversationService(core.conversation_runtime)
+        self._desktop = DesktopServices(core, session_id=uuid4())
         boundary: LocalClientBoundary | None = None
         try:
             await self._report_ai_readiness(core, config)
@@ -270,6 +292,7 @@ class SofiaApplication:
                 await core.stop()
             finally:
                 self._conversation = None
+                self._desktop = None
 
     async def _report_ai_readiness(
         self, core: SofiaCore, config: ProductionRuntimeConfig
