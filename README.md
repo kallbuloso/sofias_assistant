@@ -9,16 +9,18 @@ runtime to an **APPROVED source-first modular-monolith baseline**.
 
 ## Current direction
 
-The source-first developer flow is now implemented:
+The source-first developer flow is now anchored inside `core/`, the only Python
+application root:
 
 ```powershell
+cd core
 py setup.py
 py main.py
 ```
 
-`setup.py` creates/updates `.venv` and installs only runtime dependencies from
-`requirements.txt`. `main.py` automatically re-launches through that project
-environment and starts Sofia from the working tree.
+`core/setup.py` creates/updates `core/.venv` and installs runtime dependencies
+from `core/requirements.txt`. `core/main.py` starts Sofia directly from the
+working tree.
 
 The existing `core/` package and its `uv` entry points remain available as
 contributor compatibility paths while SAS-03 removes the temporary two-process
@@ -68,15 +70,16 @@ Executor acts.
 ├── LICENSE
 ├── CLAUDE.md
 ├── docs/
-│   ├── architecture.md
-│   ├── development.md
-│   └── security.md
 ├── product/
-│   └── docs/
-│       └── Sofia's Assistant — Product Requirements Document.md
 └── core/
+    ├── main.py
+    ├── setup.py
+    ├── requirements.txt
     ├── pyproject.toml
+    ├── uv.lock
+    ├── .python-version
     ├── .env.example
+    ├── scripts/
     ├── src/
     └── tests/
 ```
@@ -86,6 +89,7 @@ Executor acts.
 For normal source-first use:
 
 ```powershell
+cd core
 py setup.py
 py main.py
 ```
@@ -98,10 +102,9 @@ uv sync
 uv run pytest
 ```
 
-Do not build executables merely to validate development changes.
-
-Packaging, installer work and a future single `SofiasAssistant.exe` are
-**deferred until the MVP is validated humanly**.
+Sofia's Assistant is a Python application run from source. Native executable
+packaging is not a product target. PyInstaller, `build/` and `dist/` are not
+part of the runtime or validation path.
 
 ## Documentation
 
