@@ -17,7 +17,9 @@ modular monolith internally.
 The canonical development runtime is:
 
 ```text
-source
+repository
+  ↓
+core/
   ↓
 py main.py
   ↓
@@ -34,10 +36,10 @@ SofiaApplication
   └── Audit
 ```
 
-A separate `SofiaCore.exe` is not part of the target architecture.
+`core/` is the only Python application root.
 
-Packaging is not part of the development critical path and is explicitly
-deferred until the MVP is validated by a human operator.
+Native `.exe` packaging is not part of the target architecture. Sofia's
+Assistant is executed as a Python application from source.
 
 ## 2. Runtime ownership
 
@@ -167,16 +169,16 @@ The approved development model is source-first:
 
 ```text
 git clone
+cd core
 py setup.py
 py main.py
 ```
 
-SAS-02 implements this developer flow. Until that migration is complete, the
-legacy `uv` entry points may remain temporarily available as compatibility
-paths.
+`core/` owns the Python environment, dependencies, entry points, source and
+tests. Repository-root Python environments or caches are invalid local state.
 
-Ordinary development and human validation must not require PyInstaller,
-`build/`, `dist/` or prebuilt executables.
+Ordinary development and human validation do not use PyInstaller, `build/`,
+`dist/` or prebuilt executables.
 
 ## 7. Legacy topology
 
@@ -196,12 +198,10 @@ During migration:
 
 ## 8. MVP validation gate
 
-Packaging is forbidden as a priority before product validation.
-
 The next architectural success condition is not "build succeeds". It is:
 
 > A human can start Sofia from source, use the visual interface, converse,
 > approve/deny protected actions, observe errors and execute useful real
 > workflows.
 
-Only after that MVP is confirmed may release packaging be planned.
+Release packaging is not a target of the current product architecture.
