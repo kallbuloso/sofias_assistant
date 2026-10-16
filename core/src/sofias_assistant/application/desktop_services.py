@@ -193,7 +193,10 @@ class DesktopServices:
     async def list_ai_providers(self) -> list[dict[str, Any]]:
         service = self._ai()
         providers = await service.list_providers()
-        return [_provider_dict(provider, service) for provider in providers]
+        return [
+            _provider_dict(provider, service, self._core.secret_service)
+            for provider in providers
+        ]
 
     async def list_ai_models(self) -> list[dict[str, Any]]:
         service = self._ai()
@@ -222,7 +225,7 @@ class DesktopServices:
         )
         if updated is None:
             raise ApplicationValidationError("Provider not found")
-        return _provider_dict(updated, service)
+        return _provider_dict(updated, service, self._core.secret_service)
 
     async def refresh_ai_models(self, provider_id: str) -> list[dict[str, Any]]:
         service = self._ai()
@@ -521,7 +524,16 @@ def _tool_result_dict(result: Any) -> dict[str, Any]:
     }
 
 
-def _provider_dict(provider: Any, service: Any) -> dict[str, Any]:
+def _provider_dict(
+    provider: Any, service: Any, secret_service: Any
+) -> dict[str, Any]:
+    ref = provider.credential_ref
+    if ref is None:
+        effective_source, configured, shadowed = "missing", False, False
+    else:
+        effective_source, configured, shadowed = credential_write_status(
+            ref, secret_service
+        )
     return {
         "id": provider.id,
         "display_name": provider.display_name,
@@ -530,12 +542,11 @@ def _provider_dict(provider: Any, service: Any) -> dict[str, Any]:
         "enabled": provider.enabled,
         "execution_location": provider.execution_location.value,
         "credential": {
-            "ref": (
-                provider.credential_ref.identifier
-                if provider.credential_ref is not None
-                else None
-            ),
-            "configured": service.is_credential_configured(provider.credential_ref),
+            "ref": ref.identifier if ref is not None else None,
+            "configured": configured and service.is_credential_configured(ref),
+            "effective_source": effective_source,
+            "writable_source": "platform_store",
+            "shadowed": shadowed,
         },
     }
 
