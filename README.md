@@ -20,7 +20,8 @@ py main.py
 
 `core/setup.py` creates/updates `core/.venv` and installs runtime dependencies
 from `core/requirements.txt`. `core/main.py` starts Sofia directly from the
-working tree.
+working tree. Python 3.13 and 3.14 are supported; the repository development
+baseline currently targets Python 3.14.
 
 The existing `core/` package and its `uv` entry points remain available as
 contributor compatibility paths while SAS-03 removes the temporary two-process
