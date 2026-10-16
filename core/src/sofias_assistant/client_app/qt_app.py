@@ -444,10 +444,15 @@ class ClientWorker(QObject):
 
     @Slot()
     def shutdown(self) -> None:
-        self.stop_voice()
-        if self._service is not None:
-            self._service.api.close()
-        self.stopped.emit()
+        """Release Desktop-owned resources and always let the worker thread exit."""
+
+        try:
+            self.stop_voice()
+            if self._service is not None:
+                self._service.api.close()
+                self._service = None
+        finally:
+            self.stopped.emit()
 
     @Slot()
     def stop_sofia(self) -> None:
@@ -1388,6 +1393,7 @@ class MainWindow(QMainWindow):
     def _quit(self) -> None:
         self._quitting = True
         self._refresh_timer.stop()
+        self._tray.hide()
         self._controller.close()
         app = QApplication.instance()
         if app is not None:
