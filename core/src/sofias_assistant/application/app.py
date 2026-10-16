@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from sofias_assistant.ai.contracts import DataLocality
 from sofias_assistant.application.conversation import ConversationService
 from sofias_assistant.application.desktop_services import DesktopServices
+from sofias_assistant.application.voice import VoiceService
 from sofias_assistant.client_boundary.boundary import (
     LocalClientAccess,
     LocalClientBoundary,
@@ -73,6 +74,7 @@ class SofiaApplication:
         self._access: LocalClientAccess | None = None
         self._conversation: ConversationService | None = None
         self._desktop: DesktopServices | None = None
+        self._voice: VoiceService | None = None
 
     @property
     def core(self) -> SofiaCore:
@@ -104,6 +106,13 @@ class SofiaApplication:
         service = self._desktop
         if service is None:
             raise RuntimeError("Desktop application services are not available")
+        return service
+
+    @property
+    def voice(self) -> VoiceService:
+        service = self._voice
+        if service is None:
+            raise RuntimeError("Voice application service is not available")
         return service
 
     def start(self, *, timeout: float = 30.0) -> None:
@@ -259,6 +268,7 @@ class SofiaApplication:
         await core.start()
         self._conversation = ConversationService(core.conversation_runtime)
         self._desktop = DesktopServices(core, session_id=uuid4())
+        self._voice = VoiceService(core.realtime_conversation_runtime)
         boundary: LocalClientBoundary | None = None
         try:
             await self._report_ai_readiness(core, config)
@@ -293,6 +303,7 @@ class SofiaApplication:
             finally:
                 self._conversation = None
                 self._desktop = None
+                self._voice = None
 
     async def _report_ai_readiness(
         self, core: SofiaCore, config: ProductionRuntimeConfig
