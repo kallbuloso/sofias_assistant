@@ -41,7 +41,6 @@ SofiaApplication
 └── Audit
 ```
 
-A separate `SofiaCore.exe` is no longer part of the target architecture.
 
 ## Product principles
 
@@ -52,7 +51,7 @@ A separate `SofiaCore.exe` is no longer part of the target architecture.
 - deterministic authorization before protected actions;
 - least privilege for Tools and Agents;
 - source-first development;
-- human validation before packaging.
+- human validation before architectural expansion.
 
 The core security invariant is:
 
