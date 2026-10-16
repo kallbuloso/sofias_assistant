@@ -25,8 +25,10 @@ baseline currently targets Python 3.14.
 
 `core/main.py` now starts `SofiaApplication` as the normal Desktop composition
 root. The old process-supervision path is no longer used by canonical startup.
-A loopback HTTP/WebSocket adapter remains temporarily for Desktop surfaces that
-have not yet migrated to direct application services.
+Desktop conversation, configuration and realtime voice now use direct
+in-process application services. A loopback HTTP/WebSocket adapter remains
+temporarily composed only as legacy compatibility infrastructure pending
+SAS-03E cleanup.
 
 The architectural target is one application process for normal desktop use:
 
