@@ -18,11 +18,11 @@ from typing import Any
 from uuid import UUID
 
 from sofias_assistant.ai.contracts import DataLocality
+from sofias_assistant.application.conversation import ConversationService
 from sofias_assistant.client_boundary.boundary import (
     LocalClientAccess,
     LocalClientBoundary,
 )
-from sofias_assistant.application.conversation import ConversationService
 from sofias_assistant.config.loader import resolve_environment
 from sofias_assistant.conversation.runtime import SendTextCommand
 from sofias_assistant.core.core import SofiaCore
