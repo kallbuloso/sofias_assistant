@@ -11,6 +11,7 @@ import asyncio
 import os
 import queue
 import threading
+import traceback
 from collections.abc import Iterator, Mapping
 from importlib.metadata import version
 from typing import Any
@@ -21,7 +22,7 @@ from sofias_assistant.client_boundary.boundary import (
     LocalClientAccess,
     LocalClientBoundary,
 )
-from sofias_assistant.client_boundary.http_api import _conversation_event_to_record
+from sofias_assistant.application.conversation import ConversationService
 from sofias_assistant.config.loader import resolve_environment
 from sofias_assistant.conversation.runtime import SendTextCommand
 from sofias_assistant.core.core import SofiaCore
@@ -69,6 +70,7 @@ class SofiaApplication:
         self._core: SofiaCore | None = None
         self._boundary: LocalClientBoundary | None = None
         self._access: LocalClientAccess | None = None
+        self._conversation: ConversationService | None = None
 
     @property
     def core(self) -> SofiaCore:
@@ -87,6 +89,13 @@ class SofiaApplication:
     @property
     def runtime_session_id(self) -> UUID | None:
         return self.core.runtime_session_id
+
+    @property
+    def conversation(self) -> ConversationService:
+        service = self._conversation
+        if service is None:
+            raise RuntimeError("Conversation service is not available")
+        return service
 
     def start(self, *, timeout: float = 30.0) -> None:
         """Start the application runtime and wait until Desktop services are ready."""
@@ -139,6 +148,10 @@ class SofiaApplication:
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         return future.result(timeout=timeout)
 
+    def create_conversation(self) -> UUID:
+        """Create one Conversation through the application service."""
+        return self.call(self.conversation.create_conversation_id())
+
     def stream_text(
         self,
         conversation_id: UUID,
@@ -168,10 +181,10 @@ class SofiaApplication:
 
         async def produce() -> None:
             try:
-                async for event in self.core.conversation_runtime.stream_text(command):
-                    record = _conversation_event_to_record(event)
-                    events.put(record.model_dump(mode="json"))
+                async for event in self.conversation.stream_text(command):
+                    events.put(event)
             except BaseException as error:
+                traceback.print_exc()
                 events.put(error)
             finally:
                 events.put(_STREAM_END)
@@ -223,6 +236,7 @@ class SofiaApplication:
         self._core = core
 
         await core.start()
+        self._conversation = ConversationService(core.conversation_runtime)
         boundary: LocalClientBoundary | None = None
         try:
             await self._report_ai_readiness(core, config)
@@ -252,7 +266,10 @@ class SofiaApplication:
                 finally:
                     self._access = None
                     self._boundary = None
-            await core.stop()
+            try:
+                await core.stop()
+            finally:
+                self._conversation = None
 
     async def _report_ai_readiness(
         self, core: SofiaCore, config: ProductionRuntimeConfig
