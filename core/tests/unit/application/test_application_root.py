@@ -48,8 +48,16 @@ class _FakeApplication:
 
 
 class _UnusedHttp:
+    def __init__(self) -> None:
+        self.closed = False
+        self.delete_calls = 0
+
+    def delete(self, *_args, **_kwargs):
+        self.delete_calls += 1
+        raise AssertionError("shutdown must not perform an HTTP DELETE")
+
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 def test_application_adapter_creates_conversation_directly() -> None:
@@ -97,3 +105,22 @@ def test_main_uses_sofia_application_root() -> None:
     assert "from sofias_assistant.application import run_desktop" in main_text
     assert "client_app.in_process" not in main_text
     assert "host.runner" not in main_text
+
+
+
+def test_application_adapter_close_is_local_and_nonblocking() -> None:
+    application = _FakeApplication()
+    http = _UnusedHttp()
+    client = ApplicationCoreApiClient(
+        application,
+        "http://127.0.0.1:8989",
+        "test-credential",
+        http_client=http,
+    )
+    client.session_id = uuid4()
+
+    client.close()
+
+    assert client.session_id is None
+    assert http.closed is True
+    assert http.delete_calls == 0
