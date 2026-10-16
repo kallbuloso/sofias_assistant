@@ -17,10 +17,11 @@ dist/
 pip-wheel-metadata/
 .wheels/
 
-# Test, coverage, lint, and type-checker caches
+# Tool caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
 .hypothesis/
 .tox/
 .nox/
