@@ -83,21 +83,21 @@ Tests are evidence, not the product.
 A slice that changes user interaction is not complete until a human can prove
 the promised behavior in the relevant visual/runtime path.
 
-The immediate target is:
+Current canonical startup:
 
 ```text
 setup
   ↓
 main.py
   ↓
+SofiaApplication
+  ↓
 visual Sofia
-  ↓
-real conversation
-  ↓
-confirmation/tool flow
-  ↓
-observable result/error
 ```
+
+The remaining SAS-03 work migrates Desktop capabilities away from the temporary
+loopback compatibility adapter, beginning with the real conversation path and
+observable error handling.
 
 ## 7. Documentation rule
 
