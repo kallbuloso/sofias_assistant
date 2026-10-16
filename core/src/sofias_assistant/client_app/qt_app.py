@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import html
+import sys
 import threading
+import traceback
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -85,6 +88,7 @@ class ClientWorker(QObject):
     stream_started = Signal()
     stream_delta = Signal(str)
     stream_finished = Signal()
+    conversation_failed = Signal(str, str)
     voice_changed = Signal(str)
     voice_transcript = Signal(str)
     voice_assistant_text = Signal(str)
@@ -169,13 +173,27 @@ class ClientWorker(QObject):
                 if kind == "text_delta":
                     self.stream_delta.emit(str(event.get("text", "")))
                 elif kind in {"turn_failed", "turn_interrupted"}:
-                    self.failure.emit("Conversation turn did not complete")
+                    code = str(event.get("error_code") or kind)
+                    message = str(
+                        event.get("error_message") or "Conversation turn did not complete"
+                    )
+                    if code == "routing_error" and locality == "local_only":
+                        message = (
+                            f"{message}. Privacy is set to Local only; choose "
+                            "Sofia → Privacy… → Allow cloud or configure a local model."
+                        )
+                    print(
+                        f"Sofia conversation failed [{code}]: {message}",
+                        file=sys.stderr,
+                    )
+                    self.conversation_failed.emit(code, message)
             self.stream_finished.emit()
             self.refresh()
         except Exception:
+            traceback.print_exc()
             self.stream_finished.emit()
             self.failure.emit(
-                "Connection was interrupted; checking Core for the result…"
+                "Conversation execution failed unexpectedly; details are in the terminal."
             )
             self._recover_current_conversation()
 
@@ -1110,6 +1128,7 @@ class MainWindow(QMainWindow):
         worker.stream_started.connect(lambda: self._chat.append("<b>Sofia:</b> "))
         worker.stream_delta.connect(self._chat.insertPlainText)
         worker.stream_finished.connect(lambda: self._chat.append(""))
+        worker.conversation_failed.connect(self._on_conversation_failed)
         worker.voice_changed.connect(self._voice_label.setText)
         worker.voice_transcript.connect(
             lambda text: self._voice_transcript.append(f"<b>You:</b> {text}")
@@ -1234,6 +1253,15 @@ class MainWindow(QMainWindow):
         self._controller.request_load_older_turns.emit(
             self._current_conversation_id, str(self._oldest_loaded_sequence)
         )
+
+    @Slot(str, str)
+    def _on_conversation_failed(self, error_code: str, error_message: str) -> None:
+        code = html.escape(error_code)
+        message = html.escape(error_message)
+        self._chat.append(
+            f"<i>Sofia could not complete this turn [{code}]: {message}</i>"
+        )
+        self.statusBar().showMessage(f"{error_code}: {error_message}", 8000)
 
     @Slot(object)
     def _on_conversation_recovered(self, page: dict[str, Any]) -> None:
