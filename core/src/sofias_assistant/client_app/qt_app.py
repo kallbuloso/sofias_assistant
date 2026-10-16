@@ -713,10 +713,19 @@ class DesktopController(QObject):
         if auto_connect:
             self._thread.start()
 
-    def close(self) -> None:
-        if self._thread_started and self._thread.isRunning():
-            self.request_shutdown.emit()
-            self._thread.wait(3000)
+    def close(self) -> bool:
+        """Stop the worker thread before allowing the Qt application to exit."""
+
+        if not self._thread_started or not self._thread.isRunning():
+            return True
+
+        self.request_shutdown.emit()
+        # CoreApiClient uses an 8 second HTTP timeout. A queued shutdown signal
+        # may need to wait for one in-flight compatibility request to finish
+        # before the worker can process shutdown and quit its QThread.
+        if self._thread.wait(12_000):
+            return True
+        return False
 
 
 class SettingsDialog(QDialog):
@@ -1391,10 +1400,14 @@ class MainWindow(QMainWindow):
             self._controller.request_stop_sofia.emit()
 
     def _quit(self) -> None:
-        self._quitting = True
         self._refresh_timer.stop()
+        if not self._controller.close():
+            self._refresh_timer.start()
+            self._show_error("Sofia is still finishing background work; try Quit again.")
+            return
+
+        self._quitting = True
         self._tray.hide()
-        self._controller.close()
         app = QApplication.instance()
         if app is not None:
             app.quit()
