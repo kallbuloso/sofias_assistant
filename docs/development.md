@@ -96,9 +96,10 @@ visual Sofia
 ```
 
 Conversation, history, tasks, confirmations, notifications, health, AI
-configuration and Memory integration now resolve through native application
-services. Realtime voice remains the only Desktop feature using the temporary
-loopback compatibility adapter and is the focus of SAS-03D.
+configuration, Memory integration and realtime voice now resolve through native
+application services. The Desktop no longer requires localhost transport; the
+remaining loopback boundary is compatibility infrastructure scheduled for
+removal in SAS-03E.
 
 ## 7. Documentation rule
 
