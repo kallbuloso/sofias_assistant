@@ -93,6 +93,8 @@ class ClientWorker(QObject):
     voice_transcript = Signal(str)
     voice_assistant_text = Signal(str)
     voice_audio_chunk = Signal(bytes)
+    voice_event = Signal(object, object)
+    voice_pump_failed = Signal(object, str)
     failure = Signal(str)
     stopped = Signal()
     ai_dashboard_ready = Signal(object)
@@ -128,6 +130,8 @@ class ClientWorker(QObject):
         self._output_device: AudioOutputDevice | None = None
         self._pump_thread: threading.Thread | None = None
         self.voice_audio_chunk.connect(self._play_voice_audio)
+        self.voice_event.connect(self._dispatch_voice_event)
+        self.voice_pump_failed.connect(self._on_voice_pump_failed)
 
     @Slot()
     def connect_core(self) -> None:
@@ -387,23 +391,42 @@ class ClientWorker(QObject):
             pass  # a real failure surfaces through the pump loop instead
 
     def _pump_loop(self, voice: RealtimeVoiceConnection) -> None:
-        """Sole reader of the realtime socket once a session is active.
+        """Sole reader of realtime events on a background thread.
 
-        Runs on a dedicated background thread; Qt signal emission is
-        thread-safe, so every UI update below crosses back to the GUI
-        thread automatically through the existing queued connections.
+        The pump never mutates ClientWorker/Qt state directly. Every event is
+        queued back onto the worker's Qt thread together with the originating
+        voice object so late events from a closed session can be ignored.
         """
 
         try:
             for event in voice.pump_events():
-                self._handle_voice_event(event)
-        except Exception:
+                self.voice_event.emit(voice, event)
+        except Exception as error:
             traceback.print_exc()
-            if self._voice is voice:
-                self.failure.emit("Realtime connection was lost")
-                self._set_voice_state(VoiceState.ERROR)
-                self._stop_audio_devices()
-                self._close_voice()
+            self.voice_pump_failed.emit(voice, str(error))
+
+    @Slot(object, object)
+    def _dispatch_voice_event(
+        self, voice: RealtimeVoiceConnection, event: dict[str, Any]
+    ) -> None:
+        if voice is not self._voice:
+            return
+        self._handle_voice_event(event)
+
+    @Slot(object, str)
+    def _on_voice_pump_failed(
+        self, voice: RealtimeVoiceConnection, detail: str
+    ) -> None:
+        if voice is not self._voice:
+            return
+        self.failure.emit(
+            f"Realtime connection was lost: {detail}"
+            if detail
+            else "Realtime connection was lost"
+        )
+        self._set_voice_state(VoiceState.ERROR)
+        self._stop_audio_devices()
+        self._close_voice()
 
     def _handle_voice_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
@@ -426,7 +449,7 @@ class ClientWorker(QObject):
             self._close_voice()
             self.refresh()
         elif kind == "turn.interrupted":
-            self._set_voice_state(VoiceState.INTERRUPTED)
+            self._set_voice_state(VoiceState.READY)
             self.refresh()
         elif kind in {"session.failed", "error"}:
             self._set_voice_state(VoiceState.ERROR)
