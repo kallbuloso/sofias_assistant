@@ -276,7 +276,8 @@ class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
                 )
             )
         except Exception as error:
-            raise CoreApiError("Realtime session could not be opened") from error
+            message = str(error).strip() or "Realtime session could not be opened"
+            raise CoreApiError(message) from error
 
     def start(self) -> UUID:
         session_id = self._require_open()
@@ -285,7 +286,8 @@ class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
                 self._application.voice.start(session_id)
             )
         except Exception as error:
-            raise CoreApiError("Realtime interaction could not be started") from error
+            message = str(error).strip() or "Realtime interaction could not be started"
+            raise CoreApiError(message) from error
         self.interaction_id = interaction_id
         self.committed = False
         return interaction_id
