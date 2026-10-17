@@ -505,3 +505,37 @@ def test_switching_conversation_stops_voice_before_rebinding(
 
     assert connection.stopped is True
     assert worker._service.conversation_id == target
+
+
+
+def test_first_voice_turn_creates_one_current_conversation(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    opened: list[str] = []
+    worker.conversation_opened.connect(
+        lambda conversation_id, _page: opened.append(conversation_id)
+    )
+
+    worker.start_voice("local_only", False)
+
+    assert worker._service.conversation_id == api.conversation_id
+    assert opened == [str(api.conversation_id)]
+
+
+def test_text_after_voice_uses_same_current_conversation(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+
+    worker.start_voice("local_only", False)
+    worker.stop_voice()
+    worker.send_text("continue", "local_only", False)
+
+    assert worker._service.conversation_id == api.conversation_id
