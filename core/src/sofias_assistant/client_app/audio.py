@@ -18,7 +18,9 @@ mode observed).
 
 from __future__ import annotations
 
+from array import array
 from collections.abc import Callable
+import sys
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -176,37 +178,129 @@ class QtAudioInputDevice:
 
 
 class QtAudioOutputDevice:
-    """Real PySide6 QtMultimedia speaker playback (Windows-first baseline)."""
+    """Real PySide6 QtMultimedia speaker playback (Windows-first baseline).
+
+    OpenAI Realtime emits PCM16/24 kHz/mono. Some Windows audio backends report
+    that format as supported but still render through a 48 kHz device path,
+    which makes raw 24 kHz samples play roughly twice as fast. We therefore
+    negotiate a device-rate Int16 format and convert the provider PCM explicitly
+    before writing it to Qt.
+    """
 
     def __init__(self) -> None:
         self._sink: QAudioSink | None = None
         self._io_device: Any = None
+        self._target_sample_rate = SAMPLE_RATE_HZ
+        self._target_channels = CHANNELS
 
     def start(self) -> None:
-        from PySide6.QtMultimedia import QAudioSink, QMediaDevices
+        from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
         device = QMediaDevices.defaultAudioOutput()
         if device.isNull():
             raise AudioDeviceError("No speaker output is available")
-        audio_format = _build_audio_format()
-        if not device.isFormatSupported(audio_format):
-            raise AudioDeviceError(
-                "Speaker does not support the required PCM16/24000Hz/mono format"
-            )
-        sink = QAudioSink(device, audio_format)
+
+        preferred = device.preferredFormat()
+        target = QAudioFormat()
+        target.setSampleRate(preferred.sampleRate())
+        target.setChannelCount(CHANNELS)
+        target.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+
+        if not device.isFormatSupported(target):
+            target = preferred
+            if target.sampleFormat() is not QAudioFormat.SampleFormat.Int16:
+                raise AudioDeviceError(
+                    "Speaker preferred format is not PCM16 and cannot be converted safely"
+                )
+            if target.channelCount() not in (1, 2):
+                raise AudioDeviceError(
+                    "Speaker preferred channel layout is not supported"
+                )
+
+        sink = QAudioSink(device, target)
         io_device = sink.start()
         if io_device is None:
             raise AudioDeviceError("Speaker could not be started")
+
+        self._target_sample_rate = target.sampleRate()
+        self._target_channels = target.channelCount()
         self._sink = sink
         self._io_device = io_device
 
     def write(self, chunk: bytes) -> None:
         if self._io_device is None:
             raise AudioDeviceError("Speaker output is not active")
-        self._io_device.write(chunk)
+        converted = _convert_pcm16_mono(
+            chunk,
+            source_sample_rate=SAMPLE_RATE_HZ,
+            target_sample_rate=self._target_sample_rate,
+            target_channels=self._target_channels,
+        )
+        self._io_device.write(converted)
 
     def stop(self) -> None:
         if self._sink is not None:
             self._sink.stop()
         self._sink = None
         self._io_device = None
+        self._target_sample_rate = SAMPLE_RATE_HZ
+        self._target_channels = CHANNELS
+
+
+def _convert_pcm16_mono(
+    chunk: bytes,
+    *,
+    source_sample_rate: int,
+    target_sample_rate: int,
+    target_channels: int,
+) -> bytes:
+    """Convert little-endian PCM16 mono to a device-rate mono/stereo stream."""
+
+    if len(chunk) % 2:
+        raise AudioDeviceError("PCM16 audio chunk has an invalid byte length")
+    if source_sample_rate <= 0 or target_sample_rate <= 0:
+        raise AudioDeviceError("Audio sample rates must be positive")
+    if target_channels not in (1, 2):
+        raise AudioDeviceError("Only mono and stereo speaker output are supported")
+    if not chunk:
+        return b""
+
+    samples = array("h")
+    samples.frombytes(chunk)
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    if target_sample_rate == source_sample_rate:
+        resampled = samples
+    else:
+        output_count = max(
+            1,
+            round(len(samples) * target_sample_rate / source_sample_rate),
+        )
+        resampled = array("h")
+        if len(samples) == 1:
+            resampled.extend([samples[0]] * output_count)
+        else:
+            scale = source_sample_rate / target_sample_rate
+            last = len(samples) - 1
+            for index in range(output_count):
+                position = min(index * scale, last)
+                left = int(position)
+                right = min(left + 1, last)
+                fraction = position - left
+                value = round(
+                    samples[left] * (1.0 - fraction)
+                    + samples[right] * fraction
+                )
+                resampled.append(max(-32768, min(32767, value)))
+
+    if target_channels == 2:
+        interleaved = array("h")
+        for sample in resampled:
+            interleaved.append(sample)
+            interleaved.append(sample)
+        resampled = interleaved
+
+    if sys.byteorder != "little":
+        resampled.byteswap()
+    return resampled.tobytes()
