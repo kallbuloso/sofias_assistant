@@ -288,6 +288,8 @@ class ClientWorker(QObject):
         if service is None:
             return
         try:
+            if self._voice is not None:
+                self.stop_voice()
             conversation_id = service.start_new_conversation()
             self.conversation_opened.emit(
                 str(conversation_id), {"turns": [], "has_older": False}
@@ -303,6 +305,8 @@ class ClientWorker(QObject):
             return
         try:
             parsed_id = UUID(conversation_id)
+            if self._voice is not None:
+                self.stop_voice()
             service.open_conversation(parsed_id)
             page = service.api.list_conversation_turns(parsed_id, limit=50)
             self.conversation_opened.emit(conversation_id, page)
@@ -499,6 +503,8 @@ class ClientWorker(QObject):
 
     @Slot()
     def stop_voice(self) -> None:
+        """Close only realtime audio; keep the durable Conversation selected."""
+
         self._stop_audio_devices()
         self._close_voice()
         self._wait_for_pump()
@@ -735,8 +741,9 @@ class ClientWorker(QObject):
         if voice is not None:
             try:
                 voice.stop()
-            except Exception:
+            except Exception as error:
                 traceback.print_exc()
+                self.failure.emit(f"Realtime voice could not be closed: {error}")
 
 
 class DesktopController(QObject):
@@ -954,7 +961,10 @@ class MainWindow(QMainWindow):
         self._notification_rows: dict[UUID, QWidget] = {}
         self._task_rows: dict[UUID, QWidget] = {}
         self._last_connection_state: str | None = None
-        self._current_conversation_id: str | None = None
+        self._current_conversation_id: str | None = self._settings.value(
+            "conversation/current_id", None, type=str
+        )
+        self._current_conversation_restored = False
         self._pending_confirmation_id: str | None = None
         self._ai_dashboard: dict[str, Any] | None = None
         self._build_ui()
@@ -1035,7 +1045,6 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._memory_tab(), "Memory / Integrations")
         self._tabs.addTab(self._tasks_tab(), "Tasks")
         self._tabs.addTab(self._notifications_tab(), "Notifications")
-        self._tabs.addTab(self._voice_tab(), "Voice")
         self._tabs.addTab(self._health_tab(), "Health")
         self.setCentralWidget(self._tabs)
 
@@ -1119,6 +1128,33 @@ class MainWindow(QMainWindow):
         row.addWidget(self._draft, 1)
         row.addWidget(send)
         chat_layout.addLayout(row)
+
+        voice_row = QHBoxLayout()
+        self._voice_label = QLabel("Voice: IDLE")
+        self._voice_label.setAccessibleName("Voice state")
+        self._voice_start_button = QPushButton("Start voice")
+        self._voice_commit_button = QPushButton("Stop speaking")
+        self._voice_interrupt_button = QPushButton("Interrupt")
+        self._voice_stop_button = QPushButton("Stop voice")
+        self._voice_start_button.clicked.connect(self._start_voice)
+        self._voice_commit_button.clicked.connect(
+            self._controller.request_voice_commit.emit
+        )
+        self._voice_interrupt_button.clicked.connect(
+            self._controller.request_voice_interrupt.emit
+        )
+        self._voice_stop_button.clicked.connect(
+            self._controller.request_voice_stop.emit
+        )
+        voice_row.addWidget(self._voice_label)
+        voice_row.addStretch(1)
+        voice_row.addWidget(self._voice_start_button)
+        voice_row.addWidget(self._voice_commit_button)
+        voice_row.addWidget(self._voice_interrupt_button)
+        voice_row.addWidget(self._voice_stop_button)
+        chat_layout.addLayout(voice_row)
+        self._update_voice_controls(VoiceState.IDLE.value)
+
         splitter.addWidget(chat_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
@@ -1137,50 +1173,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(tab)
         self._notifications = QListWidget()
         layout.addWidget(self._notifications)
-        return tab
-
-    def _voice_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        box = QGroupBox("Realtime voice")
-        box_layout = QVBoxLayout(box)
-        self._voice_label = QLabel("IDLE")
-        self._voice_label.setAccessibleName("Voice state")
-        box_layout.addWidget(self._voice_label)
-        self._voice_transcript = QTextBrowser()
-        self._voice_transcript.setAccessibleName("Voice transcript")
-        self._voice_transcript.setMaximumHeight(160)
-        box_layout.addWidget(self._voice_transcript)
-        controls = QHBoxLayout()
-        self._voice_start_button = QPushButton("Start")
-        self._voice_commit_button = QPushButton("Stop speaking")
-        self._voice_interrupt_button = QPushButton("Interrupt")
-        self._voice_stop_button = QPushButton("Stop")
-        self._voice_start_button.clicked.connect(self._start_voice)
-        self._voice_commit_button.clicked.connect(
-            self._controller.request_voice_commit.emit
-        )
-        self._voice_interrupt_button.clicked.connect(
-            self._controller.request_voice_interrupt.emit
-        )
-        self._voice_stop_button.clicked.connect(
-            self._controller.request_voice_stop.emit
-        )
-        controls.addWidget(self._voice_start_button)
-        controls.addWidget(self._voice_commit_button)
-        controls.addWidget(self._voice_interrupt_button)
-        controls.addWidget(self._voice_stop_button)
-        self._update_voice_controls(VoiceState.IDLE.value)
-        box_layout.addLayout(controls)
-        layout.addWidget(box)
-        note = QLabel(
-            "Voice uses the same privacy choice as Chat. Microphone capture "
-            "starts only when you click Start and stops on Stop speaking, "
-            "Interrupt, Stop or a device error."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addStretch(1)
         return tab
 
     def _health_tab(self) -> QWidget:
@@ -1235,10 +1227,10 @@ class MainWindow(QMainWindow):
         worker.conversation_failed.connect(self._on_conversation_failed)
         worker.voice_changed.connect(self._on_voice_state)
         worker.voice_transcript.connect(
-            lambda text: self._voice_transcript.append(f"<b>You:</b> {text}")
+            lambda text: self._chat.append(f"<b>You:</b> {text}")
         )
         worker.voice_assistant_text.connect(
-            lambda text: self._voice_transcript.append(f"<b>Sofia:</b> {text}")
+            lambda text: self._chat.append(f"<b>Sofia:</b> {text}")
         )
         worker.failure.connect(self._show_error)
         worker.ai_dashboard_ready.connect(self._on_ai_dashboard)
@@ -1252,8 +1244,9 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_voice_state(self, state: str) -> None:
-        self._voice_label.setText(state)
-        self._update_voice_controls(state)
+        value = state.rsplit(".", 1)[-1]
+        self._voice_label.setText(f"Voice: {value}")
+        self._update_voice_controls(value)
 
     def _update_voice_controls(self, state: str) -> None:
         value = state.rsplit(".", 1)[-1]
@@ -1311,13 +1304,25 @@ class MainWindow(QMainWindow):
     def _on_conversations_ready(self, page: dict[str, Any]) -> None:
         self._conversation_list.blockSignals(True)
         self._conversation_list.clear()
+        restored_row: QListWidgetItem | None = None
         for item in page.get("items", []):
             row = QListWidgetItem(str(item.get("preview") or "New conversation"))
-            row.setData(Qt.ItemDataRole.UserRole, str(item.get("conversation_id")))
+            conversation_id = str(item.get("conversation_id"))
+            row.setData(Qt.ItemDataRole.UserRole, conversation_id)
             self._conversation_list.addItem(row)
-            if str(item.get("conversation_id")) == self._current_conversation_id:
+            if conversation_id == self._current_conversation_id:
+                restored_row = row
                 self._conversation_list.setCurrentItem(row)
         self._conversation_list.blockSignals(False)
+        if (
+            restored_row is not None
+            and not self._current_conversation_restored
+            and self._current_conversation_id is not None
+        ):
+            self._current_conversation_restored = True
+            self._controller.request_open_conversation.emit(
+                self._current_conversation_id
+            )
 
     def _on_conversation_selected(
         self, current: QListWidgetItem | None, _previous: QListWidgetItem | None
@@ -1334,6 +1339,8 @@ class MainWindow(QMainWindow):
         self, conversation_id: str, page: dict[str, Any]
     ) -> None:
         self._current_conversation_id = conversation_id
+        self._current_conversation_restored = True
+        self._settings.setValue("conversation/current_id", conversation_id)
         self._render_turn_page(page, replace=True)
 
     @Slot(str, object)
