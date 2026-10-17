@@ -471,3 +471,37 @@ def test_turn_interrupted_returns_voice_session_to_ready(
     worker._handle_voice_event({"type": "turn.interrupted"})
 
     assert worker._voice_status is VoiceState.READY
+
+
+
+def test_stop_voice_keeps_current_conversation(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    worker._service.open_conversation(api.conversation_id)
+    worker._voice = connection
+
+    worker.stop_voice()
+
+    assert worker._service.conversation_id == api.conversation_id
+    assert connection.stopped is True
+
+
+def test_switching_conversation_stops_voice_before_rebinding(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    target = uuid4()
+    worker._service.open_conversation(api.conversation_id)
+    worker._voice = connection
+
+    worker.open_conversation(str(target))
+
+    assert connection.stopped is True
+    assert worker._service.conversation_id == target
