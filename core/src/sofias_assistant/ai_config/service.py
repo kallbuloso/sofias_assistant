@@ -125,6 +125,9 @@ class CanonicalBootstrap:
     model_id: str
     model_display_name: str
     capabilities: frozenset[CapabilityClaim]
+    realtime_model_id: str | None = None
+    realtime_model_display_name: str | None = None
+    realtime_capabilities: frozenset[CapabilityClaim] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +329,33 @@ class AIConfigurationService:
                             updated_at=now,
                         )
                     )
+                if canonical.realtime_model_id is not None:
+                    if (
+                        await uow.model_catalog_entries.get_by_identity(
+                            canonical.provider_id, canonical.realtime_model_id
+                        )
+                        is None
+                    ):
+                        uow.model_catalog_entries.add(
+                            ModelCatalogEntry(
+                                provider_id=canonical.provider_id,
+                                model_id=canonical.realtime_model_id,
+                                display_name=(
+                                    canonical.realtime_model_display_name
+                                    or canonical.realtime_model_id
+                                ),
+                                context_window=None,
+                                execution_location=canonical.execution_location,
+                                availability=ModelAvailability.AVAILABLE,
+                                enabled=True,
+                                discovery_source=DiscoverySource.BOOTSTRAP,
+                                capabilities=canonical.realtime_capabilities,
+                                metadata={},
+                                last_seen_at=now,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
                 for profile in _default_profiles(now):
                     if await uow.inference_profiles.get_by_key(profile.key) is None:
                         uow.inference_profiles.add(profile)
@@ -337,6 +367,22 @@ class AIConfigurationService:
                             profile_key="chat.general",
                             provider_id=canonical.provider_id,
                             model_id=canonical.model_id,
+                            priority=1,
+                            enabled=True,
+                            source="bootstrap",
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                if (
+                    canonical.realtime_model_id is not None
+                    and not await uow.profile_model_bindings.list_for_profile("realtime")
+                ):
+                    uow.profile_model_bindings.add(
+                        ProfileModelBinding(
+                            profile_key="realtime",
+                            provider_id=canonical.provider_id,
+                            model_id=canonical.realtime_model_id,
                             priority=1,
                             enabled=True,
                             source="bootstrap",
