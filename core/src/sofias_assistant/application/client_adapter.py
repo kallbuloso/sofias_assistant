@@ -259,6 +259,9 @@ class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
         self.session_id: UUID | None = None
         self.interaction_id: UUID | None = None
         self.committed = False
+        self._conversation_id: UUID | None = None
+        self._locality: str | None = None
+        self._cloud_context_eligible: bool | None = None
 
     def open(
         self,
@@ -267,6 +270,21 @@ class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
         locality: str,
         cloud_context_eligible: bool,
     ) -> None:
+        self._conversation_id = conversation_id
+        self._locality = locality
+        self._cloud_context_eligible = cloud_context_eligible
+        self._open_native_session()
+
+    def _open_native_session(self) -> None:
+        conversation_id = self._conversation_id
+        locality = self._locality
+        cloud_context_eligible = self._cloud_context_eligible
+        if (
+            conversation_id is None
+            or locality is None
+            or cloud_context_eligible is None
+        ):
+            raise CoreApiError("Realtime session parameters are unavailable")
         try:
             self.session_id = self._application.call(
                 self._application.voice.open(
@@ -287,7 +305,33 @@ class NativeRealtimeVoiceConnection(RealtimeVoiceConnection):
             )
         except Exception as error:
             message = str(error).strip() or "Realtime interaction could not be started"
-            raise CoreApiError(message) from error
+            if "Realtime session is not idle" not in message:
+                raise CoreApiError(message) from error
+
+            # The provider/runtime can finish closing a previous native session
+            # just after Desktop has reopened voice for the same Conversation.
+            # Recover once by discarding that transient session and opening a
+            # fresh realtime session for the same durable Conversation.
+            try:
+                self._application.call(self._application.voice.close(session_id))
+            except Exception:
+                pass
+            self.session_id = None
+            self.interaction_id = None
+            self.committed = False
+            self._open_native_session()
+            retry_session_id = self._require_open()
+            try:
+                interaction_id = self._application.call(
+                    self._application.voice.start(retry_session_id)
+                )
+            except Exception as retry_error:
+                retry_message = (
+                    str(retry_error).strip()
+                    or "Realtime interaction could not be started"
+                )
+                raise CoreApiError(retry_message) from retry_error
+
         self.interaction_id = interaction_id
         self.committed = False
         return interaction_id
