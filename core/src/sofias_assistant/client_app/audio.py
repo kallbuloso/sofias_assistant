@@ -190,10 +190,13 @@ class QtAudioOutputDevice:
     def __init__(self) -> None:
         self._sink: QAudioSink | None = None
         self._io_device: Any = None
+        self._drain_timer: Any = None
+        self._pending = bytearray()
         self._target_sample_rate = SAMPLE_RATE_HZ
         self._target_channels = CHANNELS
 
     def start(self) -> None:
+        from PySide6.QtCore import QTimer
         from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
         device = QMediaDevices.defaultAudioOutput()
@@ -226,9 +229,16 @@ class QtAudioOutputDevice:
         self._target_channels = target.channelCount()
         self._sink = sink
         self._io_device = io_device
+        self._pending.clear()
+
+        timer = QTimer()
+        timer.setInterval(10)
+        timer.timeout.connect(self._drain)
+        timer.start()
+        self._drain_timer = timer
 
     def write(self, chunk: bytes) -> None:
-        if self._io_device is None:
+        if self._io_device is None or self._sink is None:
             raise AudioDeviceError("Speaker output is not active")
         converted = _convert_pcm16_mono(
             chunk,
@@ -236,13 +246,36 @@ class QtAudioOutputDevice:
             target_sample_rate=self._target_sample_rate,
             target_channels=self._target_channels,
         )
-        self._io_device.write(converted)
+        self._pending.extend(converted)
+        self._drain()
+
+    def _drain(self) -> None:
+        sink = self._sink
+        io_device = self._io_device
+        if sink is None or io_device is None or not self._pending:
+            return
+
+        free = int(sink.bytesFree())
+        if free <= 0:
+            return
+
+        offered = bytes(self._pending[:free])
+        written = int(io_device.write(offered))
+        if written < 0:
+            raise AudioDeviceError("Speaker output rejected audio data")
+        if written > 0:
+            del self._pending[:written]
 
     def stop(self) -> None:
+        timer = self._drain_timer
+        self._drain_timer = None
+        if timer is not None:
+            timer.stop()
         if self._sink is not None:
             self._sink.stop()
         self._sink = None
         self._io_device = None
+        self._pending.clear()
         self._target_sample_rate = SAMPLE_RATE_HZ
         self._target_channels = CHANNELS
 
