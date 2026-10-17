@@ -423,3 +423,51 @@ def test_assistant_audio_is_queued_through_worker_signal(
     qapplication.processEvents()
 
     assert output.written == [b"\x00\x01"]
+
+
+
+def test_late_closed_event_from_old_voice_is_ignored(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    old_voice = FakeRealtimeConnection([])
+    new_voice = FakeRealtimeConnection([])
+    worker = _worker_with_service(api)
+    worker._voice = new_voice
+    worker._set_voice_state(VoiceState.LISTENING)
+
+    worker.voice_event.emit(old_voice, {"type": "session.closed"})
+    qapplication.processEvents()
+
+    assert worker._voice is new_voice
+    assert worker._voice_status is VoiceState.LISTENING
+
+
+def test_current_closed_event_sets_idle(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    voice = FakeRealtimeConnection([])
+    worker = _worker_with_service(api)
+    worker._voice = voice
+    worker._set_voice_state(VoiceState.READY)
+
+    worker.voice_event.emit(voice, {"type": "session.closed"})
+    qapplication.processEvents()
+
+    assert worker._voice is None
+    assert worker._voice_status is VoiceState.IDLE
+
+
+def test_turn_interrupted_returns_voice_session_to_ready(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    voice = FakeRealtimeConnection([])
+    worker = _worker_with_service(api)
+    worker._voice = voice
+    worker._set_voice_state(VoiceState.INTERRUPTED)
+
+    worker._handle_voice_event({"type": "turn.interrupted"})
+
+    assert worker._voice_status is VoiceState.READY
