@@ -35,6 +35,7 @@ DATA_DIR_ENVIRONMENT_VARIABLE = "SOFIA_DATA_DIR"
 LLM_PROVIDER_ENVIRONMENT_VARIABLE = "LLM_PROVIDER"
 LLM_BASE_URL_ENVIRONMENT_VARIABLE = "LLM_BASE_URL"
 LLM_MODEL_ENVIRONMENT_VARIABLE = "LLM_MODEL"
+LLM_REALTIME_MODEL_ENVIRONMENT_VARIABLE = "LLM_REALTIME_MODEL"
 MEMORY_ENABLED_ENVIRONMENT_VARIABLE = "SOFIAS_MEMORY_ENABLED"
 MEMORY_BASE_URL_ENVIRONMENT_VARIABLE = "SOFIAS_MEMORY_BASE_URL"
 
@@ -81,6 +82,7 @@ class LLMProviderConfig:
     provider_id: str
     base_url: str
     model_id: str
+    realtime_model_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
@@ -168,8 +170,15 @@ def _resolve_llm(environment: Mapping[str, str]) -> LLMProviderConfig:
         LLM_BASE_URL_ENVIRONMENT_VARIABLE, _DEFAULT_LLM_BASE_URL
     ).strip()
     model_id = environment.get(LLM_MODEL_ENVIRONMENT_VARIABLE, "").strip()
+    realtime_raw = environment.get(LLM_REALTIME_MODEL_ENVIRONMENT_VARIABLE)
+    realtime_model_id = (
+        realtime_raw.strip() if realtime_raw is not None and realtime_raw.strip() else None
+    )
     return LLMProviderConfig(
-        provider_id=provider_id, base_url=base_url, model_id=model_id
+        provider_id=provider_id,
+        base_url=base_url,
+        model_id=model_id,
+        realtime_model_id=realtime_model_id,
     )
 
 
