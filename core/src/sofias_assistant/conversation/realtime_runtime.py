@@ -475,6 +475,11 @@ class RealtimeConversationRuntime:
                 await self._release_interaction(session)
             try:
                 await self._close_provider(session)
+            except Exception:
+                # Closing a provider transport is best-effort. A failure here
+                # must not keep the durable Conversation locked to a dead
+                # realtime session.
+                pass
             finally:
                 async with self._sessions_gate:
                     self._conversation_sessions.pop(session.conversation_id, None)
