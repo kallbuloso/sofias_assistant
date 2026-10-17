@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 CORE_SRC = ROOT / "src"
 VENV_DIR = ROOT / ".venv"
 DEFAULT_SOURCE_MODEL = "gpt-4o-mini"
+DEFAULT_SOURCE_REALTIME_MODEL = "gpt-realtime-2.1-mini"
 
 
 def _venv_python() -> Path:
@@ -82,6 +83,8 @@ def _prepare_source_bootstrap() -> None:
 
     if "LLM_MODEL" not in os.environ:
         os.environ["LLM_MODEL"] = DEFAULT_SOURCE_MODEL
+    if "LLM_REALTIME_MODEL" not in os.environ:
+        os.environ["LLM_REALTIME_MODEL"] = DEFAULT_SOURCE_REALTIME_MODEL
 
 
 def main(argv: list[str] | None = None) -> int:
