@@ -349,9 +349,15 @@ class ClientWorker(QObject):
             self._set_voice_state(VoiceState.ERROR)
             self.failure.emit(f"Voice unavailable: {error}")
             self._close_voice()
-        except Exception:
+        except Exception as error:
+            traceback.print_exc()
             self._set_voice_state(VoiceState.ERROR)
-            self.failure.emit("Realtime voice could not be started")
+            detail = str(error).strip()
+            self.failure.emit(
+                f"Realtime voice could not be started: {detail}"
+                if detail
+                else "Realtime voice could not be started"
+            )
             self._close_voice()
 
     def _on_microphone_chunk(self, chunk: bytes) -> None:
