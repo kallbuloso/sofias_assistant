@@ -454,6 +454,8 @@ class RealtimeConversationRuntime:
                 RealtimeSessionState.CLOSED,
                 RealtimeSessionState.FAILED,
             ):
+                async with self._sessions_gate:
+                    self._conversation_sessions.pop(session.conversation_id, None)
                 return
             interaction = session.active_interaction
             if interaction is not None:
@@ -471,12 +473,14 @@ class RealtimeConversationRuntime:
                         terminal=True,
                     )
                 await self._release_interaction(session)
-            await self._close_provider(session)
+            try:
+                await self._close_provider(session)
+            finally:
+                async with self._sessions_gate:
+                    self._conversation_sessions.pop(session.conversation_id, None)
             session.state = RealtimeSessionState.CLOSED
             await self._emit(session, RealtimeSessionClosed(session.id), terminal=True)
             await self._end_events(session)
-            async with self._sessions_gate:
-                self._conversation_sessions.pop(session.conversation_id, None)
 
     async def close_all(self) -> None:
         for session_id in tuple(self._sessions):
