@@ -12,6 +12,7 @@ from sofias_assistant.client_app.audio import (
     FailingAudioOutputDevice,
     FakeAudioInputDevice,
     FakeAudioOutputDevice,
+    _convert_pcm16_mono,
 )
 
 
@@ -69,3 +70,44 @@ def test_failing_output_device_raises_audio_device_error() -> None:
         device.start()
     with pytest.raises(AudioDeviceError):
         device.write(b"\x00")
+
+
+
+def test_pcm16_mono_24k_to_48k_preserves_duration() -> None:
+    # 4 source frames at 24 kHz should become 8 frames at 48 kHz.
+    source = (
+        (0).to_bytes(2, "little", signed=True)
+        + (1000).to_bytes(2, "little", signed=True)
+        + (2000).to_bytes(2, "little", signed=True)
+        + (3000).to_bytes(2, "little", signed=True)
+    )
+
+    converted = _convert_pcm16_mono(
+        source,
+        source_sample_rate=24_000,
+        target_sample_rate=48_000,
+        target_channels=1,
+    )
+
+    assert len(converted) == 16
+
+
+def test_pcm16_mono_to_stereo_duplicates_each_sample() -> None:
+    source = (
+        (100).to_bytes(2, "little", signed=True)
+        + (-100).to_bytes(2, "little", signed=True)
+    )
+
+    converted = _convert_pcm16_mono(
+        source,
+        source_sample_rate=24_000,
+        target_sample_rate=24_000,
+        target_channels=2,
+    )
+
+    assert converted == (
+        (100).to_bytes(2, "little", signed=True)
+        + (100).to_bytes(2, "little", signed=True)
+        + (-100).to_bytes(2, "little", signed=True)
+        + (-100).to_bytes(2, "little", signed=True)
+    )
