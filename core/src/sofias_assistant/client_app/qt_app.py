@@ -320,6 +320,13 @@ class ClientWorker(QObject):
 
     @Slot(str, bool)
     def start_voice(self, locality: str, cloud_context_eligible: bool) -> None:
+        if self._voice is not None or self._voice_status in {
+            VoiceState.CONNECTING,
+            VoiceState.LISTENING,
+            VoiceState.RESPONDING,
+        }:
+            self.failure.emit("Realtime voice is already active")
+            return
         service = self._service
         if service is None or service.snapshot is None:
             self.failure.emit("Connect to Core before starting realtime voice")
@@ -1071,18 +1078,25 @@ class MainWindow(QMainWindow):
         self._voice_transcript.setMaximumHeight(160)
         box_layout.addWidget(self._voice_transcript)
         controls = QHBoxLayout()
-        start = QPushButton("Start")
-        stop_speaking = QPushButton("Stop speaking")
-        interrupt = QPushButton("Interrupt")
-        stop = QPushButton("Stop")
-        start.clicked.connect(self._start_voice)
-        stop_speaking.clicked.connect(self._controller.request_voice_commit.emit)
-        interrupt.clicked.connect(self._controller.request_voice_interrupt.emit)
-        stop.clicked.connect(self._controller.request_voice_stop.emit)
-        controls.addWidget(start)
-        controls.addWidget(stop_speaking)
-        controls.addWidget(interrupt)
-        controls.addWidget(stop)
+        self._voice_start_button = QPushButton("Start")
+        self._voice_commit_button = QPushButton("Stop speaking")
+        self._voice_interrupt_button = QPushButton("Interrupt")
+        self._voice_stop_button = QPushButton("Stop")
+        self._voice_start_button.clicked.connect(self._start_voice)
+        self._voice_commit_button.clicked.connect(
+            self._controller.request_voice_commit.emit
+        )
+        self._voice_interrupt_button.clicked.connect(
+            self._controller.request_voice_interrupt.emit
+        )
+        self._voice_stop_button.clicked.connect(
+            self._controller.request_voice_stop.emit
+        )
+        controls.addWidget(self._voice_start_button)
+        controls.addWidget(self._voice_commit_button)
+        controls.addWidget(self._voice_interrupt_button)
+        controls.addWidget(self._voice_stop_button)
+        self._update_voice_controls(VoiceState.IDLE.value)
         box_layout.addLayout(controls)
         layout.addWidget(box)
         note = QLabel(
@@ -1145,7 +1159,7 @@ class MainWindow(QMainWindow):
         worker.stream_delta.connect(self._chat.insertPlainText)
         worker.stream_finished.connect(lambda: self._chat.append(""))
         worker.conversation_failed.connect(self._on_conversation_failed)
-        worker.voice_changed.connect(self._voice_label.setText)
+        worker.voice_changed.connect(self._on_voice_state)
         worker.voice_transcript.connect(
             lambda text: self._voice_transcript.append(f"<b>You:</b> {text}")
         )
@@ -1161,6 +1175,26 @@ class MainWindow(QMainWindow):
         worker.older_turns_ready.connect(self._on_older_turns_ready)
         worker.conversation_recovered.connect(self._on_conversation_recovered)
         worker.confirmation_ready.connect(self._on_confirmation_ready)
+
+    @Slot(str)
+    def _on_voice_state(self, state: str) -> None:
+        self._voice_label.setText(state)
+        self._update_voice_controls(state)
+
+    def _update_voice_controls(self, state: str) -> None:
+        value = state.rsplit(".", 1)[-1]
+        active = value in {
+            VoiceState.CONNECTING.value,
+            VoiceState.LISTENING.value,
+            VoiceState.RESPONDING.value,
+            VoiceState.INTERRUPTED.value,
+        }
+        self._voice_start_button.setEnabled(not active)
+        self._voice_commit_button.setEnabled(value == VoiceState.LISTENING.value)
+        self._voice_interrupt_button.setEnabled(
+            value == VoiceState.RESPONDING.value
+        )
+        self._voice_stop_button.setEnabled(active or value == VoiceState.ERROR.value)
 
     @Slot(str)
     def _on_state(self, state: str) -> None:
