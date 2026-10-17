@@ -320,7 +320,7 @@ class ClientWorker(QObject):
 
     @Slot(str, bool)
     def start_voice(self, locality: str, cloud_context_eligible: bool) -> None:
-        if self._voice is not None or self._voice_status in {
+        if self._voice_status in {
             VoiceState.CONNECTING,
             VoiceState.LISTENING,
             VoiceState.RESPONDING,
@@ -335,27 +335,33 @@ class ClientWorker(QObject):
             service.start_new_conversation()
         self._set_voice_state(VoiceState.CONNECTING)
         try:
-            self._voice = service.api.realtime()
-            assert service.conversation_id is not None
-            self._voice.open(
-                service.conversation_id,
-                locality=locality,
-                cloud_context_eligible=cloud_context_eligible,
-            )
+            if self._voice is None:
+                self._voice = service.api.realtime()
+                assert service.conversation_id is not None
+                self._voice.open(
+                    service.conversation_id,
+                    locality=locality,
+                    cloud_context_eligible=cloud_context_eligible,
+                )
+                self._output_device = self._output_device_factory()
+                self._output_device.start()
+                voice = self._voice
+                self._pump_thread = threading.Thread(
+                    target=self._pump_loop,
+                    args=(voice,),
+                    daemon=True,
+                    name="sofia-realtime-pump",
+                )
+                self._pump_thread.start()
             self._voice.start()
-            self._output_device = self._output_device_factory()
-            self._output_device.start()
-            self._input_device = self._input_device_factory()
-            self._input_device.start(self._on_microphone_chunk)
+            self._start_input_device()
             self._set_voice_state(VoiceState.LISTENING)
-            self._pump_thread = threading.Thread(
-                target=self._pump_loop, daemon=True, name="sofia-realtime-pump"
-            )
-            self._pump_thread.start()
         except AudioDeviceError as error:
             self._set_voice_state(VoiceState.ERROR)
             self.failure.emit(f"Voice unavailable: {error}")
+            self._stop_audio_devices()
             self._close_voice()
+            self._wait_for_pump()
         except Exception as error:
             traceback.print_exc()
             self._set_voice_state(VoiceState.ERROR)
@@ -365,7 +371,9 @@ class ClientWorker(QObject):
                 if detail
                 else "Realtime voice could not be started"
             )
+            self._stop_audio_devices()
             self._close_voice()
+            self._wait_for_pump()
 
     def _on_microphone_chunk(self, chunk: bytes) -> None:
         voice = self._voice
@@ -376,7 +384,7 @@ class ClientWorker(QObject):
         except Exception:
             pass  # a real failure surfaces through the pump loop instead
 
-    def _pump_loop(self) -> None:
+    def _pump_loop(self, voice: RealtimeVoiceConnection) -> None:
         """Sole reader of the realtime socket once a session is active.
 
         Runs on a dedicated background thread; Qt signal emission is
@@ -384,17 +392,16 @@ class ClientWorker(QObject):
         thread automatically through the existing queued connections.
         """
 
-        voice = self._voice
-        if voice is None:
-            return
         try:
             for event in voice.pump_events():
                 self._handle_voice_event(event)
         except Exception:
             traceback.print_exc()
-            self.failure.emit("Realtime connection was lost")
-            self._set_voice_state(VoiceState.ERROR)
-            self._close_voice()
+            if self._voice is voice:
+                self.failure.emit("Realtime connection was lost")
+                self._set_voice_state(VoiceState.ERROR)
+                self._stop_audio_devices()
+                self._close_voice()
 
     def _handle_voice_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
@@ -406,16 +413,18 @@ class ClientWorker(QObject):
                     output_device.write(event["audio"])
                 except AudioDeviceError:
                     self.failure.emit("Speaker output failed; voice is degraded")
-        elif kind in {"user_transcript.partial", "user_transcript.final"}:
+        elif kind == "user_transcript.final":
             self.voice_transcript.emit(str(event.get("text", "")))
-        elif kind in {"assistant_transcript.partial", "assistant_transcript.final"}:
+        elif kind == "assistant_transcript.final":
             self.voice_assistant_text.emit(str(event.get("text", "")))
         elif kind == "turn.completed":
-            self._set_voice_state(VoiceState.LISTENING)
+            self._set_voice_state(VoiceState.READY)
             self.refresh()
         elif kind in {"turn.failed", "interaction.failed"}:
             self._set_voice_state(VoiceState.ERROR)
             self.failure.emit("Realtime interaction did not complete")
+            self._stop_audio_devices()
+            self._close_voice()
             self.refresh()
         elif kind == "turn.interrupted":
             self._set_voice_state(VoiceState.INTERRUPTED)
@@ -423,7 +432,12 @@ class ClientWorker(QObject):
         elif kind in {"session.failed", "error"}:
             self._set_voice_state(VoiceState.ERROR)
             self.failure.emit("Realtime session failed")
+            self._stop_audio_devices()
+            self._close_voice()
         elif kind == "session.closed":
+            self._stop_audio_devices()
+            if self._voice is not None:
+                self._voice = None
             self._set_voice_state(VoiceState.IDLE)
 
     @Slot()
@@ -435,11 +449,7 @@ class ClientWorker(QObject):
         the Gate" allowance.
         """
 
-        if self._input_device is not None:
-            try:
-                self._input_device.stop()
-            except Exception:
-                pass
+        self._stop_input_device()
         if self._voice is None:
             return
         try:
@@ -450,19 +460,9 @@ class ClientWorker(QObject):
 
     @Slot()
     def stop_voice(self) -> None:
-        if self._input_device is not None:
-            try:
-                self._input_device.stop()
-            except Exception:
-                pass
-            self._input_device = None
-        if self._output_device is not None:
-            try:
-                self._output_device.stop()
-            except Exception:
-                pass
-            self._output_device = None
+        self._stop_audio_devices()
         self._close_voice()
+        self._wait_for_pump()
         self._set_voice_state(VoiceState.IDLE)
 
     @Slot()
@@ -654,6 +654,41 @@ class ClientWorker(QObject):
     def _set_voice_state(self, state: VoiceState) -> None:
         self._voice_status = state
         self.voice_changed.emit(state.value)
+
+    def _start_input_device(self) -> None:
+        self._stop_input_device()
+        self._input_device = self._input_device_factory()
+        self._input_device.start(self._on_microphone_chunk)
+
+    def _stop_input_device(self) -> None:
+        device = self._input_device
+        self._input_device = None
+        if device is not None:
+            try:
+                device.stop()
+            except Exception:
+                traceback.print_exc()
+
+    def _stop_audio_devices(self) -> None:
+        self._stop_input_device()
+        device = self._output_device
+        self._output_device = None
+        if device is not None:
+            try:
+                device.stop()
+            except Exception:
+                traceback.print_exc()
+
+    def _wait_for_pump(self) -> None:
+        thread = self._pump_thread
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            thread.join(2.0)
+        if thread is not None and not thread.is_alive():
+            self._pump_thread = None
 
     def _close_voice(self) -> None:
         voice = self._voice
@@ -1187,9 +1222,12 @@ class MainWindow(QMainWindow):
             VoiceState.CONNECTING.value,
             VoiceState.LISTENING.value,
             VoiceState.RESPONDING.value,
+            VoiceState.READY.value,
             VoiceState.INTERRUPTED.value,
         }
-        self._voice_start_button.setEnabled(not active)
+        self._voice_start_button.setEnabled(
+            value in {VoiceState.IDLE.value, VoiceState.READY.value}
+        )
         self._voice_commit_button.setEnabled(value == VoiceState.LISTENING.value)
         self._voice_interrupt_button.setEnabled(
             value == VoiceState.RESPONDING.value
