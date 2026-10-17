@@ -134,3 +134,8 @@ license terms. Commercial use requires separate authorization from the
 licensor.
 
 See `LICENSE` for the official license reference.
+
+
+Voice is part of Chat, not a separate conversation surface. Text and voice use
+the same selected Conversation and durable history; stopping voice only closes
+the temporary realtime audio session.
