@@ -115,3 +115,13 @@ Keep:
 
 Historical ADRs, amendments, completed execution plans and gate ledgers belong
 to Git history, not the current documentation surface.
+
+
+### Chat and voice continuity
+
+Voice controls are part of Chat and use the currently selected Conversation.
+"Stop voice" releases microphone, speaker, provider session, and pump resources
+only; the Conversation remains current. A later voice session or a text message
+continues that same durable history. The Desktop persists the most recently
+selected Conversation ID and restores it when that Conversation is still
+present after application restart.
