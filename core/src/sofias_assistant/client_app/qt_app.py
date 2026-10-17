@@ -1279,7 +1279,11 @@ class MainWindow(QMainWindow):
             VoiceState.INTERRUPTED.value,
         }
         self._voice_start_button.setEnabled(
-            value in {VoiceState.IDLE.value, VoiceState.READY.value}
+            value in {
+                VoiceState.IDLE.value,
+                VoiceState.READY.value,
+                VoiceState.ERROR.value,
+            }
         )
         self._voice_commit_button.setEnabled(value == VoiceState.LISTENING.value)
         self._voice_interrupt_button.setEnabled(
