@@ -26,6 +26,7 @@ def test_defaults_apply_when_only_the_required_model_is_set() -> None:
         provider_id="openai",
         base_url="https://api.openai.com/v1",
         model_id="example-model",
+        realtime_model_id=None,
     )
     assert config.memory.enabled is False
     assert config.memory.base_url is None
@@ -200,3 +201,16 @@ def test_non_windows_without_data_dir_override_is_rejected() -> None:
         load_production_runtime_config(
             environment={"LLM_MODEL": "example-model"}, platform_name="posix"
         )
+
+
+
+def test_realtime_model_is_optional_and_explicit() -> None:
+    config = load_production_runtime_config(
+        environment={
+            **_MINIMAL_ENVIRONMENT,
+            "LLM_REALTIME_MODEL": "example-realtime",
+        },
+        platform_name="nt",
+    )
+
+    assert config.llm.realtime_model_id == "example-realtime"
