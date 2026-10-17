@@ -26,6 +26,7 @@ def test_snapshot_maps_degraded_core_without_inventing_authority() -> None:
     )
     assert snapshot.connection is ConnectionState.DEGRADED
     assert VoiceState.IDLE.value == "IDLE"
+    assert VoiceState.READY.value == "READY"
 
 
 def test_snapshot_maps_transport_items() -> None:
