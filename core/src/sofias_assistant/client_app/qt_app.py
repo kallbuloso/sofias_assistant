@@ -164,11 +164,29 @@ class ClientWorker(QObject):
             self._state(ConnectionState.DEGRADED)
             self.failure.emit("Core state could not be synchronized")
 
+    def _ensure_current_conversation(self) -> UUID:
+        service = self._service
+        if service is None:
+            raise RuntimeError("Sofia is not connected")
+        if service.conversation_id is None:
+            conversation_id = service.start_new_conversation()
+            self.conversation_opened.emit(
+                str(conversation_id), {"turns": [], "has_older": False}
+            )
+            self.load_conversations()
+        assert service.conversation_id is not None
+        return service.conversation_id
+
     @Slot(str, str, bool)
     def send_text(self, text: str, locality: str, cloud_context_eligible: bool) -> None:
         service = self._service
         if service is None or service.connection is ConnectionState.DISCONNECTED:
             self.failure.emit("Connect to Core before sending a message")
+            return
+        try:
+            self._ensure_current_conversation()
+        except Exception:
+            self.failure.emit("Conversation could not be created")
             return
         self.stream_started.emit()
         try:
@@ -341,8 +359,11 @@ class ClientWorker(QObject):
         if service is None or service.snapshot is None:
             self.failure.emit("Connect to Core before starting realtime voice")
             return
-        if service.conversation_id is None:
-            service.start_new_conversation()
+        try:
+            self._ensure_current_conversation()
+        except Exception:
+            self.failure.emit("Conversation could not be created")
+            return
         self._set_voice_state(VoiceState.CONNECTING)
         try:
             if self._voice is None:
