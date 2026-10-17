@@ -237,3 +237,57 @@ def test_realtime_voice_uses_native_application_service() -> None:
         {"type": "assistant_audio_chunk", "audio": b"\x01\x02"},
         {"type": "session.closed"},
     ]
+
+
+
+def test_native_voice_reopens_once_when_session_is_not_idle() -> None:
+    application = _FakeApplication()
+    first_session = uuid4()
+    second_session = uuid4()
+    interaction_id = uuid4()
+
+    class _RecoveringVoice:
+        def __init__(self) -> None:
+            self.open_calls = 0
+            self.closed: list[UUID] = []
+
+        async def open(
+            self,
+            conversation_id: UUID,
+            *,
+            locality: str,
+            cloud_context_eligible: bool,
+        ) -> UUID:
+            del conversation_id, locality, cloud_context_eligible
+            self.open_calls += 1
+            return first_session if self.open_calls == 1 else second_session
+
+        async def start(self, session_id: UUID) -> UUID:
+            if session_id == first_session:
+                raise RuntimeError("Realtime session is not idle")
+            assert session_id == second_session
+            return interaction_id
+
+        async def close(self, session_id: UUID) -> None:
+            self.closed.append(session_id)
+
+    application.voice = _RecoveringVoice()
+    client = ApplicationCoreApiClient(
+        application,
+        "http://127.0.0.1:8989",
+        "test-credential",
+        http_client=_UnusedHttp(),
+    )
+
+    voice = client.realtime()
+    voice.open(
+        application.conversation_id,
+        locality="cloud_allowed",
+        cloud_context_eligible=True,
+    )
+
+    result = voice.start()
+
+    assert result == interaction_id
+    assert application.voice.open_calls == 2
+    assert application.voice.closed == [first_session]
