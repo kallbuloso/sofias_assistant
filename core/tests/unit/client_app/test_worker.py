@@ -322,3 +322,31 @@ def test_stop_voice_stops_devices_and_connection(qapplication: QApplication) -> 
     assert input_device.stopped is True
     assert output_device.stopped is True
     assert connection.stopped is True
+
+
+
+def test_start_voice_failure_closes_open_realtime_session(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+
+    class _FailingOutput:
+        def start(self) -> None:
+            raise RuntimeError("speaker failed")
+
+        def stop(self) -> None:
+            pass
+
+    worker._output_device_factory = _FailingOutput
+
+    worker.start_voice("cloud_allowed", True)
+
+    assert connection.opened_with == (
+        api.conversation_id,
+        "cloud_allowed",
+        True,
+    )
+    assert connection.stopped is True
