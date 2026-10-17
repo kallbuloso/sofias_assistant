@@ -220,7 +220,7 @@ def test_handle_voice_event_turn_completed_sets_listening_state(
 
     worker._handle_voice_event({"type": "turn.completed"})
 
-    assert states[-1] == "LISTENING"
+    assert states[-1] == "READY"
 
 
 def test_handle_voice_event_turn_failed_emits_failure_and_error_state(
@@ -350,3 +350,58 @@ def test_start_voice_failure_closes_open_realtime_session(
         True,
     )
     assert connection.stopped is True
+
+
+
+def test_completed_voice_turn_becomes_ready_without_microphone(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    input_device = FakeAudioInputDevice([])
+    worker._input_device = input_device
+    states: list[str] = []
+    worker.voice_changed.connect(states.append)
+
+    worker._handle_voice_event({"type": "turn.completed"})
+
+    assert states[-1] == "READY"
+
+
+def test_commit_voice_releases_microphone(qapplication: QApplication) -> None:
+    api = FakeApi()
+    connection = FakeRealtimeConnection([])
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    worker._voice = connection
+    input_device = FakeAudioInputDevice([])
+    worker._input_device = input_device
+
+    worker.commit_voice()
+
+    assert input_device.stopped is True
+    assert worker._input_device is None
+
+
+def test_final_voice_transcripts_only_are_emitted(
+    qapplication: QApplication,
+) -> None:
+    worker = ClientWorker("http://127.0.0.1:8989", "credential")
+    user: list[str] = []
+    assistant: list[str] = []
+    worker.voice_transcript.connect(user.append)
+    worker.voice_assistant_text.connect(assistant.append)
+
+    worker._handle_voice_event({"type": "user_transcript.partial", "text": "Ol"})
+    worker._handle_voice_event({"type": "user_transcript.final", "text": "Olá"})
+    worker._handle_voice_event(
+        {"type": "assistant_transcript.partial", "text": "Oi"}
+    )
+    worker._handle_voice_event(
+        {"type": "assistant_transcript.final", "text": "Oi, Amaral!"}
+    )
+
+    assert user == ["Olá"]
+    assert assistant == ["Oi, Amaral!"]
