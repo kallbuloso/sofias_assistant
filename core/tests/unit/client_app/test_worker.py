@@ -405,3 +405,21 @@ def test_final_voice_transcripts_only_are_emitted(
 
     assert user == ["Olá"]
     assert assistant == ["Oi, Amaral!"]
+
+
+
+def test_assistant_audio_is_queued_through_worker_signal(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    worker = _worker_with_service(api)
+    output = FakeAudioOutputDevice()
+    output.start()
+    worker._output_device = output
+
+    worker._handle_voice_event(
+        {"type": "assistant_audio_chunk", "audio": b"\x00\x01"}
+    )
+    qapplication.processEvents()
+
+    assert output.written == [b"\x00\x01"]
