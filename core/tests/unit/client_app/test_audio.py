@@ -111,3 +111,33 @@ def test_pcm16_mono_to_stereo_duplicates_each_sample() -> None:
         + (-100).to_bytes(2, "little", signed=True)
         + (-100).to_bytes(2, "little", signed=True)
     )
+
+
+
+def test_partial_sink_writes_preserve_unwritten_audio() -> None:
+    class _Sink:
+        def __init__(self) -> None:
+            self.free = 4
+
+        def bytesFree(self) -> int:
+            return self.free
+
+    class _Io:
+        def __init__(self) -> None:
+            self.calls: list[bytes] = []
+
+        def write(self, data: bytes) -> int:
+            self.calls.append(data)
+            return 2
+
+    from sofias_assistant.client_app.audio import QtAudioOutputDevice
+
+    device = QtAudioOutputDevice()
+    device._sink = _Sink()
+    device._io_device = _Io()
+    device._pending.extend(b"abcdef")
+
+    device._drain()
+
+    assert device._io_device.calls == [b"abcd"]
+    assert bytes(device._pending) == b"cdef"
