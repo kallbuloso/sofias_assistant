@@ -92,6 +92,7 @@ class ClientWorker(QObject):
     voice_changed = Signal(str)
     voice_transcript = Signal(str)
     voice_assistant_text = Signal(str)
+    voice_audio_chunk = Signal(bytes)
     failure = Signal(str)
     stopped = Signal()
     ai_dashboard_ready = Signal(object)
@@ -126,6 +127,7 @@ class ClientWorker(QObject):
         self._input_device: AudioInputDevice | None = None
         self._output_device: AudioOutputDevice | None = None
         self._pump_thread: threading.Thread | None = None
+        self.voice_audio_chunk.connect(self._play_voice_audio)
 
     @Slot()
     def connect_core(self) -> None:
@@ -407,12 +409,9 @@ class ClientWorker(QObject):
         kind = event.get("type")
         if kind == "assistant_audio_chunk":
             self._set_voice_state(VoiceState.RESPONDING)
-            output_device = self._output_device
-            if output_device is not None:
-                try:
-                    output_device.write(event["audio"])
-                except AudioDeviceError:
-                    self.failure.emit("Speaker output failed; voice is degraded")
+            audio = event.get("audio")
+            if isinstance(audio, bytes) and audio:
+                self.voice_audio_chunk.emit(audio)
         elif kind == "user_transcript.final":
             self.voice_transcript.emit(str(event.get("text", "")))
         elif kind == "assistant_transcript.final":
@@ -439,6 +438,23 @@ class ClientWorker(QObject):
             if self._voice is not None:
                 self._voice = None
             self._set_voice_state(VoiceState.IDLE)
+
+    @Slot(bytes)
+    def _play_voice_audio(self, chunk: bytes) -> None:
+        """Write speaker PCM only on ClientWorker's Qt thread.
+
+        QAudioSink/QIODevice have Qt thread affinity. Provider events are
+        consumed on the dedicated pump thread, so speaker writes must cross
+        back to the worker thread before touching the Qt audio device.
+        """
+
+        output_device = self._output_device
+        if output_device is None:
+            return
+        try:
+            output_device.write(chunk)
+        except AudioDeviceError:
+            self.failure.emit("Speaker output failed; voice is degraded")
 
     @Slot()
     def commit_voice(self) -> None:
