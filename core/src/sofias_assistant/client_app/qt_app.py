@@ -384,8 +384,10 @@ class ClientWorker(QObject):
             for event in voice.pump_events():
                 self._handle_voice_event(event)
         except Exception:
+            traceback.print_exc()
             self.failure.emit("Realtime connection was lost")
             self._set_voice_state(VoiceState.ERROR)
+            self._close_voice()
 
     def _handle_voice_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
@@ -453,11 +455,6 @@ class ClientWorker(QObject):
             except Exception:
                 pass
             self._output_device = None
-        if self._voice is not None:
-            try:
-                self._voice.stop()
-            except Exception:
-                pass
         self._close_voice()
         self._set_voice_state(VoiceState.IDLE)
 
@@ -652,7 +649,13 @@ class ClientWorker(QObject):
         self.voice_changed.emit(state.value)
 
     def _close_voice(self) -> None:
+        voice = self._voice
         self._voice = None
+        if voice is not None:
+            try:
+                voice.stop()
+            except Exception:
+                traceback.print_exc()
 
 
 class DesktopController(QObject):
