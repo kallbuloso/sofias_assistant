@@ -3152,3 +3152,40 @@ async def test_replacement_start_failure_releases_lease_and_leaves_idle_session(
         await runtime.close_session(session.id)
     finally:
         await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_open_self_heals_stale_closed_conversation_owner(
+    tmp_path: Path,
+) -> None:
+    fake = ScriptedFakeRealtimeProvider(
+        (
+            FakeRealtimeScript((FakeRealtimeCompleted(),)),
+            FakeRealtimeScript((FakeRealtimeCompleted(),)),
+        )
+    )
+    runtime, text_runtime, _, engine = await _runtime(tmp_path, fake)
+    try:
+        conversation = await text_runtime.create_conversation()
+        first = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+        await runtime.close_session(first.id)
+
+        # Re-introduce the historical stale owner shape and verify open()
+        # repairs it instead of treating the durable Conversation as busy.
+        runtime._conversation_sessions[conversation.id] = first.id
+
+        second = await runtime.open_session(
+            OpenRealtimeSessionCommand(
+                conversation.id, DataLocality.LOCAL_ONLY, True, _format(), _format()
+            )
+        )
+
+        assert second.id != first.id
+        await runtime.close_session(second.id)
+    finally:
+        await engine.dispose()
