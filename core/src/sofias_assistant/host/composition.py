@@ -189,9 +189,32 @@ def build_conversation_dependencies_factory(
                         CapabilityProvenance.BUILTIN_METADATA,
                     ),
                     CapabilityClaim(
-                        Capability.TEXT_STREAMING, CapabilityProvenance.BUILTIN_METADATA
+                        Capability.TEXT_STREAMING,
+                        CapabilityProvenance.BUILTIN_METADATA,
                     ),
                 }
+            ),
+            realtime_model_id=llm.realtime_model_id,
+            realtime_model_display_name=llm.realtime_model_id,
+            realtime_capabilities=(
+                frozenset(
+                    {
+                        CapabilityClaim(
+                            Capability.REALTIME,
+                            CapabilityProvenance.BUILTIN_METADATA,
+                        ),
+                        CapabilityClaim(
+                            Capability.AUDIO_INPUT,
+                            CapabilityProvenance.BUILTIN_METADATA,
+                        ),
+                        CapabilityClaim(
+                            Capability.AUDIO_OUTPUT,
+                            CapabilityProvenance.BUILTIN_METADATA,
+                        ),
+                    }
+                )
+                if llm.realtime_model_id is not None
+                else frozenset()
             ),
         )
         return ConversationRuntimeDependencies(
