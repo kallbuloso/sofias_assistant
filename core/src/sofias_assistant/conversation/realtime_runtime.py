@@ -171,10 +171,19 @@ class RealtimeConversationRuntime:
         if not isinstance(command, OpenRealtimeSessionCommand):
             raise ValueError("command must be OpenRealtimeSessionCommand")
         async with self._sessions_gate:
-            if command.conversation_id in self._conversation_sessions:
-                raise RealtimeSessionConflictError(
-                    "A realtime session is already open for this conversation"
-                )
+            existing_id = self._conversation_sessions.get(command.conversation_id)
+            if existing_id is not None:
+                existing = self._sessions.get(existing_id)
+                if (
+                    existing is None
+                    or existing.state
+                    in (RealtimeSessionState.CLOSED, RealtimeSessionState.FAILED)
+                ):
+                    self._conversation_sessions.pop(command.conversation_id, None)
+                else:
+                    raise RealtimeSessionConflictError(
+                        "A realtime session is already open for this conversation"
+                    )
             session_id = RealtimeSessionId(self._id_factory())
             lease = await self._coordinator.acquire_voice_activity(
                 command.conversation_id
@@ -449,43 +458,44 @@ class RealtimeConversationRuntime:
         session = self._session(realtime_session_id)
         session.event_delivery_shutdown_requested.set()
         session.event_delivery_close_requested.set()
-        async with self._coordinator.voice_transition(session.conversation_id):
-            if session.state in (
-                RealtimeSessionState.CLOSED,
-                RealtimeSessionState.FAILED,
-            ):
-                async with self._sessions_gate:
+        try:
+            async with self._coordinator.voice_transition(session.conversation_id):
+                if session.state in (
+                    RealtimeSessionState.CLOSED,
+                    RealtimeSessionState.FAILED,
+                ):
+                    return
+                interaction = session.active_interaction
+                if interaction is not None:
+                    if interaction.durable_turn_id is not None:
+                        conversation, turn = await self._terminalize_turn(
+                            session,
+                            interaction,
+                            "interrupted",
+                            "Realtime session was closed",
+                            interrupted=True,
+                        )
+                        await self._emit(
+                            session,
+                            ConversationTurnInterrupted(conversation, turn),
+                            terminal=True,
+                        )
+                    await self._release_interaction(session)
+                try:
+                    await self._close_provider(session)
+                except Exception:
+                    # Provider transport teardown is best-effort; conversation
+                    # ownership is released unconditionally below.
+                    pass
+                session.state = RealtimeSessionState.CLOSED
+                await self._emit(
+                    session, RealtimeSessionClosed(session.id), terminal=True
+                )
+                await self._end_events(session)
+        finally:
+            async with self._sessions_gate:
+                if self._conversation_sessions.get(session.conversation_id) == session.id:
                     self._conversation_sessions.pop(session.conversation_id, None)
-                return
-            interaction = session.active_interaction
-            if interaction is not None:
-                if interaction.durable_turn_id is not None:
-                    conversation, turn = await self._terminalize_turn(
-                        session,
-                        interaction,
-                        "interrupted",
-                        "Realtime session was closed",
-                        interrupted=True,
-                    )
-                    await self._emit(
-                        session,
-                        ConversationTurnInterrupted(conversation, turn),
-                        terminal=True,
-                    )
-                await self._release_interaction(session)
-            try:
-                await self._close_provider(session)
-            except Exception:
-                # Closing a provider transport is best-effort. A failure here
-                # must not keep the durable Conversation locked to a dead
-                # realtime session.
-                pass
-            finally:
-                async with self._sessions_gate:
-                    self._conversation_sessions.pop(session.conversation_id, None)
-            session.state = RealtimeSessionState.CLOSED
-            await self._emit(session, RealtimeSessionClosed(session.id), terminal=True)
-            await self._end_events(session)
 
     async def close_all(self) -> None:
         for session_id in tuple(self._sessions):
