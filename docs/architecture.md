@@ -210,3 +210,14 @@ The next architectural success condition is not "build succeeds". It is:
 > workflows.
 
 Release packaging is not a target of the current product architecture.
+
+
+### Voice is a Conversation modality
+
+Text and realtime voice are two input/output modalities of the same durable
+Conversation. Starting or stopping realtime voice must never create, replace,
+or clear the selected Conversation. The realtime provider session is
+ephemeral and may be opened and closed repeatedly for one Conversation.
+
+The Desktop presents voice controls inside Chat. Explicit "New conversation"
+is the only user action that intentionally creates a different Conversation.
