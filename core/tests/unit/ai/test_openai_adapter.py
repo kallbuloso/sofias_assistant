@@ -311,7 +311,15 @@ async def test_openai_realtime_adapter_normalizes_manual_ptt_audio_and_response(
                 "output": {"format": {"type": "audio/pcm", "rate": 24_000}},
             },
             "output_modalities": ["audio"],
-            "instructions": "Realtime system instruction.",
+            "instructions": (
+                "Realtime system instruction.\n\n"
+                "This session is Sofia's live voice conversation. You receive the user's "
+                "speech as audio through the realtime input stream and can respond with "
+                "generated speech. Do not claim that you cannot hear or process audio in "
+                "this session. You do not have access to the user's microphone outside "
+                "audio explicitly sent through this active session; do not claim to hear "
+                "background audio or to access unrelated device sensors."
+            ),
         }
     ]
     assert connection.items == [
