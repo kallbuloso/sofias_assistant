@@ -1694,10 +1694,18 @@ class MainWindow(QMainWindow):
         turns = page.get("turns", [])
         rendered_messages: list[ConversationMessage] = []
         for turn in turns:
+            # The history API persists the input modality for each durable turn.
+            # Voice transcripts and their replies must retain that provenance
+            # when navigating away from a Conversation and opening it again.
+            modality = (
+                "voice"
+                if str(turn.get("input_modality") or "").upper() == "VOICE"
+                else "text"
+            )
             user_text = str(turn.get("user_text") or "")
             if user_text:
                 rendered_messages.append(
-                    {"role": "user", "text": user_text, "modality": "text"}
+                    {"role": "user", "text": user_text, "modality": modality}
                 )
             assistant_text = turn.get("assistant_text")
             if assistant_text:
@@ -1705,7 +1713,7 @@ class MainWindow(QMainWindow):
                     {
                         "role": "assistant",
                         "text": str(assistant_text),
-                        "modality": "text",
+                        "modality": modality,
                     }
                 )
             elif turn.get("status") == "FAILED":
