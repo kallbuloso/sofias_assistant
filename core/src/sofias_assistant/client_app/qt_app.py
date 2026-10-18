@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -1157,106 +1158,321 @@ class MainWindow(QMainWindow):
             health_widget=self._health,
         )
 
-        self._tabs = QTabWidget(self)
-        self._tabs.addTab(self._chat_tab(), "Chat")
-        self._tabs.addTab(self._tasks_tab(), "Tasks")
-        self._tabs.addTab(self._notifications_tab(), "Notifications")
-        self.setCentralWidget(self._tabs)
+        self.setCentralWidget(self._desktop_shell())
+        self._apply_desktop_style()
 
-    def _open_ai_models_tab(self) -> None:
-        self._show_settings("AI & Models")
+    def _desktop_shell(self) -> QWidget:
+        root = QWidget()
+        root.setObjectName("desktopRoot")
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-    def _chat_tab(self) -> QWidget:
-        tab = QWidget()
-        outer = QVBoxLayout(tab)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        outer.addWidget(splitter, 1)
+        outer.addWidget(self._top_bar())
 
-        sidebar = QWidget()
-        sidebar_layout = QVBoxLayout(sidebar)
-        new_conversation = QPushButton("+ New conversation")
-        new_conversation.clicked.connect(self._controller.request_new_conversation.emit)
-        sidebar_layout.addWidget(new_conversation)
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        body_layout.addWidget(self._navigation_rail())
+        body_layout.addWidget(self._conversation_sidebar())
+        body_layout.addWidget(self._conversation_workspace(), 1)
+        body_layout.addWidget(self._activity_panel())
+
+        outer.addWidget(body, 1)
+        return root
+
+    def _top_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("topBar")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setSpacing(12)
+
+        brand = QLabel("SOFIA")
+        brand.setObjectName("brandLabel")
+        layout.addWidget(brand)
+
+        self._readiness_badge = QLabel("● Pronta")
+        self._readiness_badge.setObjectName("statusBadge")
+        layout.addWidget(self._readiness_badge)
+
+        self._privacy_badge = QLabel("Nuvem permitida")
+        self._privacy_badge.setObjectName("privacyBadge")
+        layout.addWidget(self._privacy_badge)
+
+        layout.addStretch(1)
+
+        configure = QPushButton("Configurar")
+        configure.clicked.connect(lambda: self._show_settings())
+        layout.addWidget(configure)
+
+        controls = QPushButton("Controles")
+        controls.clicked.connect(self._show_privacy_dialog)
+        layout.addWidget(controls)
+        return bar
+
+    def _navigation_rail(self) -> QWidget:
+        rail = QFrame()
+        rail.setObjectName("navRail")
+        rail.setFixedWidth(64)
+        layout = QVBoxLayout(rail)
+        layout.setContentsMargins(8, 14, 8, 14)
+        layout.setSpacing(10)
+
+        chat = QPushButton("◉")
+        chat.setToolTip("Conversa")
+        chat.setObjectName("railActive")
+        layout.addWidget(chat)
+
+        tasks = QPushButton("✓")
+        tasks.setToolTip("Atividade")
+        tasks.clicked.connect(self._focus_activity)
+        layout.addWidget(tasks)
+
+        settings = QPushButton("⚙")
+        settings.setToolTip("Configurações")
+        settings.clicked.connect(lambda: self._show_settings())
+        layout.addWidget(settings)
+
+        layout.addStretch(1)
+        return rail
+
+    def _conversation_sidebar(self) -> QWidget:
+        sidebar = QFrame()
+        sidebar.setObjectName("conversationSidebar")
+        sidebar.setMinimumWidth(250)
+        sidebar.setMaximumWidth(340)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("Conversas recentes")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        new_conversation = QPushButton("+ Nova conversa")
+        new_conversation.setObjectName("primaryButton")
+        new_conversation.clicked.connect(
+            self._controller.request_new_conversation.emit
+        )
+        layout.addWidget(new_conversation)
+
         self._conversation_list = QListWidget()
         self._conversation_list.setAccessibleName("Conversation history")
         self._conversation_list.currentItemChanged.connect(
             self._on_conversation_selected
         )
-        sidebar_layout.addWidget(self._conversation_list, 1)
-        splitter.addWidget(sidebar)
+        layout.addWidget(self._conversation_list, 1)
+        return sidebar
 
-        chat_panel = QWidget()
-        chat_layout = QVBoxLayout(chat_panel)
+    def _conversation_workspace(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("conversationWorkspace")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
         older = QPushButton("Earlier messages")
         older.clicked.connect(self._load_older_turns)
-        chat_layout.addWidget(older)
+        header.addWidget(older)
+        header.addStretch(1)
+        layout.addLayout(header)
+
         self._chat = QTextBrowser()
         self._chat.setOpenExternalLinks(False)
-        self._chat.setPlaceholderText("Conversation output appears here")
+        self._chat.setPlaceholderText("Sofia está pronta. Fale ou digite sua mensagem.")
         self._chat.setAccessibleName("Conversation transcript")
-        chat_layout.addWidget(self._chat, 1)
-        row = QHBoxLayout()
-        self._draft = QLineEdit()
-        self._draft.setPlaceholderText("Message Sofia…")
-        self._draft.returnPressed.connect(self._send_draft)
-        send = QPushButton("Send")
-        send.clicked.connect(self._send_draft)
-        row.addWidget(self._draft, 1)
-        row.addWidget(send)
-        chat_layout.addLayout(row)
+        self._chat.setObjectName("conversationTranscript")
+        layout.addWidget(self._chat, 1)
 
-        voice_row = QHBoxLayout()
-        self._voice_label = QLabel("Voice: IDLE")
-        self._voice_label.setAccessibleName("Voice state")
-        self._voice_start_button = QPushButton("Start voice")
-        self._voice_commit_button = QPushButton("Stop speaking")
-        self._voice_interrupt_button = QPushButton("Interrupt")
-        self._voice_stop_button = QPushButton("Stop voice")
+        composer = QFrame()
+        composer.setObjectName("composer")
+        composer_layout = QHBoxLayout(composer)
+        composer_layout.setContentsMargins(10, 8, 10, 8)
+        composer_layout.setSpacing(8)
+
+        self._draft = QLineEdit()
+        self._draft.setPlaceholderText("Mensagem para Sofia…")
+        self._draft.returnPressed.connect(self._send_draft)
+        composer_layout.addWidget(self._draft, 1)
+
+        self._voice_start_button = QPushButton("🎤")
+        self._voice_start_button.setToolTip("Iniciar voz")
         self._voice_start_button.clicked.connect(self._start_voice)
+        composer_layout.addWidget(self._voice_start_button)
+
+        self._voice_commit_button = QPushButton("Parar fala")
         self._voice_commit_button.clicked.connect(
             self._controller.request_voice_commit.emit
         )
+        composer_layout.addWidget(self._voice_commit_button)
+
+        self._voice_interrupt_button = QPushButton("Interromper")
         self._voice_interrupt_button.clicked.connect(
             self._controller.request_voice_interrupt.emit
         )
+        composer_layout.addWidget(self._voice_interrupt_button)
+
+        self._voice_stop_button = QPushButton("Parar voz")
         self._voice_stop_button.clicked.connect(
             self._controller.request_voice_stop.emit
         )
-        voice_row.addWidget(self._voice_label)
-        voice_row.addStretch(1)
-        voice_row.addWidget(self._voice_start_button)
-        voice_row.addWidget(self._voice_commit_button)
-        voice_row.addWidget(self._voice_interrupt_button)
-        voice_row.addWidget(self._voice_stop_button)
-        chat_layout.addLayout(voice_row)
+        composer_layout.addWidget(self._voice_stop_button)
+
+        send = QPushButton("Enviar")
+        send.setObjectName("primaryButton")
+        send.clicked.connect(self._send_draft)
+        composer_layout.addWidget(send)
+
+        layout.addWidget(composer)
+
+        self._voice_label = QLabel("Voice: IDLE")
+        self._voice_label.setAccessibleName("Voice state")
+        self._voice_label.setObjectName("voiceState")
+        layout.addWidget(self._voice_label)
+
         self._update_voice_controls(VoiceState.IDLE.value)
-
-        splitter.addWidget(chat_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
         self._oldest_loaded_sequence: int | None = None
-        return tab
+        return panel
 
-    def _tasks_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+    def _activity_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("activityPanel")
+        panel.setMinimumWidth(300)
+        panel.setMaximumWidth(390)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("ATIVIDADE")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        task_group = QGroupBox("Tarefas")
+        task_layout = QVBoxLayout(task_group)
         self._tasks = QListWidget()
-        layout.addWidget(self._tasks)
-        return tab
+        self._tasks.setAccessibleName("Current tasks")
+        task_layout.addWidget(self._tasks)
+        layout.addWidget(task_group, 1)
 
-    def _notifications_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
+        notification_group = QGroupBox("Notificações")
+        notification_layout = QVBoxLayout(notification_group)
         self._notifications = QListWidget()
-        layout.addWidget(self._notifications)
-        return tab
+        self._notifications.setAccessibleName("Notifications")
+        notification_layout.addWidget(self._notifications)
+        layout.addWidget(notification_group, 1)
 
-    def _health_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        self._health = QListWidget()
-        layout.addWidget(self._health)
-        return tab
+        return panel
+
+    def _focus_activity(self) -> None:
+        self._tasks.setFocus()
+
+    def _apply_desktop_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget#desktopRoot {
+                background: #06131a;
+                color: #d9edf5;
+            }
+            QFrame#topBar {
+                background: #071820;
+                border-bottom: 1px solid #123440;
+            }
+            QLabel#brandLabel {
+                font-size: 22px;
+                font-weight: 700;
+                letter-spacing: 5px;
+                color: #f4fbff;
+            }
+            QLabel#statusBadge, QLabel#privacyBadge {
+                padding: 6px 12px;
+                border: 1px solid #123440;
+                border-radius: 8px;
+                background: #081d26;
+                color: #2cf2c5;
+            }
+            QFrame#navRail {
+                background: #071820;
+                border-right: 1px solid #123440;
+            }
+            QFrame#conversationSidebar, QFrame#activityPanel {
+                background: #08171f;
+                border-right: 1px solid #123440;
+            }
+            QFrame#activityPanel {
+                border-left: 1px solid #123440;
+                border-right: 0;
+            }
+            QFrame#conversationWorkspace {
+                background: #07131a;
+            }
+            QLabel#sectionTitle {
+                font-size: 14px;
+                font-weight: 700;
+                color: #eefaff;
+            }
+            QTextBrowser#conversationTranscript {
+                background: #07131a;
+                border: 1px solid #123440;
+                border-radius: 10px;
+                padding: 12px;
+            }
+            QFrame#composer {
+                background: #091c25;
+                border: 1px solid #145164;
+                border-radius: 10px;
+            }
+            QPushButton {
+                min-height: 30px;
+                padding: 5px 10px;
+                border: 1px solid #16495a;
+                border-radius: 7px;
+                background: #0a202a;
+                color: #d9edf5;
+            }
+            QPushButton:hover {
+                border-color: #22d7f2;
+                background: #0c2a36;
+            }
+            QPushButton#primaryButton, QPushButton#railActive {
+                border-color: #22d7f2;
+                color: #22e6f5;
+                background: #082630;
+            }
+            QListWidget, QLineEdit {
+                background: #081820;
+                border: 1px solid #123440;
+                border-radius: 8px;
+                color: #d9edf5;
+                selection-background-color: #0d4050;
+            }
+            QLineEdit {
+                padding: 7px;
+            }
+            QGroupBox {
+                border: 1px solid #123440;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+                color: #9fd7e7;
+            }
+            QLabel#voiceState {
+                color: #7db5c5;
+                padding-left: 4px;
+            }
+            """
+        )
+
+    def _open_ai_models_tab(self) -> None:
+        self._show_settings("AI & Models")
 
     def _build_tray(self) -> None:
         self._tray = QSystemTrayIcon(_tray_icon(), self)
