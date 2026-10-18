@@ -24,9 +24,11 @@ def qapplication() -> QApplication:
     return app if isinstance(app, QApplication) else QApplication([])
 
 
-def test_settings_dialog_keeps_core_url_read_only(qapplication: QApplication) -> None:
-    dialog = SettingsDialog("http://127.0.0.1:8989", True, None)
+def test_settings_dialog_shows_native_runtime(qapplication: QApplication) -> None:
+    dialog = SettingsDialog(True, None)
     assert dialog.windowTitle() == "Sofia settings"
+    assert dialog._runtime.text() == "In-process Python application"
+    assert dialog._runtime.isReadOnly() is True
     assert dialog.notifications_enabled is True
     dialog.close()
 
