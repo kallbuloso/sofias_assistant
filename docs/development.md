@@ -127,3 +127,11 @@ only; the Conversation remains current. A later voice session or a text message
 continues that same durable history. The Desktop persists the most recently
 selected Conversation ID and restores it when that Conversation is still
 present after application restart.
+
+
+### SAS-04 Desktop shell
+
+The current Desktop shell is conversation-first. Chat is the default surface.
+AI/model configuration, Memory configuration, readiness status and health
+diagnostics are presented through Sofia Settings. Tasks and Notifications remain
+top-level while their contextual UX is refined incrementally.
