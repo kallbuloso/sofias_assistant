@@ -130,10 +130,9 @@ class ConversationFeedWidget(QScrollArea):
         self._layout = QVBoxLayout(self._content)
         self._layout.setContentsMargins(24, 24, 24, 24)
         self._layout.setSpacing(5)
-        # A resizable scroll-area child must recompute its natural height when
-        # the message layout changes. Without this, the outer widget retains
-        # a stale height (1211px vs a 1021px size hint in Windows diagnostics).
-        self._layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        # Do not lock the scroll content to QLayout.minimumSize(): on Windows
+        # it can exceed sizeHint for wrapped labels and create a blank tail.
+        self._layout.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
         self.setWidget(self._content)
 
         self._message_widgets: list[ConversationMessageWidget] = []
@@ -346,6 +345,7 @@ class ConversationFeedWidget(QScrollArea):
             "content_size_hint": self._content.sizeHint().height(),
             "root_layout_height": self._layout.geometry().height(),
             "content_min_height": self._content.minimumHeight(),
+            "root_layout_min_size": self._layout.minimumSize().height(),
             "content_max_height": self._content.maximumHeight(),
             "hero_visible": self._hero.isVisible(),
             "hero_height": self._hero.height(),
@@ -362,6 +362,7 @@ class ConversationFeedWidget(QScrollArea):
                 {
                     "height": widget.height(),
                     "hint": widget.sizeHint().height(),
+                    "min_hint": widget.minimumSizeHint().height(),
                     "min": widget.minimumHeight(),
                     "max": widget.maximumHeight(),
                 }
