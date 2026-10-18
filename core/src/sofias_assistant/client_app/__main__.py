@@ -86,7 +86,6 @@ def main(argv: list[str] | None = None) -> int:
         core_url,
         credential,
         auto_connect=not args.smoke,
-        runtime_session_id=runtime_session_id,
     )
     if args.smoke:
         from PySide6.QtCore import QTimer
