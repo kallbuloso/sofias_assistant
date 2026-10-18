@@ -153,7 +153,10 @@ class ConversationFeedWidget(QScrollArea):
         # Force Qt to refresh the host's minimum/maximum size whenever turns
         # are removed or added; otherwise old fixed geometry can survive a
         # Conversation switch and create a long empty scrollbar range.
-        self._messages_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        # Let Qt derive its size from the visible rows. SetMinAndMaxSize
+        # previously locked the host to a stale minimum (1163px for a
+        # 973px size hint), leaving an artificial scrollable tail.
+        self._messages_layout.setSizeConstraint(QLayout.SizeConstraint.SetDefaultConstraint)
         # The message host must not grow to fill a tall viewport: extra
         # viewport space belongs outside the scrollable message content.
         self._messages_host.setSizePolicy(
@@ -272,9 +275,6 @@ class ConversationFeedWidget(QScrollArea):
                 message.get("modality", "text"),
                 scroll=False,
             )
-        # Drop the previous conversation's explicit height before recalculating.
-        self._messages_host.setMinimumHeight(0)
-        self._messages_host.setMaximumHeight(16777215)
         self._messages_layout.invalidate()
         self._messages_host.updateGeometry()
         self._layout.invalidate()
@@ -313,12 +313,7 @@ class ConversationFeedWidget(QScrollArea):
         if not self._message_widgets:
             return
         self._messages_layout.activate()
-        # Measured on Windows: host geometry 3283px vs sizeHint 2827px.
-        # The previous conversation may leave surplus height in the host
-        # even though every message row is already top-aligned.
-        natural_height = self._messages_layout.sizeHint().height()
-        if natural_height > 0 and self._messages_host.height() != natural_height:
-            self._messages_host.setFixedHeight(natural_height)
+        # Do not fix the host height from a transient size hint.
         self._messages_host.updateGeometry()
         self._layout.invalidate()
         self._layout.activate()
