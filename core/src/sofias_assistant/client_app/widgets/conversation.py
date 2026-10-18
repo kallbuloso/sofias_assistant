@@ -142,7 +142,19 @@ class ConversationFeedWidget(QScrollArea):
         self._message_widgets: list[ConversationMessageWidget] = []
         self._hero = self._build_hero()
         self._layout.addWidget(self._hero, 1)
+
+        # Isolate message rows from the expanding scroll-area layout.
+        # Only the bottom spacer may absorb unused vertical space.
+        self._messages_host = QWidget(self._content)
+        self._messages_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        self._messages_layout = QVBoxLayout(self._messages_host)
+        self._messages_layout.setContentsMargins(0, 0, 0, 0)
+        self._messages_layout.setSpacing(5)
+        self._layout.addWidget(self._messages_host, 0, Qt.AlignmentFlag.AlignTop)
         self._layout.addStretch(1)
+        self._messages_host.hide()
 
         self.setStyleSheet(
             f"""
@@ -226,18 +238,20 @@ class ConversationFeedWidget(QScrollArea):
 
     def _clear_layout_messages(self) -> None:
         for widget in self._message_widgets:
-            self._layout.removeWidget(widget)
+            self._messages_layout.removeWidget(widget)
             widget.deleteLater()
         self._message_widgets.clear()
 
     def clear_messages(self) -> None:
         self._clear_layout_messages()
+        self._messages_host.hide()
         self._hero.show()
 
     def set_messages(self, messages: Iterable[ConversationMessage]) -> None:
         self._clear_layout_messages()
         message_list = list(messages)
         self._hero.setVisible(not message_list)
+        self._messages_host.setVisible(bool(message_list))
         for message in message_list:
             self.add_message(
                 message["role"],
@@ -257,9 +271,9 @@ class ConversationFeedWidget(QScrollArea):
         scroll: bool = True,
     ) -> ConversationMessageWidget:
         self._hero.hide()
-        widget = ConversationMessageWidget(role, text, modality, self._content)
-        # Insert before the trailing stretch.
-        self._layout.insertWidget(self._layout.count() - 1, widget, 0, Qt.AlignmentFlag.AlignTop)
+        self._messages_host.show()
+        widget = ConversationMessageWidget(role, text, modality, self._messages_host)
+        self._messages_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         self._message_widgets.append(widget)
         if scroll:
             self.scroll_to_bottom()
