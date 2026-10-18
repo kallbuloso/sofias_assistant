@@ -96,10 +96,12 @@ visual Sofia
 ```
 
 Conversation, history, tasks, confirmations, notifications, health, AI
-configuration, Memory integration and realtime voice now resolve through native
-application services. The Desktop no longer requires localhost transport; the
-remaining loopback boundary is compatibility infrastructure scheduled for
-removal in SAS-03E.
+configuration, Memory integration and realtime voice resolve through native
+application services. Canonical Desktop startup does not bind localhost, create
+a bearer credential, or create a Desktop client session.
+
+Closing the window, choosing Quit, or interrupting source startup must unwind the
+single application lifecycle rather than leave a background Core process behind.
 
 ## 7. Documentation rule
 
