@@ -249,7 +249,7 @@ class ConversationFeedWidget(QScrollArea):
                 scroll=False,
             )
         if message_list:
-            self.scroll_to_bottom()
+            self.scroll_to_latest_on_restore()
 
     def add_message(
         self,
@@ -267,6 +267,21 @@ class ConversationFeedWidget(QScrollArea):
         if scroll:
             self.scroll_to_bottom()
         return widget
+
+    def scroll_to_latest_on_restore(self) -> None:
+        """Open a restored conversation at its latest turn after geometry settles."""
+        # Restoring many QLabel bubbles can change document heights after the
+        # first scrollbar update. Recompute geometry before positioning.
+        QTimer.singleShot(0, self._finish_restore_scroll)
+
+    def _finish_restore_scroll(self) -> None:
+        self._messages_layout.activate()
+        self._layout.activate()
+        self._content.adjustSize()
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        # Qt may update the scroll range once more as the viewport lays out.
+        QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
     def scroll_to_bottom(self) -> None:
         QTimer.singleShot(
