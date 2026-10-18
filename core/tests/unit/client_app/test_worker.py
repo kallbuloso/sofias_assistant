@@ -539,3 +539,58 @@ def test_text_after_voice_uses_same_current_conversation(
     worker.send_text("continue", "local_only", False)
 
     assert worker._service.conversation_id == api.conversation_id
+
+
+
+def test_voice_pump_starts_after_native_interaction_start(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+
+    class _OrderedRealtime(FakeRealtimeConnection):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.started = False
+            self.pump_observed_started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def pump_events(self):
+            self.pump_observed_started = self.started
+            return
+            yield  # pragma: no cover
+
+    connection = _OrderedRealtime()
+    api.realtime_connection = connection
+    worker = _worker_with_service(api)
+    worker._input_device_factory = lambda: FakeAudioInputDevice([])
+    worker._output_device_factory = FakeAudioOutputDevice
+
+    worker.start_voice("local_only", False)
+
+    for _ in range(50):
+        thread = worker._pump_thread
+        if thread is not None and not thread.is_alive():
+            break
+        time.sleep(0.01)
+
+    assert connection.started is True
+    assert connection.pump_observed_started is True
+
+
+def test_voice_failure_surfaces_provider_detail(
+    qapplication: QApplication,
+) -> None:
+    api = FakeApi()
+    worker = _worker_with_service(api)
+    messages: list[str] = []
+    worker.failure.connect(messages.append)
+
+    worker._handle_voice_event(
+        {"type": "interaction.failed", "message": "OpenAI realtime response failed"}
+    )
+
+    assert messages[-1] == (
+        "Realtime interaction did not complete: OpenAI realtime response failed"
+    )
