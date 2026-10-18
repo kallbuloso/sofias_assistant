@@ -58,7 +58,6 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
 
     credential = os.environ.get("SOFIA_CLIENT_CREDENTIAL", "")
-    runtime_session_id: UUID | None = None
     if args.smoke:
         core_url = args.core_url or "http://127.0.0.1:8989"
         credential = credential or "smoke-placeholder"
@@ -80,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         attached = _attach_via_supervisor()
         if attached is None:
             return 1
-        core_url, credential, runtime_session_id = attached
+        core_url, credential, _ = attached
 
     app, window = create_application(
         core_url,
