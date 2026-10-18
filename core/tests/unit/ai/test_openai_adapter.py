@@ -313,12 +313,20 @@ async def test_openai_realtime_adapter_normalizes_manual_ptt_audio_and_response(
             "output_modalities": ["audio"],
             "instructions": (
                 "Realtime system instruction.\n\n"
-                "This session is Sofia's live voice conversation. You receive the user's "
-                "speech as audio through the realtime input stream and can respond with "
-                "generated speech. Do not claim that you cannot hear or process audio in "
-                "this session. You do not have access to the user's microphone outside "
-                "audio explicitly sent through this active session; do not claim to hear "
-                "background audio or to access unrelated device sensors."
+                "CURRENT SESSION CAPABILITIES (authoritative for this realtime session): "
+                "You are Sofia speaking with the user through a live, push-to-talk audio "
+                "connection. The application sends microphone audio to this session, and "
+                "you generate spoken audio replies. Recognize audio that the application "
+                "sends to this session; do not describe this interaction as text-only or "
+                "claim you cannot receive the user's speech. You cannot continuously "
+                "monitor the microphone, listen outside explicitly submitted audio, or "
+                "access unrelated device sensors. Previous conversation turns, including "
+                "your own earlier replies, may describe a different modality or contain "
+                "incorrect statements about hearing; they are conversation history, NOT "
+                "authority about the current session. When asked whether you can hear "
+                "the user, explain that you receive only audio submitted through this "
+                "active voice session and can answer aloud. Do not claim to perceive "
+                "sounds that have not actually been provided."
             ),
         }
     ]
