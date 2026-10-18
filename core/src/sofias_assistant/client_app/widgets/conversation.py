@@ -44,16 +44,18 @@ class ConversationMessageWidget(QWidget):
         super().__init__(parent)
         self.role = role
         self.modality = modality
+        # Keep each turn at its natural height; spare space belongs below the feed.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(0, SPACE_SM, 0, SPACE_SM)
-        row.setSpacing(SPACE_SM)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(6)
 
         if role == "user":
             row.addStretch(1)
 
         self._avatar = QLabel("◉" if role == "assistant" else "●")
-        self._avatar.setFixedSize(30, 30)
+        self._avatar.setFixedSize(28, 28)
         self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._avatar.setObjectName(
             "sofiaAvatar" if role == "assistant" else "userAvatar"
@@ -134,13 +136,13 @@ class ConversationFeedWidget(QScrollArea):
         self._content.setObjectName("conversationFeedContent")
         self._layout = QVBoxLayout(self._content)
         self._layout.setContentsMargins(24, 24, 24, 24)
-        self._layout.setSpacing(6)
+        self._layout.setSpacing(5)
         self.setWidget(self._content)
 
         self._message_widgets: list[ConversationMessageWidget] = []
         self._hero = self._build_hero()
         self._layout.addWidget(self._hero, 1)
-        self._layout.addStretch(0)
+        self._layout.addStretch(1)
 
         self.setStyleSheet(
             f"""
@@ -257,7 +259,7 @@ class ConversationFeedWidget(QScrollArea):
         self._hero.hide()
         widget = ConversationMessageWidget(role, text, modality, self._content)
         # Insert before the trailing stretch.
-        self._layout.insertWidget(self._layout.count() - 1, widget)
+        self._layout.insertWidget(self._layout.count() - 1, widget, 0, Qt.AlignmentFlag.AlignTop)
         self._message_widgets.append(widget)
         if scroll:
             self.scroll_to_bottom()
