@@ -110,14 +110,12 @@ class ClientWorker(QObject):
         self,
         base_url: str | None = None,
         credential: str | None = None,
-        runtime_session_id: UUID | None = None,
         *,
         api_factory: Callable[[], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
     ) -> None:
         super().__init__()
-        self._runtime_session_id = runtime_session_id
         if api_factory is not None:
             self._api_factory = api_factory
         else:
@@ -804,7 +802,6 @@ class DesktopController(QObject):
         parent: QObject | None = None,
         *,
         auto_connect: bool = True,
-        runtime_session_id: UUID | None = None,
         api_factory: Callable[[], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
@@ -814,7 +811,6 @@ class DesktopController(QObject):
         self.worker = ClientWorker(
             base_url,
             credential,
-            runtime_session_id,
             api_factory=api_factory,
             input_device_factory=input_device_factory,
             output_device_factory=output_device_factory,
@@ -1608,7 +1604,6 @@ def create_application(
     credential: str | None = None,
     *,
     auto_connect: bool = True,
-    runtime_session_id: UUID | None = None,
     api_factory: Callable[[], CoreApiClient] | None = None,
 ) -> tuple[QApplication, MainWindow]:
     current = QApplication.instance()
@@ -1620,7 +1615,6 @@ def create_application(
         base_url,
         credential,
         auto_connect=auto_connect,
-        runtime_session_id=runtime_session_id,
         api_factory=api_factory,
     )
     runtime_label = (
