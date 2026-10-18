@@ -346,10 +346,14 @@ def run_desktop() -> int:
         return ApplicationCoreApiClient(runtime)
 
     try:
-        qt_app, _window = create_application(api_factory=api_factory)
+        qt_app, window = create_application(api_factory=api_factory)
         try:
             return qt_app.exec()
         except KeyboardInterrupt:
+            # Ctrl+C can unwind Qt without emitting aboutToQuit first. Stop the
+            # Desktop worker explicitly so its QThread and audio resources are
+            # gone before the application runtime tears down Core.
+            window._quit()
             return 0
     finally:
         runtime.stop()
