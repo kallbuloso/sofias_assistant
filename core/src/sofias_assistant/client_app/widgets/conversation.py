@@ -54,13 +54,6 @@ class ConversationMessageWidget(QWidget):
         if role == "user":
             row.addStretch(1)
 
-        self._avatar = QLabel("◉" if role == "assistant" else "●")
-        self._avatar.setFixedSize(28, 28)
-        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._avatar.setObjectName(
-            "sofiaAvatar" if role == "assistant" else "userAvatar"
-        )
-
         bubble = QFrame()
         bubble.setObjectName(
             "userMessage"
@@ -69,10 +62,8 @@ class ConversationMessageWidget(QWidget):
             if role == "assistant"
             else "systemMessage"
         )
-        self._bubble = bubble
         bubble.setMaximumWidth(620)
-        # A fixed minimum bubble width can overflow a narrow conversation pane.
-        bubble.setMinimumWidth(0)
+        bubble.setMinimumWidth(220 if role == "user" else 360)
         bubble.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Minimum,
@@ -95,11 +86,6 @@ class ConversationMessageWidget(QWidget):
         self._body = QLabel()
         self._body.setObjectName("messageBody")
         self._body.setWordWrap(True)
-        # Allow long text to wrap instead of imposing its sizeHint on the feed.
-        self._body.setMinimumWidth(0)
-        self._body.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
         self._body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -108,19 +94,11 @@ class ConversationMessageWidget(QWidget):
         bubble_layout.addWidget(self._meta)
         bubble_layout.addWidget(self._body)
 
-        if role == "assistant":
-            row.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignTop)
         row.addWidget(bubble, 0, Qt.AlignmentFlag.AlignTop)
         if role != "user":
             row.addStretch(1)
-        else:
-            row.addWidget(self._avatar, 0, Qt.AlignmentFlag.AlignTop)
 
         self.set_text(text)
-
-    def set_available_width(self, width: int) -> None:
-        """Cap the bubble to the space left after avatar and row spacing."""
-        self._bubble.setMaximumWidth(max(1, min(620, width - 28 - 6)))
 
     @property
     def text(self) -> str:
@@ -286,20 +264,9 @@ class ConversationFeedWidget(QScrollArea):
         widget = ConversationMessageWidget(role, text, modality, self._messages_host)
         self._messages_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         self._message_widgets.append(widget)
-        self._fit_message_widths()
         if scroll:
             self.scroll_to_bottom()
         return widget
-
-    def _fit_message_widths(self) -> None:
-        margins = self._layout.contentsMargins()
-        available = self.viewport().width() - margins.left() - margins.right()
-        for message in self._message_widgets:
-            message.set_available_width(max(1, available))
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._fit_message_widths()
 
     def scroll_to_bottom(self) -> None:
         QTimer.singleShot(
