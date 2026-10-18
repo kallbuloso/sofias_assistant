@@ -45,8 +45,10 @@ class ConversationMessageWidget(QWidget):
         super().__init__(parent)
         self.role = role
         self.modality = modality
-        # Keep each turn at its natural height; spare space belongs below the feed.
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        # Rows must occupy their natural height. A Maximum vertical policy
+        # still lets Qt distribute surplus space between messages when the
+        # host is resized; Fixed prevents that without constraining width.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 2, 0, 2)
