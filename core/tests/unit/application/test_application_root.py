@@ -278,3 +278,15 @@ def test_native_application_adapter_has_no_transport_constructor_state() -> None
 
     assert not hasattr(client, "_http")
     assert not hasattr(client, "_credential")
+
+
+
+def test_ctrl_c_path_closes_desktop_before_runtime() -> None:
+    app_text = (
+        CORE_ROOT / "src" / "sofias_assistant" / "application" / "app.py"
+    ).read_text(encoding="utf-8")
+
+    keyboard_block = app_text.split("except KeyboardInterrupt:", 1)[1].split(
+        "finally:", 1
+    )[0]
+    assert "window._quit()" in keyboard_block
