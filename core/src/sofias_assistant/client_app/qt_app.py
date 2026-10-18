@@ -770,6 +770,7 @@ class ClientWorker(QObject):
 
 
 class DesktopController(QObject):
+    closed = Signal()
     request_send = Signal(str, str, bool)
     request_refresh = Signal()
     request_acknowledge = Signal(str)
@@ -849,21 +850,33 @@ class DesktopController(QObject):
         self.request_open_conversation.connect(self.worker.open_conversation)
         self.request_load_older_turns.connect(self.worker.load_older_turns)
         self.worker.stopped.connect(self._thread.quit)
+        self._thread.finished.connect(self._on_thread_finished)
         self._thread_started = auto_connect
+        self._closing = False
         if auto_connect:
             self._thread.start()
 
+    @Slot()
+    def _on_thread_finished(self) -> None:
+        self._thread_started = False
+        self._closing = False
+        self.closed.emit()
+
     def close(self) -> bool:
-        """Stop the worker thread before allowing the Qt application to exit."""
+        """Begin Desktop-worker shutdown without blocking the Qt UI thread.
+
+        The worker owns Python slots on its QThread. Waiting synchronously from
+        the UI thread can starve those slots of the GIL, so shutdown is queued
+        and completion is reported by the closed signal when the QThread ends.
+        """
 
         if not self._thread_started or not self._thread.isRunning():
             return True
+        if self._closing:
+            return False
 
+        self._closing = True
         self.request_shutdown.emit()
-        # Native service calls are in-process. Allow bounded time for one
-        # in-flight operation, voice cleanup, and the worker event loop to stop.
-        if self._thread.wait(8_000):
-            return True
         return False
 
 
@@ -996,6 +1009,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self._wire_controller()
+        self._controller.closed.connect(self._complete_quit)
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(2500)
         self._refresh_timer.timeout.connect(self._controller.request_refresh.emit)
@@ -1574,12 +1588,18 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _quit(self) -> None:
-        self._refresh_timer.stop()
-        if not self._controller.close():
-            self._refresh_timer.start()
-            self._show_error("Sofia is still finishing background work; try Quit again.")
+        if self._quitting:
             return
 
+        self._refresh_timer.stop()
+        self._tray_status.setText("Stopping…")
+        if self._controller.close():
+            self._complete_quit()
+
+    @Slot()
+    def _complete_quit(self) -> None:
+        if self._quitting:
+            return
         self._quitting = True
         self._tray.hide()
         app = QApplication.instance()
@@ -1589,10 +1609,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: object) -> None:
         if not self._quitting:
             self._quit()
-            if not self._quitting:
-                if hasattr(event, "ignore"):
-                    event.ignore()
-                return
+            if hasattr(event, "ignore"):
+                event.ignore()
+            return
         if hasattr(event, "accept"):
             event.accept()
         else:
