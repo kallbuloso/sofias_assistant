@@ -135,8 +135,10 @@ class ConversationFeedWidget(QScrollArea):
         # Isolate message rows from the expanding scroll-area layout.
         # Only the bottom spacer may absorb unused vertical space.
         self._messages_host = QWidget(self._content)
+        # The host should follow its layout's natural height, not expand to
+        # the scroll viewport and leave scrollable whitespace below messages.
         self._messages_host.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._messages_layout = QVBoxLayout(self._messages_host)
         self._messages_layout.setContentsMargins(0, 0, 0, 0)
@@ -277,12 +279,18 @@ class ConversationFeedWidget(QScrollArea):
         QTimer.singleShot(0, self._finish_restore_scroll)
 
     def _finish_restore_scroll(self) -> None:
+        if not self._message_widgets:
+            return
         self._messages_layout.activate()
         self._layout.activate()
-        bar = self.verticalScrollBar()
-        bar.setValue(bar.maximum())
-        # Qt may update the scroll range once more as the viewport lays out.
-        QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+        # Scrolling to a scrollbar maximum can land in blank layout space.
+        # Anchor the viewport to the actual last message instead.
+        self.ensureWidgetVisible(self._message_widgets[-1], 0, 12)
+        QTimer.singleShot(0, self._ensure_latest_visible)
+
+    def _ensure_latest_visible(self) -> None:
+        if self._message_widgets:
+            self.ensureWidgetVisible(self._message_widgets[-1], 0, 12)
 
     def scroll_to_bottom(self) -> None:
         QTimer.singleShot(
