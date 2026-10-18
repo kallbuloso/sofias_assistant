@@ -67,6 +67,7 @@ from sofias_assistant.client_app.models import (
 )
 from sofias_assistant.client_app.service import ClientApplicationService
 from sofias_assistant.client_app.widgets import (
+    ComposerWidget,
     ConversationFeedWidget,
     ConversationMessage,
     ConversationMessageWidget,
@@ -1291,46 +1292,27 @@ class MainWindow(QMainWindow):
         self._stream_widget: ConversationMessageWidget | None = None
         layout.addWidget(self._chat, 1)
 
-        composer = QFrame()
-        composer.setObjectName("composer")
-        composer_layout = QHBoxLayout(composer)
-        composer_layout.setContentsMargins(10, 8, 10, 8)
-        composer_layout.setSpacing(8)
-
-        self._draft = QLineEdit()
-        self._draft.setPlaceholderText("Mensagem para Sofia…")
-        self._draft.returnPressed.connect(self._send_draft)
-        composer_layout.addWidget(self._draft, 1)
-
-        self._voice_start_button = QPushButton("🎤 Falar")
-        self._voice_start_button.setToolTip("Iniciar voz")
-        self._voice_start_button.clicked.connect(self._start_voice)
-        composer_layout.addWidget(self._voice_start_button)
-
-        self._voice_commit_button = QPushButton("Concluir fala")
-        self._voice_commit_button.clicked.connect(
+        self._composer = ComposerWidget()
+        self._composer.send_requested.connect(self._send_text)
+        self._composer.voice_start_requested.connect(self._start_voice)
+        self._composer.voice_commit_requested.connect(
             self._controller.request_voice_commit.emit
         )
-        composer_layout.addWidget(self._voice_commit_button)
-
-        self._voice_interrupt_button = QPushButton("Interromper")
-        self._voice_interrupt_button.clicked.connect(
+        self._composer.voice_interrupt_requested.connect(
             self._controller.request_voice_interrupt.emit
         )
-        composer_layout.addWidget(self._voice_interrupt_button)
-
-        self._voice_stop_button = QPushButton("Encerrar voz")
-        self._voice_stop_button.clicked.connect(
+        self._composer.voice_stop_requested.connect(
             self._controller.request_voice_stop.emit
         )
-        composer_layout.addWidget(self._voice_stop_button)
+        layout.addWidget(self._composer)
 
-        send = QPushButton("Enviar")
-        send.setObjectName("primaryButton")
-        send.clicked.connect(self._send_draft)
-        composer_layout.addWidget(send)
-
-        layout.addWidget(composer)
+        # Compatibility aliases while the rest of the Desktop presentation is
+        # incrementally extracted from MainWindow.
+        self._draft = self._composer.input
+        self._voice_start_button = self._composer.voice_start
+        self._voice_commit_button = self._composer.voice_commit
+        self._voice_interrupt_button = self._composer.voice_interrupt
+        self._voice_stop_button = self._composer.voice_stop
 
         self._voice_label = QLabel("Voz desligada")
         self._voice_label.setAccessibleName("Voice state")
@@ -1416,11 +1398,6 @@ class MainWindow(QMainWindow):
                 font-size: 14px;
                 font-weight: 700;
                 color: #eefaff;
-            }
-            QFrame#composer {
-                background: #091c25;
-                border: 1px solid #145164;
-                border-radius: 10px;
             }
             QPushButton {
                 min-height: 30px;
@@ -1607,26 +1584,7 @@ class MainWindow(QMainWindow):
         self._update_voice_controls(value)
 
     def _update_voice_controls(self, state: str) -> None:
-        value = state.rsplit(".", 1)[-1]
-        active = value in {
-            VoiceState.CONNECTING.value,
-            VoiceState.LISTENING.value,
-            VoiceState.RESPONDING.value,
-            VoiceState.READY.value,
-            VoiceState.INTERRUPTED.value,
-        }
-        self._voice_start_button.setEnabled(
-            value in {
-                VoiceState.IDLE.value,
-                VoiceState.READY.value,
-                VoiceState.ERROR.value,
-            }
-        )
-        self._voice_commit_button.setEnabled(value == VoiceState.LISTENING.value)
-        self._voice_interrupt_button.setEnabled(
-            value == VoiceState.RESPONDING.value
-        )
-        self._voice_stop_button.setEnabled(active or value == VoiceState.ERROR.value)
+        self._composer.set_voice_state(state)
 
     @Slot(str)
     def _on_state(self, state: str) -> None:
@@ -1896,18 +1854,21 @@ class MainWindow(QMainWindow):
         self._pending_confirmation_id = str(confirmation_id)
         self._controller.request_load_confirmation.emit(str(confirmation_id))
 
-    def _send_draft(self) -> None:
-        text = self._draft.text().strip()
+    def _send_text(self, text: str) -> None:
+        text = text.strip()
         if not text:
             return
         if not self._ensure_privacy_choice():
             return
         self._append_conversation_message("user", text)
-        self._draft.clear()
+        self._composer.clear_text()
         preference = self._privacy_preference
         self._controller.request_send.emit(
             text, preference.locality, preference.cloud_context_eligible
         )
+
+    def _send_draft(self) -> None:
+        self._send_text(self._draft.text())
 
     def _start_voice(self) -> None:
         if not self._ensure_privacy_choice():
