@@ -124,24 +124,14 @@ class _UnusedHttp:
 
 def test_application_adapter_creates_conversation_directly() -> None:
     application = _FakeApplication()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=_UnusedHttp(),
-    )
+    client = ApplicationCoreApiClient(application)
 
     assert client.create_conversation() == application.conversation_id
 
 
 def test_application_adapter_streams_text_directly() -> None:
     application = _FakeApplication()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=_UnusedHttp(),
-    )
+    client = ApplicationCoreApiClient(application)
 
     events = list(
         client.stream_text(
@@ -171,31 +161,17 @@ def test_main_uses_sofia_application_root() -> None:
 
 def test_application_adapter_close_is_local_and_nonblocking() -> None:
     application = _FakeApplication()
-    http = _UnusedHttp()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=http,
-    )
+    client = ApplicationCoreApiClient(application)
     client.session_id = uuid4()
 
     client.close()
 
     assert client.session_id is None
-    assert http.closed is True
-    assert http.delete_calls == 0
 
 
 def test_application_adapter_connects_without_http() -> None:
     application = _FakeApplication()
-    http = _UnusedHttp()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=http,
-    )
+    client = ApplicationCoreApiClient(application)
 
     payload = client.connect()
 
@@ -207,12 +183,7 @@ def test_application_adapter_connects_without_http() -> None:
 
 def test_realtime_voice_uses_native_application_service() -> None:
     application = _FakeApplication()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=_UnusedHttp(),
-    )
+    client = ApplicationCoreApiClient(application)
 
     voice = client.realtime()
     voice.open(
@@ -272,12 +243,7 @@ def test_native_voice_reopens_once_when_session_is_not_idle() -> None:
             self.closed.append(session_id)
 
     application.voice = _RecoveringVoice()
-    client = ApplicationCoreApiClient(
-        application,
-        "http://127.0.0.1:8989",
-        "test-credential",
-        http_client=_UnusedHttp(),
-    )
+    client = ApplicationCoreApiClient(application)
 
     voice = client.realtime()
     voice.open(
@@ -291,3 +257,24 @@ def test_native_voice_reopens_once_when_session_is_not_idle() -> None:
     assert result == interaction_id
     assert application.voice.open_calls == 2
     assert application.voice.closed == [first_session]
+
+
+
+def test_canonical_application_root_does_not_compose_loopback_boundary() -> None:
+    app_text = (
+        CORE_ROOT / "src" / "sofias_assistant" / "application" / "app.py"
+    ).read_text(encoding="utf-8")
+
+    assert "LocalClientBoundary" not in app_text
+    assert "compatibility_access" not in app_text
+    assert "create_app_factory" not in app_text
+    assert "http://127.0.0.1" not in app_text
+    assert "access.credential" not in app_text
+
+
+def test_native_application_adapter_has_no_transport_constructor_state() -> None:
+    application = _FakeApplication()
+    client = ApplicationCoreApiClient(application)
+
+    assert not hasattr(client, "_http")
+    assert not hasattr(client, "_credential")
