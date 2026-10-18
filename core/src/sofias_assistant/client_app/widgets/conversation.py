@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from typing import TypedDict
 
@@ -315,10 +316,43 @@ class ConversationFeedWidget(QScrollArea):
         # Anchor the viewport to the actual last message instead.
         self.ensureWidgetVisible(self._message_widgets[-1], 0, 12)
         QTimer.singleShot(0, self._ensure_latest_visible)
+        if os.environ.get("SOFIA_DEBUG_FEED_GEOMETRY") == "1":
+            QTimer.singleShot(150, self._debug_feed_geometry)
 
     def _ensure_latest_visible(self) -> None:
         if self._message_widgets:
             self.ensureWidgetVisible(self._message_widgets[-1], 0, 12)
+
+    def _debug_feed_geometry(self) -> None:
+        """Opt-in diagnosis: no resizing, scrolling or mutation."""
+        bar = self.verticalScrollBar()
+        last = self._message_widgets[-1] if self._message_widgets else None
+        last_bottom = (
+            last.mapTo(self._content, last.rect().bottomLeft()).y()
+            if last is not None else None
+        )
+        data = {
+            "viewport_height": self.viewport().height(),
+            "content_height": self._content.height(),
+            "content_size_hint": self._content.sizeHint().height(),
+            "root_layout_height": self._layout.geometry().height(),
+            "hero_visible": self._hero.isVisible(),
+            "hero_height": self._hero.height(),
+            "hero_stretch": self._layout.stretch(0),
+            "messages_host_y": self._messages_host.y(),
+            "messages_host_height": self._messages_host.height(),
+            "messages_host_size_hint": self._messages_host.sizeHint().height(),
+            "messages_layout_height": self._messages_layout.geometry().height(),
+            "message_count": len(self._message_widgets),
+            "last_message_bottom_in_content": last_bottom,
+            "trailing_height": (
+                self._content.height() - last_bottom if last_bottom is not None
+                else None
+            ),
+            "scroll_value": bar.value(),
+            "scroll_max": bar.maximum(),
+        }
+        print(f"[SOFIA_FEED_GEOMETRY] {data}", flush=True)
 
     def scroll_to_bottom(self) -> None:
         QTimer.singleShot(
