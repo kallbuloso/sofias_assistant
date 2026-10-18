@@ -49,24 +49,16 @@ class ApplicationRuntime(Protocol):
 
 
 class ApplicationCoreApiClient(CoreApiClient):
-    """Compatibility-shaped Desktop client backed by native application services."""
+    """Compatibility-shaped Desktop facade backed only by native services.
 
-    def __init__(
-        self,
-        application: ApplicationRuntime,
-        base_url: str,
-        credential: str,
-        *,
-        timeout: float = 8.0,
-        http_client: Any | None = None,
-    ) -> None:
-        super().__init__(
-            base_url,
-            credential,
-            timeout=timeout,
-            http_client=http_client,
-        )
+    The subclass exists temporarily so the legacy ClientApplicationService
+    typing can remain stable while the canonical Desktop no longer owns any
+    localhost URL, bearer credential, HTTP client, or client session.
+    """
+
+    def __init__(self, application: ApplicationRuntime) -> None:
         self._application = application
+        self.session_id: UUID | None = None
 
     def _call(self, coroutine: Any, *, validated: bool = False) -> Any:
         try:
@@ -87,9 +79,6 @@ class ApplicationCoreApiClient(CoreApiClient):
 
     def close(self) -> None:
         self.session_id = None
-        close = getattr(self._http, "close", None)
-        if close is not None:
-            close()
 
     def create_conversation(self) -> UUID:
         return self._application.create_conversation()
