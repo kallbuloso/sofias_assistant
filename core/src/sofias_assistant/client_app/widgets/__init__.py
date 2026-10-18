@@ -1,5 +1,6 @@
 """Reusable Sofia Desktop widgets."""
 
+from sofias_assistant.client_app.widgets.composer import ComposerWidget
 from sofias_assistant.client_app.widgets.conversation import (
     ConversationFeedWidget,
     ConversationMessage,
@@ -7,6 +8,7 @@ from sofias_assistant.client_app.widgets.conversation import (
 )
 
 __all__ = [
+    "ComposerWidget",
     "ConversationFeedWidget",
     "ConversationMessage",
     "ConversationMessageWidget",
