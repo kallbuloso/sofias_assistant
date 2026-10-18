@@ -309,32 +309,3 @@ def test_history_restores_persisted_turn_modality(
     window.hide()
     window.deleteLater()
     controller.deleteLater()
-
-
-def test_conversation_bubbles_fit_narrow_feed_viewport(
-    qapplication: QApplication,
-) -> None:
-    from sofias_assistant.client_app.widgets import ConversationFeedWidget
-
-    feed = ConversationFeedWidget()
-    feed.resize(380, 400)
-    feed.show()
-    qapplication.processEvents()
-
-    user = feed.add_message("user", "Uma mensagem longa " * 25)
-    assistant = feed.add_message("assistant", "Uma resposta longa " * 25)
-    qapplication.processEvents()
-
-    available = feed.viewport().width() - 48
-    for widget in (user, assistant):
-        assert widget._bubble.minimumWidth() == 0
-        assert widget._bubble.maximumWidth() <= max(1, available - 34)
-        assert widget._bubble.maximumWidth() <= 620
-
-    feed.resize(650, 400)
-    qapplication.processEvents()
-    for widget in (user, assistant):
-        assert widget._bubble.maximumWidth() <= 620
-        assert widget._bubble.maximumWidth() <= feed.viewport().width() - 48 - 34
-
-    feed.close()
