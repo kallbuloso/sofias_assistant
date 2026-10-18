@@ -309,3 +309,32 @@ def test_history_restores_persisted_turn_modality(
     window.hide()
     window.deleteLater()
     controller.deleteLater()
+
+
+def test_switching_from_long_to_short_history_recalculates_scroll_height(
+    qapplication: QApplication,
+) -> None:
+    """Old conversation geometry must not leave scrollable space after turns."""
+    from sofias_assistant.client_app.widgets import ConversationFeedWidget
+
+    feed = ConversationFeedWidget()
+    feed.resize(640, 450)
+    feed.show()
+    feed.set_messages(
+        [{"role": "assistant", "text": f"Long turn {i}: " + "word " * 30,
+          "modality": "text"} for i in range(20)]
+    )
+    qapplication.processEvents()
+    assert feed.verticalScrollBar().maximum() > 0
+
+    feed.set_messages(
+        [{"role": "assistant", "text": "Short final reply", "modality": "voice"}]
+    )
+    qapplication.processEvents()
+    qapplication.processEvents()
+
+    # With only one short reply, the viewport supplies spare height. There
+    # should be no scrollable blank tail inherited from the old conversation.
+    assert feed.verticalScrollBar().maximum() == 0
+    assert feed._message_widgets[-1].modality == "voice"
+    feed.close()
