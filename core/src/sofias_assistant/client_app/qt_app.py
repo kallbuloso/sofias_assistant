@@ -881,30 +881,61 @@ class DesktopController(QObject):
 
 
 class SettingsDialog(QDialog):
+    """Conversation-first settings workspace for technical configuration."""
+
     def __init__(
         self,
         notifications_enabled: bool,
         parent: QWidget | None,
         *,
         runtime_label: str = "In-process Python application",
+        status_widget: QWidget | None = None,
+        ai_models_widget: QWidget | None = None,
+        memory_widget: QWidget | None = None,
+        health_widget: QWidget | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Sofia settings")
         self.setModal(True)
+        self.resize(980, 680)
+
+        layout = QVBoxLayout(self)
+        self._pages = QTabWidget(self)
+        layout.addWidget(self._pages, 1)
+
+        general = QWidget()
+        general_form = QFormLayout(general)
         self._runtime = QLineEdit(runtime_label)
         self._runtime.setReadOnly(True)
         self._notifications = QCheckBox("Show native notifications")
         self._notifications.setChecked(notifications_enabled)
-        form = QFormLayout(self)
-        form.addRow("Runtime", self._runtime)
-        form.addRow(self._notifications)
+        general_form.addRow("Runtime", self._runtime)
+        general_form.addRow(self._notifications)
+        self._pages.addTab(general, "General")
+
+        self._page_widgets: dict[str, QWidget] = {"General": general}
+        for label, widget in (
+            ("Status", status_widget),
+            ("AI & Models", ai_models_widget),
+            ("Memory", memory_widget),
+            ("Diagnostics", health_widget),
+        ):
+            if widget is not None:
+                self._pages.addTab(widget, label)
+                self._page_widgets[label] = widget
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save)
         buttons.accepted.connect(self.accept)
-        form.addRow(buttons)
+        layout.addWidget(buttons)
 
     @property
     def notifications_enabled(self) -> bool:
         return self._notifications.isChecked()
+
+    def select_page(self, label: str) -> None:
+        widget = self._page_widgets.get(label)
+        if widget is not None:
+            self._pages.setCurrentWidget(widget)
 
 
 class PrivacyPreferenceDialog(QDialog):
@@ -1068,7 +1099,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._connection)
         menu = self.menuBar().addMenu("Sofia")
         settings = QAction("Settings", self)
-        settings.triggered.connect(self._show_settings)
+        settings.triggered.connect(lambda: self._show_settings())
         menu.addAction(settings)
         privacy = QAction("Privacy…", self)
         privacy.triggered.connect(self._show_privacy_dialog)
@@ -1078,25 +1109,11 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
 
-        self._tabs = QTabWidget(self)
-        self._tabs.addTab(self._home_tab(), "Home")
-        self._tabs.addTab(self._chat_tab(), "Chat")
-        self._tabs.addTab(self._ai_models_tab(), "AI & Models")
-        self._tabs.addTab(self._memory_tab(), "Memory / Integrations")
-        self._tabs.addTab(self._tasks_tab(), "Tasks")
-        self._tabs.addTab(self._notifications_tab(), "Notifications")
-        self._tabs.addTab(self._health_tab(), "Health")
-        self.setCentralWidget(self._tabs)
-
-    def _home_tab(self) -> QWidget:
+        # Conversation is the primary Desktop surface. Technical configuration
+        # lives under Settings instead of competing with Chat in the top-level UI.
         self._home = HomeTab()
         self._home.configure_ai_requested.connect(self._open_ai_models_tab)
-        return self._home
 
-    def _open_ai_models_tab(self) -> None:
-        self._tabs.setCurrentWidget(self._ai_models)
-
-    def _ai_models_tab(self) -> QWidget:
         self._ai_models = AIModelsTab()
         self._ai_models.provider_update_requested.connect(
             self._controller.request_provider_update.emit
@@ -1117,9 +1134,7 @@ class MainWindow(QMainWindow):
             self._controller.request_routing_preview.emit
         )
         self._ai_models.set_writes_enabled(False)
-        return self._ai_models
 
-    def _memory_tab(self) -> QWidget:
         self._memory = MemoryIntegrationsTab()
         self._memory.credential_set_requested.connect(
             self._controller.request_set_memory_credential.emit
@@ -1128,7 +1143,28 @@ class MainWindow(QMainWindow):
             self._controller.request_delete_memory_credential.emit
         )
         self._memory.set_writes_enabled(False)
-        return self._memory
+
+        self._health = QListWidget()
+        self._health.setAccessibleName("Diagnostics health status")
+
+        self._settings_dialog = SettingsDialog(
+            self._notifications_enabled,
+            self,
+            runtime_label=self._runtime_label,
+            status_widget=self._home,
+            ai_models_widget=self._ai_models,
+            memory_widget=self._memory,
+            health_widget=self._health,
+        )
+
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(self._chat_tab(), "Chat")
+        self._tabs.addTab(self._tasks_tab(), "Tasks")
+        self._tabs.addTab(self._notifications_tab(), "Notifications")
+        self.setCentralWidget(self._tabs)
+
+    def _open_ai_models_tab(self) -> None:
+        self._show_settings("AI & Models")
 
     def _chat_tab(self) -> QWidget:
         tab = QWidget()
@@ -1138,7 +1174,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
-        new_conversation = QPushButton("New conversation")
+        new_conversation = QPushButton("+ New conversation")
         new_conversation.clicked.connect(self._controller.request_new_conversation.emit)
         sidebar_layout.addWidget(new_conversation)
         self._conversation_list = QListWidget()
@@ -1151,7 +1187,7 @@ class MainWindow(QMainWindow):
 
         chat_panel = QWidget()
         chat_layout = QVBoxLayout(chat_panel)
-        older = QPushButton("Load older messages")
+        older = QPushButton("Earlier messages")
         older.clicked.connect(self._load_older_turns)
         chat_layout.addWidget(older)
         self._chat = QTextBrowser()
@@ -1567,14 +1603,10 @@ class MainWindow(QMainWindow):
             preference.locality, preference.cloud_context_eligible
         )
 
-    def _show_settings(self) -> None:
-        dialog = SettingsDialog(
-            self._notifications_enabled,
-            self,
-            runtime_label=self._runtime_label,
-        )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._notifications_enabled = dialog.notifications_enabled
+    def _show_settings(self, page: str = "General") -> None:
+        self._settings_dialog.select_page(page)
+        if self._settings_dialog.exec() == QDialog.DialogCode.Accepted:
+            self._notifications_enabled = self._settings_dialog.notifications_enabled
             self._settings.setValue(
                 "notifications/enabled", self._notifications_enabled
             )
