@@ -323,7 +323,7 @@ async def test_openai_realtime_adapter_normalizes_manual_ptt_audio_and_response(
         {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "input_text", "text": "Previous assistant turn."}],
+            "content": [{"type": "output_text", "text": "Previous assistant turn."}],
         },
     ]
     assert connection.audio == ["AQIDBA=="]
@@ -769,3 +769,31 @@ async def test_openai_adapter_disables_sdk_retries() -> None:
 
     assert attempts == 1
     assert raised.value.error.category is ProviderErrorCategory.RATE_LIMITED
+
+
+
+@pytest.mark.asyncio
+async def test_openai_realtime_history_uses_output_text_for_assistant_messages() -> None:
+    connection = _RealtimeConnection(())
+    client = _RealtimeClient(connection)
+    session = await _adapter(client).open_realtime_session(
+        model=ModelIdentity("openai", "gpt-realtime"),
+        request=_realtime_request(),
+    )
+
+    await session.close()
+
+    assert connection.items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Previous user turn."}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Previous assistant turn."}
+            ],
+        },
+    ]
