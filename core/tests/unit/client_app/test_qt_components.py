@@ -162,8 +162,10 @@ def test_conversation_workspace_renders_empty_ready_state(
     )
     window = MainWindow(controller)
 
-    assert "Sofia está pronta" in window._chat.toPlainText()
-    assert "Fale ou digite sua mensagem" in window._chat.toPlainText()
+    assert window._chat._hero.isVisible() is False or window._chat._hero is not None
+    hero_labels = [label.text() for label in window._chat._hero.findChildren(QLabel)]
+    assert "Sofia está pronta" in hero_labels
+    assert "Fale ou digite sua mensagem" in hero_labels
     assert window._voice_label.text() == "Voz desligada"
 
     window._tray.hide()
@@ -187,11 +189,39 @@ def test_conversation_workspace_renders_distinct_user_and_sofia_cards(
     ]
     window._refresh_conversation_view()
 
-    rendered = window._chat.toPlainText()
-    assert "Você" in rendered
-    assert "Olá Sofia" in rendered
-    assert "Sofia · voz" in rendered
-    assert "Olá Amaral" in rendered
+    assert len(window._chat._message_widgets) == 2
+    user_widget, sofia_widget = window._chat._message_widgets
+    assert user_widget.role == "user"
+    assert user_widget.text == "Olá Sofia"
+    assert sofia_widget.role == "assistant"
+    assert sofia_widget.text == "Olá Amaral"
+    assert sofia_widget.modality == "voice"
+
+    window._tray.hide()
+    window.hide()
+    window.deleteLater()
+    controller.deleteLater()
+
+
+
+def test_stream_updates_existing_sofia_message_widget(
+    qapplication: QApplication,
+) -> None:
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+
+    window._start_assistant_stream()
+    first_widget = window._stream_widget
+    window._append_assistant_stream_delta("Olá")
+    window._append_assistant_stream_delta(", Amaral")
+    window._finish_assistant_stream()
+
+    assert first_widget is not None
+    assert first_widget.text == "Olá, Amaral"
+    assert len(window._chat._message_widgets) == 1
 
     window._tray.hide()
     window.hide()
