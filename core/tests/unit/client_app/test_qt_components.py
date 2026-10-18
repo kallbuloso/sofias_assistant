@@ -138,13 +138,14 @@ def test_main_window_is_conversation_first(
     )
     window = MainWindow(controller)
 
-    labels = [
-        window._tabs.tabText(index)
-        for index in range(window._tabs.count())
-    ]
+    assert window.centralWidget().objectName() == "desktopRoot"
+    assert window._conversation_list.accessibleName() == "Conversation history"
+    assert window._chat.accessibleName() == "Conversation transcript"
+    assert window._tasks.accessibleName() == "Current tasks"
+    assert window._notifications.accessibleName() == "Notifications"
+    assert window._draft.placeholderText() == "Mensagem para Sofia…"
+    assert window._settings_dialog.windowTitle() == "Sofia settings"
 
-    assert labels == ["Chat", "Tasks", "Notifications"]
-    assert window._tabs.currentIndex() == 0
     window._tray.hide()
     window.hide()
     window.deleteLater()
