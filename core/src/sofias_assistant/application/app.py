@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+import signal
 import threading
 import traceback
 from collections.abc import Iterator, Mapping
@@ -347,13 +348,20 @@ def run_desktop() -> int:
 
     try:
         qt_app, window = create_application(api_factory=api_factory)
+
+        previous_sigint = signal.getsignal(signal.SIGINT)
+
+        def request_quit_from_sigint(_signum: int, _frame: Any) -> None:
+            # Do not raise KeyboardInterrupt inside an arbitrary PySide slot.
+            # Queue the same graceful shutdown used by X and tray Quit.
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, window._quit)
+
+        signal.signal(signal.SIGINT, request_quit_from_sigint)
         try:
             return qt_app.exec()
-        except KeyboardInterrupt:
-            # Ctrl+C can unwind Qt without emitting aboutToQuit first. Stop the
-            # Desktop worker explicitly so its QThread and audio resources are
-            # gone before the application runtime tears down Core.
-            window._quit()
-            return 0
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
     finally:
         runtime.stop()
