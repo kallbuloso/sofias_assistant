@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QSystemTrayIcon,
     QTabWidget,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -67,6 +66,10 @@ from sofias_assistant.client_app.models import (
     VoiceState,
 )
 from sofias_assistant.client_app.service import ClientApplicationService
+from sofias_assistant.client_app.widgets import (
+    ConversationFeedWidget,
+    ConversationMessageWidget,
+)
 
 _LOCALITY_WIRE_VALUES = ("local_only", "cloud_allowed", "cloud_preferred")
 _LOCALITY_LABELS = {
@@ -1281,13 +1284,10 @@ class MainWindow(QMainWindow):
         header.addStretch(1)
         layout.addLayout(header)
 
-        self._chat = QTextBrowser()
-        self._chat.setOpenExternalLinks(False)
-        self._chat.setAccessibleName("Conversation transcript")
-        self._chat.setObjectName("conversationTranscript")
+        self._chat = ConversationFeedWidget()
         self._conversation_messages: list[dict[str, str]] = []
         self._stream_message_index: int | None = None
-        self._refresh_conversation_view()
+        self._stream_widget: ConversationMessageWidget | None = None
         layout.addWidget(self._chat, 1)
 
         composer = QFrame()
@@ -1416,12 +1416,6 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
                 color: #eefaff;
             }
-            QTextBrowser#conversationTranscript {
-                background: #07131a;
-                border: 1px solid #123440;
-                border-radius: 10px;
-                padding: 12px;
-            }
             QFrame#composer {
                 background: #091c25;
                 border: 1px solid #145164;
@@ -1518,79 +1512,26 @@ class MainWindow(QMainWindow):
         )
         self._tray.show()
 
-    def _empty_conversation_html(self) -> str:
-        return """
-        <div style="margin-top:120px; text-align:center; color:#8db2be;">
-          <div style="font-size:42px; color:#22d7f2;">◉</div>
-          <div style="font-size:20px; font-weight:600; color:#e7f7fb; margin-top:10px;">
-            Sofia está pronta
-          </div>
-          <div style="font-size:13px; margin-top:6px;">
-            Fale ou digite sua mensagem
-          </div>
-        </div>
-        """
-
-    def _message_card_html(self, message: dict[str, str]) -> str:
-        role = message.get("role", "system")
-        text = html.escape(message.get("text", "")).replace("\n", "<br>")
-        modality = message.get("modality", "text")
-        if role == "user":
-            align = "right"
-            background = "#0b3450"
-            border = "#13506e"
-            author = "Você"
-        elif role == "assistant":
-            align = "left"
-            background = "#10242d"
-            border = "#183d49"
-            author = "Sofia"
-        else:
-            align = "left"
-            background = "#2a2020"
-            border = "#6f4040"
-            author = "Sistema"
-
-        modality_label = " · voz" if modality == "voice" else ""
-        return (
-            f'<div style="text-align:{align}; margin:10px 4px;">'
-            f'<div style="display:inline-block; max-width:78%; text-align:left; '
-            f'background:{background}; border:1px solid {border}; '
-            f'border-radius:12px; padding:10px 12px;">'
-            f'<div style="font-size:11px; color:#7fb3c2; margin-bottom:5px;">'
-            f'{author}{modality_label}</div>'
-            f'<div style="font-size:14px; color:#eef9fc; line-height:1.45;">'
-            f'{text}</div></div></div>'
-        )
-
     def _refresh_conversation_view(self) -> None:
-        if not self._conversation_messages:
-            self._chat.setHtml(self._empty_conversation_html())
-            return
-        self._chat.setHtml(
-            "".join(self._message_card_html(item) for item in self._conversation_messages)
-        )
-        scrollbar = self._chat.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        self._stream_widget = None
+        self._chat.set_messages(self._conversation_messages)
 
     def _append_conversation_message(
         self, role: str, text: str, modality: str = "text"
     ) -> None:
         if not text:
             return
-        self._conversation_messages.append(
-            {"role": role, "text": text, "modality": modality}
-        )
-        self._refresh_conversation_view()
+        message = {"role": role, "text": text, "modality": modality}
+        self._conversation_messages.append(message)
+        self._chat.add_message(role, text, modality)
 
     @Slot()
     def _start_assistant_stream(self) -> None:
-        self._conversation_messages.append(
-            {"role": "assistant", "text": "", "modality": "text"}
-        )
+        message = {"role": "assistant", "text": "", "modality": "text"}
+        self._conversation_messages.append(message)
         self._stream_message_index = len(self._conversation_messages) - 1
+        self._stream_widget = self._chat.add_message("assistant", "", "text")
         self._readiness_badge.setText("● Respondendo")
-        self._refresh_conversation_view()
 
     @Slot(str)
     def _append_assistant_stream_delta(self, delta: str) -> None:
@@ -1598,13 +1539,15 @@ class MainWindow(QMainWindow):
         if index is None or index >= len(self._conversation_messages):
             return
         self._conversation_messages[index]["text"] += delta
-        self._refresh_conversation_view()
+        if self._stream_widget is not None:
+            self._stream_widget.set_text(self._conversation_messages[index]["text"])
+            self._chat.scroll_to_bottom()
 
     @Slot()
     def _finish_assistant_stream(self) -> None:
         self._stream_message_index = None
+        self._stream_widget = None
         self._readiness_badge.setText("● Pronta")
-        self._refresh_conversation_view()
 
     def _wire_controller(self) -> None:
         worker = self._controller.worker
@@ -1807,6 +1750,7 @@ class MainWindow(QMainWindow):
             self._conversation_messages.extend(rendered_messages)
 
         self._stream_message_index = None
+        self._stream_widget = None
         self._refresh_conversation_view()
         if turns:
             self._oldest_loaded_sequence = int(turns[0].get("sequence", 0)) or None
