@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QScrollArea,
     QSizePolicy,
@@ -138,11 +139,15 @@ class ConversationFeedWidget(QScrollArea):
         # The host should follow its layout's natural height, not expand to
         # the scroll viewport and leave scrollable whitespace below messages.
         self._messages_host.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         self._messages_layout = QVBoxLayout(self._messages_host)
         self._messages_layout.setContentsMargins(0, 0, 0, 0)
         self._messages_layout.setSpacing(5)
+        # Force Qt to refresh the host's minimum/maximum size whenever turns
+        # are removed or added; otherwise old fixed geometry can survive a
+        # Conversation switch and create a long empty scrollbar range.
+        self._messages_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         # Do not insert an expanding spacer into the scrollable document.
         # On short conversations the viewport itself supplies empty space;
         # on long ones the scroll range must end at the last message.
@@ -234,6 +239,8 @@ class ConversationFeedWidget(QScrollArea):
             self._messages_layout.removeWidget(widget)
             widget.deleteLater()
         self._message_widgets.clear()
+        self._messages_layout.invalidate()
+        self._messages_host.updateGeometry()
 
     def clear_messages(self) -> None:
         self._clear_layout_messages()
@@ -254,6 +261,10 @@ class ConversationFeedWidget(QScrollArea):
                 message.get("modality", "text"),
                 scroll=False,
             )
+        self._messages_layout.invalidate()
+        self._messages_host.updateGeometry()
+        self._layout.invalidate()
+        self._content.updateGeometry()
         if message_list:
             self.scroll_to_latest_on_restore()
 
@@ -273,6 +284,7 @@ class ConversationFeedWidget(QScrollArea):
         widget = ConversationMessageWidget(role, text, modality, self._messages_host)
         self._messages_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
         self._message_widgets.append(widget)
+        self._messages_host.updateGeometry()
         if scroll:
             self.scroll_to_bottom()
         return widget
@@ -287,6 +299,7 @@ class ConversationFeedWidget(QScrollArea):
         if not self._message_widgets:
             return
         self._messages_layout.activate()
+        self._messages_host.updateGeometry()
         self._layout.activate()
         # Scrolling to a scrollbar maximum can land in blank layout space.
         # Anchor the viewport to the actual last message instead.
