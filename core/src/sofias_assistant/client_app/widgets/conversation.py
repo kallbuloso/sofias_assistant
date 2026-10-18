@@ -346,12 +346,28 @@ class ConversationFeedWidget(QScrollArea):
             "content_height": self._content.height(),
             "content_size_hint": self._content.sizeHint().height(),
             "root_layout_height": self._layout.geometry().height(),
+            "content_min_height": self._content.minimumHeight(),
+            "content_max_height": self._content.maximumHeight(),
             "hero_visible": self._hero.isVisible(),
             "hero_height": self._hero.height(),
             "hero_stretch": self._layout.stretch(0),
             "messages_host_y": self._messages_host.y(),
             "messages_host_height": self._messages_host.height(),
             "messages_host_size_hint": self._messages_host.sizeHint().height(),
+            "messages_host_min_height": self._messages_host.minimumHeight(),
+            "messages_host_max_height": self._messages_host.maximumHeight(),
+            "messages_layout_size_hint": self._messages_layout.sizeHint().height(),
+            "messages_layout_min_size": self._messages_layout.minimumSize().height(),
+            "messages_layout_constraint": str(self._messages_layout.sizeConstraint()),
+            "row_metrics": [
+                {
+                    "height": widget.height(),
+                    "hint": widget.sizeHint().height(),
+                    "min": widget.minimumHeight(),
+                    "max": widget.maximumHeight(),
+                }
+                for widget in self._message_widgets[-4:]
+            ],
             "messages_layout_height": self._messages_layout.geometry().height(),
             "message_count": len(self._message_widgets),
             "last_message_bottom_in_content": last_bottom,
