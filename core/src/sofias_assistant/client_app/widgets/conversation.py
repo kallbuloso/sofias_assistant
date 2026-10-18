@@ -153,6 +153,11 @@ class ConversationFeedWidget(QScrollArea):
         # are removed or added; otherwise old fixed geometry can survive a
         # Conversation switch and create a long empty scrollbar range.
         self._messages_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        # The message host must not grow to fill a tall viewport: extra
+        # viewport space belongs outside the scrollable message content.
+        self._messages_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
         # Do not insert an expanding spacer into the scrollable document.
         # On short conversations the viewport itself supplies empty space;
         # on long ones the scroll range must end at the last message.
