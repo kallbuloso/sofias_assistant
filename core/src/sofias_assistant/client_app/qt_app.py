@@ -108,19 +108,24 @@ class ClientWorker(QObject):
 
     def __init__(
         self,
-        base_url: str,
-        credential: str,
+        base_url: str | None = None,
+        credential: str | None = None,
         runtime_session_id: UUID | None = None,
         *,
-        api_factory: Callable[[str, str], CoreApiClient] | None = None,
+        api_factory: Callable[[], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
     ) -> None:
         super().__init__()
-        self._base_url = base_url
-        self._credential = credential
         self._runtime_session_id = runtime_session_id
-        self._api_factory = api_factory or CoreApiClient
+        if api_factory is not None:
+            self._api_factory = api_factory
+        else:
+            if base_url is None or credential is None:
+                raise ValueError(
+                    "base_url and credential are required for legacy transport mode"
+                )
+            self._api_factory = lambda: CoreApiClient(base_url, credential)
         self._service: ClientApplicationService | None = None
         self._voice: RealtimeVoiceConnection | None = None
         self._voice_status = VoiceState.IDLE
@@ -137,9 +142,7 @@ class ClientWorker(QObject):
     def connect_core(self) -> None:
         self._state(ConnectionState.CONNECTING)
         try:
-            self._service = ClientApplicationService(
-                self._api_factory(self._base_url, self._credential)
-            )
+            self._service = ClientApplicationService(self._api_factory())
             snapshot = self._service.connect()
             self._publish(snapshot)
         except Exception:
@@ -582,32 +585,6 @@ class ClientWorker(QObject):
         finally:
             self.stopped.emit()
 
-    @Slot()
-    def stop_sofia(self) -> None:
-        """Request an explicit authenticated graceful Core shutdown.
-
-        This is the only path that may stop Core; ordinary window close and
-        Quit Desktop never call it (Desktop/Core Interaction Contract v1
-        SS24). It requires an active session and a known `runtime_session_id`
-        obtained during attach.
-        """
-
-        service = self._service
-        if service is None or self._runtime_session_id is None:
-            self.failure.emit("Sofia is not attached to a running Core")
-            return
-        try:
-            accepted = service.api.request_runtime_shutdown(
-                self._runtime_session_id, reason="user_requested"
-            )
-        except Exception:
-            self.failure.emit("Stop Sofia request failed")
-            return
-        if not accepted:
-            self.failure.emit("Stop Sofia was rejected (Core lifecycle changed)")
-            return
-        self._state(ConnectionState.DISCONNECTED)
-
     # -- AI configuration / Memory integration (Gate I17) ----------------
     #
     # These bypass `ClientApplicationService` but resolve through the
@@ -806,7 +783,6 @@ class DesktopController(QObject):
     request_voice_stop = Signal()
     request_voice_interrupt = Signal()
     request_shutdown = Signal()
-    request_stop_sofia = Signal()
     request_ai_dashboard = Signal()
     request_provider_update = Signal(str, object)
     request_model_refresh = Signal(str)
@@ -823,13 +799,13 @@ class DesktopController(QObject):
 
     def __init__(
         self,
-        base_url: str,
-        credential: str,
+        base_url: str | None = None,
+        credential: str | None = None,
         parent: QObject | None = None,
         *,
         auto_connect: bool = True,
         runtime_session_id: UUID | None = None,
-        api_factory: Callable[[str, str], CoreApiClient] | None = None,
+        api_factory: Callable[[], CoreApiClient] | None = None,
         input_device_factory: Any = QtAudioInputDevice,
         output_device_factory: Any = QtAudioOutputDevice,
     ):
@@ -857,7 +833,6 @@ class DesktopController(QObject):
         self.request_voice_stop.connect(self.worker.stop_voice)
         self.request_voice_interrupt.connect(self.worker.interrupt_voice)
         self.request_shutdown.connect(self.worker.shutdown)
-        self.request_stop_sofia.connect(self.worker.stop_sofia)
         self.request_ai_dashboard.connect(self.worker.load_ai_dashboard)
         self.request_provider_update.connect(self.worker.update_ai_provider)
         self.request_model_refresh.connect(self.worker.refresh_ai_models)
@@ -889,27 +864,30 @@ class DesktopController(QObject):
             return True
 
         self.request_shutdown.emit()
-        # CoreApiClient uses an 8 second HTTP timeout. A queued shutdown signal
-        # may need to wait for one in-flight compatibility request to finish
-        # before the worker can process shutdown and quit its QThread.
-        if self._thread.wait(12_000):
+        # Native service calls are in-process. Allow bounded time for one
+        # in-flight operation, voice cleanup, and the worker event loop to stop.
+        if self._thread.wait(8_000):
             return True
         return False
 
 
 class SettingsDialog(QDialog):
     def __init__(
-        self, base_url: str, notifications_enabled: bool, parent: QWidget | None
+        self,
+        notifications_enabled: bool,
+        parent: QWidget | None,
+        *,
+        runtime_label: str = "In-process Python application",
     ):
         super().__init__(parent)
         self.setWindowTitle("Sofia settings")
         self.setModal(True)
-        self._url = QLineEdit(base_url)
-        self._url.setReadOnly(True)
+        self._runtime = QLineEdit(runtime_label)
+        self._runtime.setReadOnly(True)
         self._notifications = QCheckBox("Show native notifications")
         self._notifications.setChecked(notifications_enabled)
         form = QFormLayout(self)
-        form.addRow("Core URL", self._url)
+        form.addRow("Runtime", self._runtime)
         form.addRow(self._notifications)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save)
         buttons.accepted.connect(self.accept)
@@ -995,10 +973,14 @@ class ConfirmationDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, controller: DesktopController, base_url: str) -> None:
+    def __init__(
+        self,
+        controller: DesktopController,
+        runtime_label: str = "In-process Python application",
+    ) -> None:
         super().__init__()
         self._controller = controller
-        self._base_url = base_url
+        self._runtime_label = runtime_label
         self._settings = QSettings("Sofia", "SofiaAssistant")
         self._notifications_enabled = bool(
             self._settings.value("notifications/enabled", True, type=bool)
@@ -1242,14 +1224,11 @@ class MainWindow(QMainWindow):
         self._tray_status.setEnabled(False)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit)
-        stop_sofia_action = QAction("Stop Sofia", self)
-        stop_sofia_action.triggered.connect(self._confirm_stop_sofia)
         menu.addAction(open_action)
         menu.addAction(chat_action)
         menu.addSeparator()
         menu.addAction(self._tray_status)
         menu.addSeparator()
-        menu.addAction(stop_sofia_action)
         menu.addAction(quit_action)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(
@@ -1579,7 +1558,11 @@ class MainWindow(QMainWindow):
         )
 
     def _show_settings(self) -> None:
-        dialog = SettingsDialog(self._base_url, self._notifications_enabled, self)
+        dialog = SettingsDialog(
+            self._notifications_enabled,
+            self,
+            runtime_label=self._runtime_label,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._notifications_enabled = dialog.notifications_enabled
             self._settings.setValue(
@@ -1593,25 +1576,6 @@ class MainWindow(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-
-    def _confirm_stop_sofia(self) -> None:
-        """Require explicit human confirmation before requesting Core shutdown.
-
-        Ordinary window close and Quit Desktop never reach this path
-        (Desktop/Core Interaction Contract v1 SS24); only this explicit,
-        separate action does.
-        """
-
-        answer = QMessageBox.question(
-            self,
-            "Stop Sofia",
-            "This stops Sofia's Core: background reminders, tasks and "
-            "notifications will stop until Sofia is started again. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._controller.request_stop_sofia.emit()
 
     def _quit(self) -> None:
         self._refresh_timer.stop()
@@ -1627,21 +1591,25 @@ class MainWindow(QMainWindow):
             app.quit()
 
     def closeEvent(self, event: object) -> None:
-        if not self._quitting and self._tray.isVisible():
-            self.hide()
-            if hasattr(event, "ignore"):
-                event.ignore()
-            return
-        super().closeEvent(event)  # type: ignore[arg-type]
+        if not self._quitting:
+            self._quit()
+            if not self._quitting:
+                if hasattr(event, "ignore"):
+                    event.ignore()
+                return
+        if hasattr(event, "accept"):
+            event.accept()
+        else:
+            super().closeEvent(event)  # type: ignore[arg-type]
 
 
 def create_application(
-    base_url: str,
-    credential: str,
+    base_url: str | None = None,
+    credential: str | None = None,
     *,
     auto_connect: bool = True,
     runtime_session_id: UUID | None = None,
-    api_factory: Callable[[str, str], CoreApiClient] | None = None,
+    api_factory: Callable[[], CoreApiClient] | None = None,
 ) -> tuple[QApplication, MainWindow]:
     current = QApplication.instance()
     app = current if isinstance(current, QApplication) else QApplication([])
@@ -1655,7 +1623,12 @@ def create_application(
         runtime_session_id=runtime_session_id,
         api_factory=api_factory,
     )
-    window = MainWindow(controller, base_url)
+    runtime_label = (
+        "In-process Python application"
+        if api_factory is not None and base_url is None
+        else (base_url or "In-process Python application")
+    )
+    window = MainWindow(controller, runtime_label)
     app.aboutToQuit.connect(controller.close)
     window.show()
     return app, window
