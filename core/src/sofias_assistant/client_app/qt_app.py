@@ -1283,9 +1283,11 @@ class MainWindow(QMainWindow):
 
         self._chat = QTextBrowser()
         self._chat.setOpenExternalLinks(False)
-        self._chat.setPlaceholderText("Sofia está pronta. Fale ou digite sua mensagem.")
         self._chat.setAccessibleName("Conversation transcript")
         self._chat.setObjectName("conversationTranscript")
+        self._conversation_messages: list[dict[str, str]] = []
+        self._stream_message_index: int | None = None
+        self._refresh_conversation_view()
         layout.addWidget(self._chat, 1)
 
         composer = QFrame()
@@ -1299,12 +1301,12 @@ class MainWindow(QMainWindow):
         self._draft.returnPressed.connect(self._send_draft)
         composer_layout.addWidget(self._draft, 1)
 
-        self._voice_start_button = QPushButton("🎤")
+        self._voice_start_button = QPushButton("🎤 Falar")
         self._voice_start_button.setToolTip("Iniciar voz")
         self._voice_start_button.clicked.connect(self._start_voice)
         composer_layout.addWidget(self._voice_start_button)
 
-        self._voice_commit_button = QPushButton("Parar fala")
+        self._voice_commit_button = QPushButton("Concluir fala")
         self._voice_commit_button.clicked.connect(
             self._controller.request_voice_commit.emit
         )
@@ -1316,7 +1318,7 @@ class MainWindow(QMainWindow):
         )
         composer_layout.addWidget(self._voice_interrupt_button)
 
-        self._voice_stop_button = QPushButton("Parar voz")
+        self._voice_stop_button = QPushButton("Encerrar voz")
         self._voice_stop_button.clicked.connect(
             self._controller.request_voice_stop.emit
         )
@@ -1329,7 +1331,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(composer)
 
-        self._voice_label = QLabel("Voice: IDLE")
+        self._voice_label = QLabel("Voz desligada")
         self._voice_label.setAccessibleName("Voice state")
         self._voice_label.setObjectName("voiceState")
         layout.addWidget(self._voice_label)
@@ -1448,6 +1450,16 @@ class MainWindow(QMainWindow):
                 border-radius: 8px;
                 color: #d9edf5;
                 selection-background-color: #0d4050;
+                selection-color: #f4fbff;
+            }
+            QListWidget::item {
+                padding: 10px 8px;
+                margin: 2px 0;
+                border-radius: 7px;
+            }
+            QListWidget::item:selected {
+                border-left: 2px solid #22d7f2;
+                background: #0b3340;
             }
             QLineEdit {
                 padding: 7px;
@@ -1506,20 +1518,108 @@ class MainWindow(QMainWindow):
         )
         self._tray.show()
 
+    def _empty_conversation_html(self) -> str:
+        return """
+        <div style="margin-top:120px; text-align:center; color:#8db2be;">
+          <div style="font-size:42px; color:#22d7f2;">◉</div>
+          <div style="font-size:20px; font-weight:600; color:#e7f7fb; margin-top:10px;">
+            Sofia está pronta
+          </div>
+          <div style="font-size:13px; margin-top:6px;">
+            Fale ou digite sua mensagem
+          </div>
+        </div>
+        """
+
+    def _message_card_html(self, message: dict[str, str]) -> str:
+        role = message.get("role", "system")
+        text = html.escape(message.get("text", "")).replace("\n", "<br>")
+        modality = message.get("modality", "text")
+        if role == "user":
+            align = "right"
+            background = "#0b3450"
+            border = "#13506e"
+            author = "Você"
+        elif role == "assistant":
+            align = "left"
+            background = "#10242d"
+            border = "#183d49"
+            author = "Sofia"
+        else:
+            align = "left"
+            background = "#2a2020"
+            border = "#6f4040"
+            author = "Sistema"
+
+        modality_label = " · voz" if modality == "voice" else ""
+        return (
+            f'<div style="text-align:{align}; margin:10px 4px;">'
+            f'<div style="display:inline-block; max-width:78%; text-align:left; '
+            f'background:{background}; border:1px solid {border}; '
+            f'border-radius:12px; padding:10px 12px;">'
+            f'<div style="font-size:11px; color:#7fb3c2; margin-bottom:5px;">'
+            f'{author}{modality_label}</div>'
+            f'<div style="font-size:14px; color:#eef9fc; line-height:1.45;">'
+            f'{text}</div></div></div>'
+        )
+
+    def _refresh_conversation_view(self) -> None:
+        if not self._conversation_messages:
+            self._chat.setHtml(self._empty_conversation_html())
+            return
+        self._chat.setHtml(
+            "".join(self._message_card_html(item) for item in self._conversation_messages)
+        )
+        scrollbar = self._chat.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _append_conversation_message(
+        self, role: str, text: str, modality: str = "text"
+    ) -> None:
+        if not text:
+            return
+        self._conversation_messages.append(
+            {"role": role, "text": text, "modality": modality}
+        )
+        self._refresh_conversation_view()
+
+    @Slot()
+    def _start_assistant_stream(self) -> None:
+        self._conversation_messages.append(
+            {"role": "assistant", "text": "", "modality": "text"}
+        )
+        self._stream_message_index = len(self._conversation_messages) - 1
+        self._readiness_badge.setText("● Respondendo")
+        self._refresh_conversation_view()
+
+    @Slot(str)
+    def _append_assistant_stream_delta(self, delta: str) -> None:
+        index = self._stream_message_index
+        if index is None or index >= len(self._conversation_messages):
+            return
+        self._conversation_messages[index]["text"] += delta
+        self._refresh_conversation_view()
+
+    @Slot()
+    def _finish_assistant_stream(self) -> None:
+        self._stream_message_index = None
+        self._readiness_badge.setText("● Pronta")
+        self._refresh_conversation_view()
+
     def _wire_controller(self) -> None:
         worker = self._controller.worker
         worker.state_changed.connect(self._on_state)
         worker.snapshot_ready.connect(self._on_snapshot)
-        worker.stream_started.connect(lambda: self._chat.append("<b>Sofia:</b> "))
-        worker.stream_delta.connect(self._chat.insertPlainText)
-        worker.stream_finished.connect(lambda: self._chat.append(""))
+        worker.stream_started.connect(self._start_assistant_stream)
+        worker.stream_delta.connect(self._append_assistant_stream_delta)
+        worker.stream_finished.connect(self._finish_assistant_stream)
         worker.conversation_failed.connect(self._on_conversation_failed)
         worker.voice_changed.connect(self._on_voice_state)
         worker.voice_transcript.connect(
-            lambda text: self._chat.append(f"<b>You:</b> {text}")
+            lambda text: self._append_conversation_message("user", text, "voice")
         )
         worker.voice_assistant_text.connect(
-            lambda text: self._chat.append(f"<b>Sofia:</b> {text}")
+            lambda text: self._append_conversation_message("assistant", text, "voice")
         )
         worker.failure.connect(self._show_error)
         worker.ai_dashboard_ready.connect(self._on_ai_dashboard)
@@ -1534,7 +1634,24 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_voice_state(self, state: str) -> None:
         value = state.rsplit(".", 1)[-1]
-        self._voice_label.setText(f"Voice: {value}")
+        labels = {
+            VoiceState.IDLE.value: "Voz desligada",
+            VoiceState.CONNECTING.value: "Conectando voz…",
+            VoiceState.LISTENING.value: "Ouvindo…",
+            VoiceState.RESPONDING.value: "Sofia falando…",
+            VoiceState.READY.value: "Voz pronta",
+            VoiceState.INTERRUPTED.value: "Resposta interrompida",
+            VoiceState.ERROR.value: "Voz indisponível",
+        }
+        self._voice_label.setText(labels.get(value, value))
+        if value == VoiceState.LISTENING.value:
+            self._readiness_badge.setText("● Ouvindo")
+        elif value == VoiceState.RESPONDING.value:
+            self._readiness_badge.setText("● Respondendo")
+        elif value in {VoiceState.IDLE.value, VoiceState.READY.value}:
+            self._readiness_badge.setText("● Pronta")
+        elif value == VoiceState.ERROR.value:
+            self._readiness_badge.setText("● Atenção")
         self._update_voice_controls(value)
 
     def _update_voice_controls(self, state: str) -> None:
@@ -1564,6 +1681,14 @@ class MainWindow(QMainWindow):
         value = state.rsplit(".", 1)[-1]
         self._connection.setText(value)
         self._tray_status.setText(value)
+        if value == "CONNECTED":
+            self._readiness_badge.setText("● Pronta")
+        elif value == "CONNECTING":
+            self._readiness_badge.setText("● Conectando")
+        elif value == "DEGRADED":
+            self._readiness_badge.setText("● Atenção")
+        else:
+            self._readiness_badge.setText("● Offline")
         self._home.update_connection(value)
         writes_enabled = value == "CONNECTED"
         self._ai_models.set_writes_enabled(writes_enabled)
@@ -1646,26 +1771,43 @@ class MainWindow(QMainWindow):
         self, page: dict[str, Any], *, replace: bool, prepend: bool = False
     ) -> None:
         turns = page.get("turns", [])
-        if replace:
-            self._chat.clear()
-        html_lines = []
+        rendered_messages: list[dict[str, str]] = []
         for turn in turns:
-            html_lines.append(f"<b>You:</b> {turn.get('user_text', '')}")
+            user_text = str(turn.get("user_text") or "")
+            if user_text:
+                rendered_messages.append(
+                    {"role": "user", "text": user_text, "modality": "text"}
+                )
             assistant_text = turn.get("assistant_text")
             if assistant_text:
-                html_lines.append(f"<b>Sofia:</b> {assistant_text}")
-            elif turn.get("status") == "FAILED":
-                html_lines.append(
-                    f"<i>Sofia could not complete this turn: "
-                    f"{turn.get('error_message', 'unknown error')}</i>"
+                rendered_messages.append(
+                    {
+                        "role": "assistant",
+                        "text": str(assistant_text),
+                        "modality": "text",
+                    }
                 )
-        rendered = "<br>".join(html_lines)
-        if prepend:
-            existing = self._chat.toHtml()
-            self._chat.setHtml(rendered + "<br>" + existing)
+            elif turn.get("status") == "FAILED":
+                rendered_messages.append(
+                    {
+                        "role": "system",
+                        "text": (
+                            "Sofia não conseguiu concluir esta interação: "
+                            f"{turn.get('error_message', 'erro desconhecido')}"
+                        ),
+                        "modality": "text",
+                    }
+                )
+
+        if replace:
+            self._conversation_messages = rendered_messages
+        elif prepend:
+            self._conversation_messages = rendered_messages + self._conversation_messages
         else:
-            for line in html_lines:
-                self._chat.append(line)
+            self._conversation_messages.extend(rendered_messages)
+
+        self._stream_message_index = None
+        self._refresh_conversation_view()
         if turns:
             self._oldest_loaded_sequence = int(turns[0].get("sequence", 0)) or None
         self._has_older_turns = bool(page.get("has_older", False))
@@ -1685,8 +1827,9 @@ class MainWindow(QMainWindow):
     def _on_conversation_failed(self, error_code: str, error_message: str) -> None:
         code = html.escape(error_code)
         message = html.escape(error_message)
-        self._chat.append(
-            f"<i>Sofia could not complete this turn [{code}]: {message}</i>"
+        self._append_conversation_message(
+            "system",
+            f"Sofia não conseguiu concluir esta interação [{code}]: {message}",
         )
         self.statusBar().showMessage(f"{error_code}: {error_message}", 8000)
 
@@ -1694,18 +1837,20 @@ class MainWindow(QMainWindow):
     def _on_conversation_recovered(self, page: dict[str, Any]) -> None:
         turns = page.get("turns", [])
         if not turns:
-            self._chat.append(
-                "<i>The last message's result is unconfirmed. "
-                "Please retry if needed.</i>"
+            self._append_conversation_message(
+                "system",
+                "O resultado da última mensagem não foi confirmado. Tente novamente se necessário.",
             )
             return
         turn = turns[-1]
         if turn.get("status") == "COMPLETED" and turn.get("assistant_text"):
-            self._chat.append(f"<b>Sofia:</b> {turn['assistant_text']}")
+            self._append_conversation_message(
+                "assistant", str(turn["assistant_text"])
+            )
         else:
-            self._chat.append(
-                "<i>The last message's result is unconfirmed. "
-                "Please retry if needed.</i>"
+            self._append_conversation_message(
+                "system",
+                "O resultado da última mensagem não foi confirmado. Tente novamente se necessário.",
             )
 
     # -- Confirmation UX ----------------------------------------------------
@@ -1804,7 +1949,7 @@ class MainWindow(QMainWindow):
             return
         if not self._ensure_privacy_choice():
             return
-        self._chat.append(f"<b>You:</b> {text}")
+        self._append_conversation_message("user", text)
         self._draft.clear()
         preference = self._privacy_preference
         self._controller.request_send.emit(
