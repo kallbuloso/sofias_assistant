@@ -241,3 +241,15 @@ ephemeral and may be opened and closed repeatedly for one Conversation.
 
 The Desktop presents voice controls inside Chat. Explicit "New conversation"
 is the only user action that intentionally creates a different Conversation.
+
+
+## 9. Desktop experience
+
+SAS-04 makes Conversation the primary Desktop surface. The top-level navigation
+is intentionally small: Chat, Tasks and Notifications. Technical configuration
+and diagnostic surfaces belong under Sofia Settings rather than competing with
+Conversation for primary navigation.
+
+Current Settings pages include General, Status, AI & Models, Memory and
+Diagnostics. This is an incremental PySide6 refinement; it does not change the
+application framework or move authority into the UI.
