@@ -1,9 +1,9 @@
 """Canonical Python application composition root.
 
-SofiaApplication owns the runtime lifecycle for normal Desktop use. Desktop
-capabilities, including realtime voice, use native in-process application
-services. The legacy loopback boundary remains temporarily composed only for
-compatibility cleanup in SAS-03E; it is no longer a Desktop dependency.
+SofiaApplication owns the complete runtime lifecycle for normal Desktop use.
+Desktop capabilities, including realtime voice, use native in-process
+application services. No localhost HTTP/WebSocket boundary is composed for the
+canonical Desktop runtime.
 """
 
 from __future__ import annotations
@@ -22,10 +22,6 @@ from sofias_assistant.ai.contracts import DataLocality
 from sofias_assistant.application.conversation import ConversationService
 from sofias_assistant.application.desktop_services import DesktopServices
 from sofias_assistant.application.voice import VoiceService
-from sofias_assistant.client_boundary.boundary import (
-    LocalClientAccess,
-    LocalClientBoundary,
-)
 from sofias_assistant.config.loader import resolve_environment
 from sofias_assistant.conversation.runtime import SendTextCommand
 from sofias_assistant.core.core import SofiaCore
@@ -34,7 +30,6 @@ from sofias_assistant.host.composition import (
     build_conversation_dependencies_factory,
     build_runtime_config,
     build_secret_store_factory,
-    create_app_factory,
 )
 from sofias_assistant.host.config import (
     ProductionRuntimeConfig,
@@ -44,8 +39,6 @@ from sofias_assistant.host.secret_bridge import (
     LLM_API_KEY_ENVIRONMENT_VARIABLE,
     provider_api_key_ref,
 )
-from sofias_assistant.runtime.instance_ownership import instance_key_for_data_dir
-from sofias_assistant.runtime.shutdown import RuntimeShutdownSignal
 
 _STREAM_END = object()
 _VOICE_STREAM_END = object()
@@ -72,8 +65,6 @@ class SofiaApplication:
 
         self._config: ProductionRuntimeConfig | None = None
         self._core: SofiaCore | None = None
-        self._boundary: LocalClientBoundary | None = None
-        self._access: LocalClientAccess | None = None
         self._conversation: ConversationService | None = None
         self._desktop: DesktopServices | None = None
         self._voice: VoiceService | None = None
@@ -84,13 +75,6 @@ class SofiaApplication:
         if core is None:
             raise RuntimeError("SofiaApplication is not running")
         return core
-
-    @property
-    def compatibility_access(self) -> LocalClientAccess:
-        access = self._access
-        if access is None:
-            raise RuntimeError("Desktop compatibility adapter is not running")
-        return access
 
     @property
     def runtime_session_id(self) -> UUID | None:
@@ -136,7 +120,7 @@ class SofiaApplication:
             if self._ready.wait(interval):
                 if self._error is not None:
                     raise RuntimeError("SofiaApplication failed to start") from self._error
-                if self._core is not None and self._access is not None:
+                if self._core is not None:
                     return
             if self._stopped.is_set():
                 break
@@ -279,7 +263,6 @@ class SofiaApplication:
         resolved_environment = resolve_environment(environment=real_environment)
 
         application_version = _application_version()
-        instance_key = instance_key_for_data_dir(config.data_dir)
         secret_store_factory = build_secret_store_factory(
             environment=resolved_environment,
             llm_provider_id=config.llm.provider_id,
@@ -300,35 +283,11 @@ class SofiaApplication:
         self._conversation = ConversationService(core.conversation_runtime)
         self._desktop = DesktopServices(core, session_id=uuid4())
         self._voice = VoiceService(core.realtime_conversation_runtime)
-        boundary: LocalClientBoundary | None = None
         try:
             await self._report_ai_readiness(core, config)
-            shutdown_signal = RuntimeShutdownSignal(
-                event=self._shutdown_event,
-                runtime_session_id_provider=lambda: core.runtime_session_id,
-            )
-            boundary = LocalClientBoundary(
-                port=config.core_host.port,
-                app_factory=create_app_factory(
-                    core,
-                    instance_key=instance_key,
-                    application_version=application_version,
-                    shutdown_signal=shutdown_signal,
-                ),
-            )
-            access = await boundary.start()
-            self._boundary = boundary
-            self._access = access
             self._ready.set()
-
             await self._shutdown_event.wait()
         finally:
-            if boundary is not None and self._access is not None:
-                try:
-                    await boundary.stop()
-                finally:
-                    self._access = None
-                    self._boundary = None
             try:
                 await core.stop()
             finally:
@@ -369,17 +328,12 @@ def run_desktop() -> int:
 
     runtime = SofiaApplication()
     runtime.start()
-    access = runtime.compatibility_access
-    base_url = f"http://{access.host}:{access.port}"
-    credential = access.credential.reveal()
 
-    def api_factory(url: str, token: str) -> ApplicationCoreApiClient:
-        return ApplicationCoreApiClient(runtime, url, token)
+    def api_factory() -> ApplicationCoreApiClient:
+        return ApplicationCoreApiClient(runtime)
 
     try:
         qt_app, _window = create_application(
-            base_url,
-            credential,
             runtime_session_id=runtime.runtime_session_id,
             api_factory=api_factory,
         )
