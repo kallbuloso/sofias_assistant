@@ -66,6 +66,14 @@ _OpenAIClientFactory = Callable[[str], Any]
 _OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 _OPENAI_PCM24K = {"type": "audio/pcm", "rate": 24_000}
 _RETIRED_INTERACTION_LIMIT = 8
+_REALTIME_VOICE_CAPABILITY_CONTEXT = (
+    "This session is Sofia's live voice conversation. You receive the user's "
+    "speech as audio through the realtime input stream and can respond with "
+    "generated speech. Do not claim that you cannot hear or process audio in "
+    "this session. You do not have access to the user's microphone outside "
+    "audio explicitly sent through this active session; do not claim to hear "
+    "background audio or to access unrelated device sensors."
+)
 
 
 class OpenAIProviderAdapter:
@@ -345,9 +353,14 @@ class OpenAIRealtimeProviderSession:
         """Install manual-PTT PCM configuration and Core-built context."""
 
         instructions = "\n\n".join(
-            message.text
-            for message in self._request.context_seed.messages
-            if message.role is AIMessageRole.SYSTEM
+            (
+                *(
+                    message.text
+                    for message in self._request.context_seed.messages
+                    if message.role is AIMessageRole.SYSTEM
+                ),
+                _REALTIME_VOICE_CAPABILITY_CONTEXT,
+            )
         )
         session: dict[str, object] = {
             "type": "realtime",
