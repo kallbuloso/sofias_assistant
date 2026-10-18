@@ -7,11 +7,13 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from sofias_assistant.client_app.models import InferencePrivacyPreference
 from sofias_assistant.client_app.qt_app import (
     ConfirmationDialog,
+    DesktopController,
+    MainWindow,
     PrivacyPreferenceDialog,
     SettingsDialog,
     _tray_icon,
@@ -91,3 +93,59 @@ def test_confirmation_dialog_shows_only_safe_bounded_fields(
     assert "C:/dev/report.txt" in labels
     assert "ONE_SHOT" in labels
     dialog.close()
+
+
+
+def test_settings_dialog_hosts_technical_pages(
+    qapplication: QApplication,
+) -> None:
+    status = QLabel("status")
+    ai = QLabel("ai")
+    memory = QLabel("memory")
+    diagnostics = QLabel("diagnostics")
+    dialog = SettingsDialog(
+        True,
+        None,
+        status_widget=status,
+        ai_models_widget=ai,
+        memory_widget=memory,
+        health_widget=diagnostics,
+    )
+
+    labels = [
+        dialog._pages.tabText(index)
+        for index in range(dialog._pages.count())
+    ]
+
+    assert labels == [
+        "General",
+        "Status",
+        "AI & Models",
+        "Memory",
+        "Diagnostics",
+    ]
+    dialog.select_page("AI & Models")
+    assert dialog._pages.currentWidget() is ai
+    dialog.close()
+
+
+def test_main_window_is_conversation_first(
+    qapplication: QApplication,
+) -> None:
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+
+    labels = [
+        window._tabs.tabText(index)
+        for index in range(window._tabs.count())
+    ]
+
+    assert labels == ["Chat", "Tasks", "Notifications"]
+    assert window._tabs.currentIndex() == 0
+    window._tray.hide()
+    window.hide()
+    window.deleteLater()
+    controller.deleteLater()
