@@ -150,3 +150,50 @@ def test_main_window_is_conversation_first(
     window.hide()
     window.deleteLater()
     controller.deleteLater()
+
+
+
+def test_conversation_workspace_renders_empty_ready_state(
+    qapplication: QApplication,
+) -> None:
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+
+    assert "Sofia está pronta" in window._chat.toPlainText()
+    assert "Fale ou digite sua mensagem" in window._chat.toPlainText()
+    assert window._voice_label.text() == "Voz desligada"
+
+    window._tray.hide()
+    window.hide()
+    window.deleteLater()
+    controller.deleteLater()
+
+
+def test_conversation_workspace_renders_distinct_user_and_sofia_cards(
+    qapplication: QApplication,
+) -> None:
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+
+    window._conversation_messages = [
+        {"role": "user", "text": "Olá Sofia", "modality": "text"},
+        {"role": "assistant", "text": "Olá Amaral", "modality": "voice"},
+    ]
+    window._refresh_conversation_view()
+
+    rendered = window._chat.toPlainText()
+    assert "Você" in rendered
+    assert "Olá Sofia" in rendered
+    assert "Sofia · voz" in rendered
+    assert "Olá Amaral" in rendered
+
+    window._tray.hide()
+    window.hide()
+    window.deleteLater()
+    controller.deleteLater()
