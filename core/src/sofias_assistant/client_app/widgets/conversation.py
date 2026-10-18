@@ -130,6 +130,10 @@ class ConversationFeedWidget(QScrollArea):
         self._layout = QVBoxLayout(self._content)
         self._layout.setContentsMargins(24, 24, 24, 24)
         self._layout.setSpacing(5)
+        # A resizable scroll-area child must recompute its natural height when
+        # the message layout changes. Without this, the outer widget retains
+        # a stale height (1211px vs a 1021px size hint in Windows diagnostics).
+        self._layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         self.setWidget(self._content)
 
         self._message_widgets: list[ConversationMessageWidget] = []
