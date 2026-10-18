@@ -138,3 +138,8 @@ See `LICENSE` for the official license reference.
 Voice is part of Chat, not a separate conversation surface. Text and voice use
 the same selected Conversation and durable history; stopping voice only closes
 the temporary realtime audio session.
+
+
+The Desktop is now conversation-first. Chat is the primary surface, while
+AI/model setup, Memory integration, readiness status and diagnostics live under
+Sofia Settings instead of top-level tabs.
