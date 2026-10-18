@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication, QLabel
 
 from sofias_assistant.client_app.models import InferencePrivacyPreference
+from sofias_assistant.client_app.widgets import ComposerWidget
 from sofias_assistant.client_app.qt_app import (
     ConfirmationDialog,
     DesktopController,
@@ -227,3 +228,38 @@ def test_stream_updates_existing_sofia_message_widget(
     window.hide()
     window.deleteLater()
     controller.deleteLater()
+
+
+
+def test_composer_hides_context_controls_while_idle(
+    qapplication: QApplication,
+) -> None:
+    composer = ComposerWidget()
+
+    composer.set_voice_state("IDLE")
+
+    assert composer.input.placeholderText() == "Mensagem para Sofia…"
+    assert composer.voice_start.isEnabled() is True
+    assert composer.voice_commit.isVisible() is False
+    assert composer.voice_interrupt.isVisible() is False
+    assert composer.voice_stop.isVisible() is False
+    composer.close()
+
+
+def test_composer_exposes_only_relevant_voice_action(
+    qapplication: QApplication,
+) -> None:
+    composer = ComposerWidget()
+    composer.show()
+    qapplication.processEvents()
+
+    composer.set_voice_state("LISTENING")
+    assert composer.voice_commit.isVisible() is True
+    assert composer.voice_interrupt.isVisible() is False
+    assert composer.voice_stop.isVisible() is True
+
+    composer.set_voice_state("RESPONDING")
+    assert composer.voice_commit.isVisible() is False
+    assert composer.voice_interrupt.isVisible() is True
+    assert composer.voice_stop.isVisible() is True
+    composer.close()
