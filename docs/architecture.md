@@ -186,20 +186,40 @@ Ordinary development and human validation do not use PyInstaller, `build/`,
 lifecycle and the existing runtime services in one Python application.
 
 The former process-supervision path is no longer on the canonical startup path.
-A loopback HTTP/WebSocket boundary still exists temporarily inside
-`SofiaApplication`, but the Desktop no longer consumes it. Conversation,
-configuration, history, tasks, notifications and realtime voice now use native
-in-process application services. The compatibility boundary is retained only
-for lifecycle/removal work in SAS-03E.
+`SofiaApplication` owns Core, Desktop-facing application services, realtime
+voice and shutdown inside one Python process. Canonical Desktop startup does not
+start a localhost HTTP/WebSocket boundary and does not create bearer credentials
+or Desktop client sessions.
 
-During the remaining SAS-03 migration:
+Conversation, configuration, history, tasks, notifications and realtime voice
+all use native in-process application services.
 
-- preserve domain behavior and security invariants;
-- avoid deleting useful services merely because their transport changes;
-- move Desktop surfaces from the compatibility boundary to application services;
-- remove localhost transport from the Desktop critical path once its last
-  consumer is migrated;
-- keep an optional API adapter only where it provides concrete value.
+The historical local API and standalone host remain isolated compatibility
+surfaces for non-canonical tests or future explicit external-adapter use. They
+are not part of the normal Desktop lifecycle and must not become a hidden
+dependency of it.
+
+Lifecycle ownership is now:
+
+```text
+py main.py
+  ↓
+SofiaApplication.start()
+  ↓
+Core + application services
+  ↓
+Qt Desktop
+  ↓
+window close | Quit | Ctrl+C
+  ↓
+Desktop resources stop
+  ↓
+SofiaApplication.stop()
+  ↓
+Core.stop()
+  ↓
+process exit
+```
 
 ## 8. MVP validation gate
 
