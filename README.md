@@ -23,12 +23,11 @@ from `core/requirements.txt`. `core/main.py` starts Sofia directly from the
 working tree. Python 3.13 and 3.14 are supported; the repository development
 baseline currently targets Python 3.14.
 
-`core/main.py` now starts `SofiaApplication` as the normal Desktop composition
+`core/main.py` starts `SofiaApplication` as the normal Desktop composition
 root. The old process-supervision path is no longer used by canonical startup.
-Desktop conversation, configuration and realtime voice now use direct
-in-process application services. A loopback HTTP/WebSocket adapter remains
-temporarily composed only as legacy compatibility infrastructure pending
-SAS-03E cleanup.
+Desktop conversation, configuration and realtime voice use direct in-process
+application services. Normal Desktop startup no longer opens localhost port
+8989, creates a bearer credential, or creates a Desktop client session.
 
 The architectural target is one application process for normal desktop use:
 
