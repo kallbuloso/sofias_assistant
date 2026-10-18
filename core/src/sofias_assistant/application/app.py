@@ -145,15 +145,27 @@ class SofiaApplication:
     def stop(self, *, timeout: float = 10.0) -> None:
         """Request graceful application shutdown and wait for owned resources."""
 
+        thread = self._thread
+        if thread is None:
+            return
+
         loop = self._loop
         shutdown_event = self._shutdown_event
-        thread = self._thread
-        if loop is None or shutdown_event is None or thread is None:
-            return
-        if not self._stopped.is_set():
+        if (
+            loop is not None
+            and shutdown_event is not None
+            and not self._stopped.is_set()
+        ):
             loop.call_soon_threadsafe(shutdown_event.set)
+
+        if thread.is_alive():
             thread.join(timeout)
+        if thread.is_alive():
+            raise RuntimeError("SofiaApplication did not stop within the timeout")
+
         self._thread = None
+        self._loop = None
+        self._shutdown_event = None
 
     def call(self, coroutine: Any, *, timeout: float = 60.0) -> Any:
         """Run one application coroutine on the owned runtime loop."""
@@ -294,6 +306,7 @@ class SofiaApplication:
                 self._conversation = None
                 self._desktop = None
                 self._voice = None
+                self._core = None
 
     async def _report_ai_readiness(
         self, core: SofiaCore, config: ProductionRuntimeConfig
@@ -333,10 +346,7 @@ def run_desktop() -> int:
         return ApplicationCoreApiClient(runtime)
 
     try:
-        qt_app, _window = create_application(
-            runtime_session_id=runtime.runtime_session_id,
-            api_factory=api_factory,
-        )
+        qt_app, _window = create_application(api_factory=api_factory)
         try:
             return qt_app.exec()
         except KeyboardInterrupt:
