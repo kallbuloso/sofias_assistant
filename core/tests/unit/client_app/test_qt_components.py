@@ -263,3 +263,49 @@ def test_composer_exposes_only_relevant_voice_action(
     assert composer.voice_interrupt.isVisible() is True
     assert composer.voice_stop.isVisible() is True
     composer.close()
+
+
+@pytest.mark.parametrize(
+    ("input_modality", "expected"),
+    [
+        ("VOICE", "voice"),
+        ("TEXT", "text"),
+        (None, "text"),  # Legacy turn without modality metadata
+    ],
+)
+def test_history_restores_persisted_turn_modality(
+    qapplication: QApplication, input_modality: str | None, expected: str
+) -> None:
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+    window._render_turn_page(
+        {
+            "turns": [
+                {
+                    "sequence": 1,
+                    "input_modality": input_modality,
+                    "user_text": "Teste de voz",
+                    "assistant_text": "Recebi sua mensagem",
+                    "status": "COMPLETED",
+                }
+            ],
+            "has_older": False,
+        },
+        replace=True,
+    )
+
+    assert [message["modality"] for message in window._conversation_messages] == [
+        expected,
+        expected,
+    ]
+    assert [widget.modality for widget in window._chat._message_widgets] == [
+        expected,
+        expected,
+    ]
+    window._tray.hide()
+    window.hide()
+    window.deleteLater()
+    controller.deleteLater()
