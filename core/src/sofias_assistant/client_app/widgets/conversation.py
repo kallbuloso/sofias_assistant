@@ -67,7 +67,8 @@ class ConversationMessageWidget(QWidget):
             if role == "assistant"
             else "systemMessage"
         )
-        bubble.setMaximumWidth(680)
+        bubble.setMaximumWidth(620)
+        bubble.setMinimumWidth(220 if role == "user" else 360)
         bubble.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Minimum,
@@ -132,8 +133,8 @@ class ConversationFeedWidget(QScrollArea):
         self._content = QWidget()
         self._content.setObjectName("conversationFeedContent")
         self._layout = QVBoxLayout(self._content)
-        self._layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
-        self._layout.setSpacing(2)
+        self._layout.setContentsMargins(24, 24, 24, 24)
+        self._layout.setSpacing(6)
         self.setWidget(self._content)
 
         self._message_widgets: list[ConversationMessageWidget] = []
@@ -173,6 +174,7 @@ class ConversationFeedWidget(QScrollArea):
             QLabel#messageBody {{
                 color: {PALETTE.text_primary};
                 font-size: 14px;
+                line-height: 1.35;
             }}
             QLabel#sofiaAvatar {{
                 color: {PALETTE.accent};
