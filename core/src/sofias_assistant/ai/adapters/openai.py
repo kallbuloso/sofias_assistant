@@ -368,11 +368,16 @@ class OpenAIRealtimeProviderSession:
         for message in self._request.context_seed.messages:
             if message.role is AIMessageRole.SYSTEM:
                 continue
+            content_type = (
+                "output_text"
+                if message.role is AIMessageRole.ASSISTANT
+                else "input_text"
+            )
             await self._connection.conversation.item.create(
                 item={
                     "type": "message",
                     "role": message.role.value,
-                    "content": [{"type": "input_text", "text": message.text}],
+                    "content": [{"type": content_type, "text": message.text}],
                 }
             )
 
