@@ -1544,11 +1544,14 @@ class MainWindow(QMainWindow):
         worker.stream_finished.connect(self._finish_assistant_stream)
         worker.conversation_failed.connect(self._on_conversation_failed)
         worker.voice_changed.connect(self._on_voice_state)
+        # Bound QObject slots guarantee queued delivery on the GUI thread.
+        # Python lambdas are not QObject receivers and can execute in the
+        # emitting worker's thread, corrupting QLabel's QTextDocument.
         worker.voice_transcript.connect(
-            lambda text: self._append_conversation_message("user", text, "voice")
+            self._on_voice_transcript, Qt.ConnectionType.QueuedConnection
         )
         worker.voice_assistant_text.connect(
-            lambda text: self._append_conversation_message("assistant", text, "voice")
+            self._on_voice_assistant_text, Qt.ConnectionType.QueuedConnection
         )
         worker.failure.connect(self._show_error)
         worker.ai_dashboard_ready.connect(self._on_ai_dashboard)
@@ -1559,6 +1562,14 @@ class MainWindow(QMainWindow):
         worker.older_turns_ready.connect(self._on_older_turns_ready)
         worker.conversation_recovered.connect(self._on_conversation_recovered)
         worker.confirmation_ready.connect(self._on_confirmation_ready)
+
+    @Slot(str)
+    def _on_voice_transcript(self, text: str) -> None:
+        self._append_conversation_message("user", text, "voice")
+
+    @Slot(str)
+    def _on_voice_assistant_text(self, text: str) -> None:
+        self._append_conversation_message("assistant", text, "voice")
 
     @Slot(str)
     def _on_voice_state(self, state: str) -> None:
