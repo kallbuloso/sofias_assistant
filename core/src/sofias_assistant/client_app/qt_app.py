@@ -1433,6 +1433,44 @@ class MainWindow(QMainWindow):
                 border-left: 2px solid #22d7f2;
                 background: #0b3340;
             }
+            /* SAS-04D: visually separate navigation and activity surfaces. */
+            QFrame#conversationSidebar QListWidget {
+                background: transparent;
+                border: 0;
+                border-radius: 0;
+                outline: none;
+            }
+            QFrame#conversationSidebar QListWidget::item {
+                padding: 12px 10px;
+                margin: 3px 0;
+                border-radius: 9px;
+                color: #8db2be;
+            }
+            QFrame#conversationSidebar QListWidget::item:hover {
+                color: #eef9fc;
+                background: #10242d;
+            }
+            QFrame#conversationSidebar QListWidget::item:selected {
+                color: #eef9fc;
+                background: #0b3340;
+                border-left: 2px solid #22d7f2;
+            }
+            QFrame#activityPanel QGroupBox {
+                background: #0a1e27;
+                border: 1px solid #123440;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 10px 6px 6px 6px;
+            }
+            QFrame#activityPanel QListWidget {
+                background: transparent;
+                border: 0;
+                border-radius: 0;
+                outline: none;
+            }
+            QFrame#activityPanel QListWidget::item:hover {
+                background: #10242d;
+            }
             QLineEdit {
                 padding: 7px;
             }
