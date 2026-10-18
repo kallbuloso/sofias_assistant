@@ -141,8 +141,10 @@ class ConversationFeedWidget(QScrollArea):
         self._messages_layout = QVBoxLayout(self._messages_host)
         self._messages_layout.setContentsMargins(0, 0, 0, 0)
         self._messages_layout.setSpacing(5)
+        # Do not insert an expanding spacer into the scrollable document.
+        # On short conversations the viewport itself supplies empty space;
+        # on long ones the scroll range must end at the last message.
         self._layout.addWidget(self._messages_host, 0, Qt.AlignmentFlag.AlignTop)
-        self._layout.addStretch(1)
         self._messages_host.hide()
 
         self.setStyleSheet(
@@ -277,7 +279,6 @@ class ConversationFeedWidget(QScrollArea):
     def _finish_restore_scroll(self) -> None:
         self._messages_layout.activate()
         self._layout.activate()
-        self._content.adjustSize()
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
         # Qt may update the scroll range once more as the viewport lays out.
