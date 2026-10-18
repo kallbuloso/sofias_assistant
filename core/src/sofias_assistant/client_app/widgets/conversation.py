@@ -146,6 +146,9 @@ class ConversationFeedWidget(QScrollArea):
         self._messages_layout = QVBoxLayout(self._messages_host)
         self._messages_layout.setContentsMargins(0, 0, 0, 0)
         self._messages_layout.setSpacing(5)
+        # Keep all message rows packed at the top even when the host receives
+        # surplus height from QScrollArea. Never distribute it between turns.
+        self._messages_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         # Force Qt to refresh the host's minimum/maximum size whenever turns
         # are removed or added; otherwise old fixed geometry can survive a
         # Conversation switch and create a long empty scrollbar range.
@@ -284,7 +287,7 @@ class ConversationFeedWidget(QScrollArea):
         self._layout.setStretch(0, 0)
         self._messages_host.show()
         widget = ConversationMessageWidget(role, text, modality, self._messages_host)
-        self._messages_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
+        self._messages_layout.addWidget(widget)
         self._message_widgets.append(widget)
         self._messages_host.updateGeometry()
         if scroll:
