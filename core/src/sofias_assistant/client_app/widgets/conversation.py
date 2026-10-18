@@ -104,6 +104,13 @@ class ConversationMessageWidget(QWidget):
 
         self.set_text(text)
 
+    def minimumSizeHint(self):
+        # For word-wrapped QLabel text, Qt can report a minimum height larger
+        # than the actual row sizeHint at the current feed width. Using that
+        # inflated minimum for every row expands the scroll document while
+        # the bubbles themselves remain compact.
+        return self.sizeHint()
+
     @property
     def text(self) -> str:
         return self._body.text()
