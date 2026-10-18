@@ -374,8 +374,20 @@ class ClientWorker(QObject):
                     locality=locality,
                     cloud_context_eligible=cloud_context_eligible,
                 )
+
+            # Start/recover the native interaction before binding the event
+            # pump to the session. NativeRealtimeVoiceConnection.start() may
+            # replace a transient non-idle session with a fresh session for the
+            # same durable Conversation; starting the pump earlier would bind
+            # it to the stale session and surface late failures as if they
+            # belonged to the new interaction.
+            self._voice.start()
+
+            if self._output_device is None:
                 self._output_device = self._output_device_factory()
                 self._output_device.start()
+
+            if self._pump_thread is None or not self._pump_thread.is_alive():
                 voice = self._voice
                 self._pump_thread = threading.Thread(
                     target=self._pump_loop,
@@ -384,7 +396,7 @@ class ClientWorker(QObject):
                     name="sofia-realtime-pump",
                 )
                 self._pump_thread.start()
-            self._voice.start()
+
             self._start_input_device()
             self._set_voice_state(VoiceState.LISTENING)
         except AudioDeviceError as error:
@@ -469,7 +481,22 @@ class ClientWorker(QObject):
             self.refresh()
         elif kind in {"turn.failed", "interaction.failed"}:
             self._set_voice_state(VoiceState.ERROR)
-            self.failure.emit("Realtime interaction did not complete")
+            if kind == "interaction.failed":
+                detail = str(event.get("message") or "").strip()
+            else:
+                turn = event.get("turn")
+                detail = (
+                    str(turn.get("error_message") or "").strip()
+                    if isinstance(turn, dict)
+                    else ""
+                )
+            message = (
+                f"Realtime interaction did not complete: {detail}"
+                if detail
+                else "Realtime interaction did not complete"
+            )
+            print(message, file=sys.stderr)
+            self.failure.emit(message)
             self._stop_audio_devices()
             self._close_voice()
             self.refresh()
