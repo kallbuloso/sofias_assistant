@@ -238,12 +238,14 @@ class ConversationFeedWidget(QScrollArea):
     def clear_messages(self) -> None:
         self._clear_layout_messages()
         self._messages_host.hide()
+        self._layout.setStretch(0, 1)
         self._hero.show()
 
     def set_messages(self, messages: Iterable[ConversationMessage]) -> None:
         self._clear_layout_messages()
         message_list = list(messages)
         self._hero.setVisible(not message_list)
+        self._layout.setStretch(0, 0 if message_list else 1)
         self._messages_host.setVisible(bool(message_list))
         for message in message_list:
             self.add_message(
@@ -264,6 +266,9 @@ class ConversationFeedWidget(QScrollArea):
         scroll: bool = True,
     ) -> ConversationMessageWidget:
         self._hero.hide()
+        # The hidden empty-state hero must not retain its expanding stretch.
+        # Otherwise Qt can allocate a large scrollable void after the turns.
+        self._layout.setStretch(0, 0)
         self._messages_host.show()
         widget = ConversationMessageWidget(role, text, modality, self._messages_host)
         self._messages_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignTop)
