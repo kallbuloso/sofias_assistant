@@ -68,6 +68,7 @@ from sofias_assistant.client_app.models import (
 from sofias_assistant.client_app.service import ClientApplicationService
 from sofias_assistant.client_app.widgets import (
     ConversationFeedWidget,
+    ConversationMessage,
     ConversationMessageWidget,
 )
 
@@ -1285,7 +1286,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         self._chat = ConversationFeedWidget()
-        self._conversation_messages: list[dict[str, str]] = []
+        self._conversation_messages: list[ConversationMessage] = []
         self._stream_message_index: int | None = None
         self._stream_widget: ConversationMessageWidget | None = None
         layout.addWidget(self._chat, 1)
@@ -1521,13 +1522,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not text:
             return
-        message = {"role": role, "text": text, "modality": modality}
+        message: ConversationMessage = {
+            "role": role,
+            "text": text,
+            "modality": modality,
+        }
         self._conversation_messages.append(message)
         self._chat.add_message(role, text, modality)
 
     @Slot()
     def _start_assistant_stream(self) -> None:
-        message = {"role": "assistant", "text": "", "modality": "text"}
+        message: ConversationMessage = {
+            "role": "assistant",
+            "text": "",
+            "modality": "text",
+        }
         self._conversation_messages.append(message)
         self._stream_message_index = len(self._conversation_messages) - 1
         self._stream_widget = self._chat.add_message("assistant", "", "text")
@@ -1714,7 +1723,7 @@ class MainWindow(QMainWindow):
         self, page: dict[str, Any], *, replace: bool, prepend: bool = False
     ) -> None:
         turns = page.get("turns", [])
-        rendered_messages: list[dict[str, str]] = []
+        rendered_messages: list[ConversationMessage] = []
         for turn in turns:
             user_text = str(turn.get("user_text") or "")
             if user_text:
