@@ -6,10 +6,9 @@ Usage:
 The script automatically re-launches itself inside the project .venv created
 by setup.py and exposes core/src directly from the working tree.
 
-SAS-03A starts the canonical SofiaApplication composition root. The legacy
-loopback HTTP/WebSocket boundary remains temporarily available only as a
-compatibility adapter for Desktop surfaces that have not yet migrated to
-direct application services.
+The canonical SofiaApplication composition root runs the Desktop and runtime
+services in one Python application. Normal Desktop startup does not compose a
+localhost HTTP/WebSocket server, bearer credential, or client-session boundary.
 
 For source-first human startup, a conservative default bootstrap model is
 provided only when LLM_MODEL is completely absent. Explicit user/environment
