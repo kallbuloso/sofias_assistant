@@ -48,7 +48,7 @@ class ComposerWidget(QFrame):
         self.voice_start.setIconSize(QSize(24, 24))
         self.voice_start.setObjectName("composerMic")
         self.voice_start.setToolTip("Falar com Sofia")
-        self.voice_start.setFixedSize(44, 44)
+        self.voice_start.setFixedSize(52, 44)
         self.voice_start.clicked.connect(self.voice_start_requested.emit)
         layout.addWidget(self.voice_start)
 
@@ -98,7 +98,7 @@ class ComposerWidget(QFrame):
             }}
             QPushButton#composerMic {{
                 border: 1px solid {PALETTE.accent};
-                border-radius: 22px;
+                border-radius: 10px;
                 background: #082630;
                 color: {PALETTE.accent};
                 font-size: 18px;
