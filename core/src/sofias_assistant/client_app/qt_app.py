@@ -1283,7 +1283,7 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event) -> bool:
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
-                if watched.window() is self:
+                if isinstance(watched, QWidget) and watched.window() is self:
                     local = self.mapFromGlobal(event.globalPosition().toPoint())
                     edge = self._edge_at(local)
                     handle = self.windowHandle()
