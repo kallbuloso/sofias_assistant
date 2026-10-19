@@ -1114,6 +1114,8 @@ class MainWindow(QMainWindow):
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
+        # Retain menu actions, but remove the redundant native menu strip.
+        self.menuBar().hide()
 
         # Conversation is the primary Desktop surface. Technical configuration
         # lives under Settings instead of competing with Chat in the top-level UI.
@@ -1192,8 +1194,12 @@ class MainWindow(QMainWindow):
         bar = QFrame()
         bar.setObjectName("topBar")
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(18, 9, 18, 9)
+        layout.setSpacing(14)
+
+        brand_glyph = QLabel("◯")
+        brand_glyph.setObjectName("brandGlyph")
+        layout.addWidget(brand_glyph)
 
         brand = QLabel("SOFIA")
         brand.setObjectName("brandLabel")
@@ -1203,17 +1209,19 @@ class MainWindow(QMainWindow):
         self._readiness_badge.setObjectName("statusBadge")
         layout.addWidget(self._readiness_badge)
 
-        self._privacy_badge = QLabel("Nuvem permitida")
+        self._privacy_badge = QLabel("☁  Nuvem permitida")
         self._privacy_badge.setObjectName("privacyBadge")
         layout.addWidget(self._privacy_badge)
 
         layout.addStretch(1)
 
-        configure = QPushButton("Configurar")
+        configure = QPushButton("⚙  CONFIGURAR")
+        configure.setObjectName("topBarAction")
         configure.clicked.connect(lambda: self._show_settings())
         layout.addWidget(configure)
 
-        controls = QPushButton("Controles")
+        controls = QPushButton("☷  CONTROLES")
+        controls.setObjectName("topBarAction")
         controls.clicked.connect(self._show_privacy_dialog)
         layout.addWidget(controls)
         return bar
@@ -1279,12 +1287,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
-        older = QPushButton("Earlier messages")
-        older.clicked.connect(self._load_older_turns)
-        header.addWidget(older)
+        self._older_header = QWidget()
+        header = QHBoxLayout(self._older_header)
+        header.setContentsMargins(0, 0, 0, 0)
+        self._older_turns_button = QPushButton("Mensagens anteriores")
+        self._older_turns_button.setObjectName("ghostButton")
+        self._older_turns_button.clicked.connect(self._load_older_turns)
+        header.addWidget(self._older_turns_button)
         header.addStretch(1)
-        layout.addLayout(header)
+        self._older_header.hide()
+        layout.addWidget(self._older_header)
 
         self._chat = ConversationFeedWidget()
         self._conversation_messages: list[ConversationMessage] = []
@@ -1363,8 +1375,15 @@ class MainWindow(QMainWindow):
                 color: #d9edf5;
             }
             QFrame#topBar {
-                background: #071820;
-                border-bottom: 1px solid #123440;
+                background: #06141b;
+                border-bottom: 1px solid #145164;
+            }
+            QLabel#brandGlyph {
+                color: #22d7f2;
+                font-size: 27px;
+                font-weight: 700;
+                min-width: 30px;
+                max-width: 30px;
             }
             QLabel#brandLabel {
                 font-size: 22px;
@@ -1375,9 +1394,29 @@ class MainWindow(QMainWindow):
             QLabel#statusBadge, QLabel#privacyBadge {
                 padding: 6px 12px;
                 border: 1px solid #123440;
-                border-radius: 8px;
+                border-radius: 9px;
                 background: #081d26;
                 color: #2cf2c5;
+            }
+            QLabel#privacyBadge { color: #22d7f2; }
+            QPushButton#topBarAction {
+                min-height: 30px;
+                padding: 5px 13px;
+                border-radius: 8px;
+                background: #081d26;
+                border: 1px solid #145164;
+                color: #7fddea;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            QPushButton#topBarAction:hover {
+                border-color: #22d7f2;
+                background: #0c2a36;
+            }
+            QPushButton#ghostButton {
+                background: transparent;
+                border: 1px solid #145164;
+                color: #8db2be;
             }
             QFrame#navRail {
                 background: #071820;
@@ -1779,6 +1818,7 @@ class MainWindow(QMainWindow):
         if turns:
             self._oldest_loaded_sequence = int(turns[0].get("sequence", 0)) or None
         self._has_older_turns = bool(page.get("has_older", False))
+        self._older_header.setVisible(self._has_older_turns)
 
     def _load_older_turns(self) -> None:
         if (
