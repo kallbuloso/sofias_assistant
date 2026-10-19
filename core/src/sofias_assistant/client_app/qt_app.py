@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QStyle,
     QSystemTrayIcon,
     QTabWidget,
     QVBoxLayout,
@@ -1170,6 +1171,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._desktop_shell())
         self._apply_desktop_style()
+        self._update_header_density()
         # The native caption previously provided the resize hit targets.
         # Keep an equivalent 7px border for the frameless window.
         QApplication.instance().installEventFilter(self)
@@ -1203,8 +1205,8 @@ class MainWindow(QMainWindow):
         bar.installEventFilter(self)
         self._title_bar_widget = bar
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(18, 9, 18, 9)
-        layout.setSpacing(14)
+        layout.setContentsMargins(14, 8, 14, 8)
+        layout.setSpacing(10)
 
         brand_glyph = QLabel("◯")
         brand_glyph.setObjectName("brandGlyph")
@@ -1228,12 +1230,14 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        configure = QPushButton("⚙  CONFIGURAR")
+        configure = QPushButton("CONFIGURAR")
+        self._configure_action = configure
         configure.setObjectName("topBarAction")
         configure.clicked.connect(lambda: self._show_settings())
         layout.addWidget(configure)
 
-        controls = QPushButton("☷  CONTROLES")
+        controls = QPushButton("CONTROLES")
+        self._controls_action = controls
         controls.setObjectName("topBarAction")
         controls.clicked.connect(self._show_privacy_dialog)
         layout.addWidget(controls)
@@ -1243,21 +1247,26 @@ class MainWindow(QMainWindow):
         separator.setFixedSize(1, 24)
         layout.addWidget(separator)
 
-        minimize = QPushButton("−")
+        minimize = QPushButton()
+        minimize.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMinButton))
         minimize.setObjectName("windowControl")
         minimize.setAccessibleName("Minimizar janela")
         minimize.setToolTip("Minimizar")
         minimize.clicked.connect(self.showMinimized)
         layout.addWidget(minimize)
 
-        self._maximize_button = QPushButton("□")
+        self._maximize_button = QPushButton()
+        self._maximize_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton)
+        )
         self._maximize_button.setObjectName("windowControl")
         self._maximize_button.setAccessibleName("Maximizar ou restaurar janela")
         self._maximize_button.setToolTip("Maximizar")
         self._maximize_button.clicked.connect(self._toggle_maximize_restore)
         layout.addWidget(self._maximize_button)
 
-        close = QPushButton("×")
+        close = QPushButton()
+        close.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
         close.setObjectName("windowControlClose")
         close.setAccessibleName("Fechar janela")
         close.setToolTip("Fechar")
@@ -1318,8 +1327,25 @@ class MainWindow(QMainWindow):
         if button is None:
             return
         maximized = self.isMaximized()
-        button.setText("❐" if maximized else "□")
+        icon_type = (
+            QStyle.StandardPixmap.SP_TitleBarNormalButton
+            if maximized
+            else QStyle.StandardPixmap.SP_TitleBarMaxButton
+        )
+        button.setIcon(self.style().standardIcon(icon_type))
         button.setToolTip("Restaurar" if maximized else "Maximizar")
+
+    def _update_header_density(self) -> None:
+        """Keep header actions reachable at the window's minimum width."""
+        compact = self.width() < 1020
+        self._privacy_badge.setVisible(not compact)
+        self._configure_action.setText("Config." if compact else "CONFIGURAR")
+        self._controls_action.setText("Privacidade" if compact else "CONTROLES")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_configure_action"):
+            self._update_header_density()
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
