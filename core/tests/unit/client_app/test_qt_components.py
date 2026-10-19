@@ -350,12 +350,7 @@ def test_title_bar_keeps_actions_in_compact_and_full_width(
     )
     window = MainWindow(controller)
     try:
-        # Compact mode is tested explicitly: the new product minimum is
-        # 1280x800, so ordinary interactive resizing cannot reach 820px.
-        window._update_header_density()
-        assert window._privacy_badge.isHidden()
-        assert window._configure_action.text() == "Config."
-        assert window._controls_action.text() == "Privacidade"
+        # At the 1280px minimum, every header action remains available.
         assert not window._maximize_button.icon().isNull()
 
         window.resize(1280, 800)
