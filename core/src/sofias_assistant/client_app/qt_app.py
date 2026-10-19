@@ -10,8 +10,8 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -1102,12 +1102,16 @@ class MainWindow(QMainWindow):
         # SAS-04D: replace the native caption only after the staged header
         # controls were validated on Windows.
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowTitle("Sofia's Assistant")
         self.resize(1280, 800)
         self.setMinimumSize(1280, 800)
         self.setStatusBar(QStatusBar(self))
         self._connection = QLabel("Connecting…")
         self.statusBar().addPermanentWidget(self._connection)
+        # Preserve status messages for existing callers without a redundant
+        # footer below the conversation workspace.
+        self.statusBar().hide()
         menu = self.menuBar().addMenu("Sofia")
         settings = QAction("Settings", self)
         settings.triggered.connect(lambda: self._show_settings())
@@ -1173,6 +1177,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._desktop_shell())
         self._apply_desktop_style()
         self._update_header_density()
+        self._refresh_window_shape()
         # The native caption previously provided the resize hit targets.
         # Keep an equivalent 7px border for the frameless window.
         QApplication.instance().installEventFilter(self)
@@ -1351,11 +1356,26 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "_configure_action"):
             self._update_header_density()
+        self._refresh_window_shape()
+
+    def _refresh_window_shape(self) -> None:
+        """Clip the frameless window to rounded corners only in normal state."""
+        if self.isMaximized() or self.isFullScreen():
+            self.clearMask()
+            return
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(
+            QRectF(0, 0, self.width(), self.height()), 14, 14
+        )
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             self._refresh_maximize_button()
+            self._refresh_window_shape()
 
     def _navigation_rail(self) -> QWidget:
         rail = QFrame()
