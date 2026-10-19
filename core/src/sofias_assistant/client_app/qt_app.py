@@ -1302,7 +1302,13 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event) -> bool:
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
-                if isinstance(watched, QWidget) and watched.window() is self:
+                # The app-wide event filter also sees QWindow events. Only
+                # handle mouse presses belonging to this top-level window.
+                belongs_to_window = (
+                    (isinstance(watched, QWidget) and watched.window() is self)
+                    or watched is self.windowHandle()
+                )
+                if belongs_to_window:
                     local = self.mapFromGlobal(event.globalPosition().toPoint())
                     edge = self._edge_at(local)
                     handle = self.windowHandle()
@@ -1369,18 +1375,7 @@ class MainWindow(QMainWindow):
         path.addRoundedRect(
             QRectF(0, 0, self.width(), self.height()), 14, 14
         )
-        rounded = QRegion(path.toFillPolygon().toPolygon())
-        # Preserve mouse hit targets on every window edge. Without these,
-        # the rounded mask clips the corners and Windows cannot initiate a
-        # native resize there. The translucent pixels remain visually clear.
-        grip = 7
-        hit_edges = (
-            QRegion(0, 0, self.width(), grip)
-            | QRegion(0, self.height() - grip, self.width(), grip)
-            | QRegion(0, 0, grip, self.height())
-            | QRegion(self.width() - grip, 0, grip, self.height())
-        )
-        self.setMask(rounded | hit_edges)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
