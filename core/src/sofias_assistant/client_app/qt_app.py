@@ -1369,7 +1369,18 @@ class MainWindow(QMainWindow):
         path.addRoundedRect(
             QRectF(0, 0, self.width(), self.height()), 14, 14
         )
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        rounded = QRegion(path.toFillPolygon().toPolygon())
+        # Preserve mouse hit targets on every window edge. Without these,
+        # the rounded mask clips the corners and Windows cannot initiate a
+        # native resize there. The translucent pixels remain visually clear.
+        grip = 7
+        hit_edges = (
+            QRegion(0, 0, self.width(), grip)
+            | QRegion(0, self.height() - grip, self.width(), grip)
+            | QRegion(0, 0, grip, self.height())
+            | QRegion(self.width() - grip, 0, grip, self.height())
+        )
+        self.setMask(rounded | hit_edges)
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
