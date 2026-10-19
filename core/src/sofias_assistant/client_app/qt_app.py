@@ -1097,6 +1097,9 @@ class MainWindow(QMainWindow):
     # -- UI construction ---------------------------------------------------
 
     def _build_ui(self) -> None:
+        # SAS-04D: replace the native caption only after the staged header
+        # controls were validated on Windows.
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("Sofia's Assistant")
         self.resize(1100, 720)
         self.setMinimumSize(820, 560)
@@ -1167,6 +1170,9 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._desktop_shell())
         self._apply_desktop_style()
+        # The native caption previously provided the resize hit targets.
+        # Keep an equivalent 7px border for the frameless window.
+        QApplication.instance().installEventFilter(self)
 
     def _desktop_shell(self) -> QWidget:
         root = QWidget()
@@ -1194,6 +1200,8 @@ class MainWindow(QMainWindow):
         """Integrated header, staged while the native window frame remains."""
         bar = QFrame()
         bar.setObjectName("topBar")
+        bar.installEventFilter(self)
+        self._title_bar_widget = bar
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(18, 9, 18, 9)
         layout.setSpacing(14)
@@ -1201,10 +1209,14 @@ class MainWindow(QMainWindow):
         brand_glyph = QLabel("◯")
         brand_glyph.setObjectName("brandGlyph")
         layout.addWidget(brand_glyph)
+        brand_glyph.installEventFilter(self)
+        self._title_glyph = brand_glyph
 
         brand = QLabel("SOFIA")
         brand.setObjectName("brandLabel")
         layout.addWidget(brand)
+        brand.installEventFilter(self)
+        self._title_brand = brand
 
         self._readiness_badge = QLabel("● Pronta")
         self._readiness_badge.setObjectName("statusBadge")
@@ -1252,6 +1264,47 @@ class MainWindow(QMainWindow):
         close.clicked.connect(self.close)
         layout.addWidget(close)
         return bar
+
+    def _edge_at(self, point):
+        if self.isMaximized():
+            return Qt.Edge(0)
+        grip = 7
+        edges = Qt.Edge(0)
+        if point.x() < grip:
+            edges |= Qt.Edge.LeftEdge
+        elif point.x() >= self.width() - grip:
+            edges |= Qt.Edge.RightEdge
+        if point.y() < grip:
+            edges |= Qt.Edge.TopEdge
+        elif point.y() >= self.height() - grip:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                if watched.window() is self:
+                    local = self.mapFromGlobal(event.globalPosition().toPoint())
+                    edge = self._edge_at(local)
+                    handle = self.windowHandle()
+                    if edge and handle is not None and handle.startSystemResize(edge):
+                        return True
+                if watched is getattr(self, "_title_bar_widget", None) or watched in (
+                    getattr(self, "_title_brand", None),
+                    getattr(self, "_title_glyph", None),
+                ):
+                    handle = self.windowHandle()
+                    if handle is not None and handle.startSystemMove():
+                        return True
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            if event.button() == Qt.MouseButton.LeftButton and watched in (
+                getattr(self, "_title_bar_widget", None),
+                getattr(self, "_title_brand", None),
+                getattr(self, "_title_glyph", None),
+            ):
+                self._toggle_maximize_restore()
+                return True
+        return super().eventFilter(watched, event)
 
     def _toggle_maximize_restore(self) -> None:
         if self.isMaximized():
