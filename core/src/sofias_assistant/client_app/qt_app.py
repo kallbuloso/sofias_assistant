@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -1175,7 +1175,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        outer.addWidget(self._top_bar())
+        outer.addWidget(self._title_bar())
 
         body = QWidget()
         body_layout = QHBoxLayout(body)
@@ -1190,7 +1190,8 @@ class MainWindow(QMainWindow):
         outer.addWidget(body, 1)
         return root
 
-    def _top_bar(self) -> QWidget:
+    def _title_bar(self) -> QWidget:
+        """Integrated header, staged while the native window frame remains."""
         bar = QFrame()
         bar.setObjectName("topBar")
         layout = QHBoxLayout(bar)
@@ -1224,7 +1225,53 @@ class MainWindow(QMainWindow):
         controls.setObjectName("topBarAction")
         controls.clicked.connect(self._show_privacy_dialog)
         layout.addWidget(controls)
+
+        separator = QFrame()
+        separator.setObjectName("titleDivider")
+        separator.setFixedSize(1, 24)
+        layout.addWidget(separator)
+
+        minimize = QPushButton("−")
+        minimize.setObjectName("windowControl")
+        minimize.setAccessibleName("Minimizar janela")
+        minimize.setToolTip("Minimizar")
+        minimize.clicked.connect(self.showMinimized)
+        layout.addWidget(minimize)
+
+        self._maximize_button = QPushButton("□")
+        self._maximize_button.setObjectName("windowControl")
+        self._maximize_button.setAccessibleName("Maximizar ou restaurar janela")
+        self._maximize_button.setToolTip("Maximizar")
+        self._maximize_button.clicked.connect(self._toggle_maximize_restore)
+        layout.addWidget(self._maximize_button)
+
+        close = QPushButton("×")
+        close.setObjectName("windowControlClose")
+        close.setAccessibleName("Fechar janela")
+        close.setToolTip("Fechar")
+        close.clicked.connect(self.close)
+        layout.addWidget(close)
         return bar
+
+    def _toggle_maximize_restore(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self._refresh_maximize_button()
+
+    def _refresh_maximize_button(self) -> None:
+        button = getattr(self, "_maximize_button", None)
+        if button is None:
+            return
+        maximized = self.isMaximized()
+        button.setText("❐" if maximized else "□")
+        button.setToolTip("Restaurar" if maximized else "Maximizar")
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._refresh_maximize_button()
 
     def _navigation_rail(self) -> QWidget:
         rail = QFrame()
@@ -1412,6 +1459,30 @@ class MainWindow(QMainWindow):
             QPushButton#topBarAction:hover {
                 border-color: #22d7f2;
                 background: #0c2a36;
+            }
+            QFrame#titleDivider {
+                background: #145164;
+                border: 0;
+            }
+            QPushButton#windowControl, QPushButton#windowControlClose {
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                padding: 0;
+                border: 0;
+                border-radius: 6px;
+                background: transparent;
+                color: #d9edf5;
+                font-size: 16px;
+            }
+            QPushButton#windowControl:hover {
+                background: #123440;
+                color: #eef9fc;
+            }
+            QPushButton#windowControlClose:hover {
+                background: #ad3039;
+                color: #ffffff;
             }
             QPushButton#ghostButton {
                 background: transparent;
