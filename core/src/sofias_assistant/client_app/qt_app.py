@@ -1225,6 +1225,10 @@ class MainWindow(QMainWindow):
         self._readiness_badge.setObjectName("statusBadge")
         layout.addWidget(self._readiness_badge)
 
+        self._privacy_icon = QLabel()
+        self._privacy_icon.setPixmap(desktop_icon("cloud", 20).pixmap(20, 20))
+        self._privacy_icon.setToolTip("Privacidade de inferência")
+        layout.addWidget(self._privacy_icon)
         self._privacy_badge = QLabel("Nuvem permitida")
         self._privacy_badge.setObjectName("privacyBadge")
         layout.addWidget(self._privacy_badge)
@@ -1344,6 +1348,7 @@ class MainWindow(QMainWindow):
         """Keep header actions reachable at the window's minimum width."""
         compact = self.width() < 1020
         self._privacy_badge.setVisible(not compact)
+        self._privacy_icon.setVisible(not compact)
         self._configure_action.setText("Config." if compact else "CONFIGURAR")
         self._controls_action.setText("Privacidade" if compact else "CONTROLES")
 
