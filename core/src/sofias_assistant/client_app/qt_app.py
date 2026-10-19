@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -67,6 +67,7 @@ from sofias_assistant.client_app.models import (
     VoiceState,
 )
 from sofias_assistant.client_app.service import ClientApplicationService
+from sofias_assistant.client_app.widgets.style import desktop_icon
 from sofias_assistant.client_app.widgets import (
     ComposerWidget,
     ConversationFeedWidget,
@@ -1102,8 +1103,8 @@ class MainWindow(QMainWindow):
         # controls were validated on Windows.
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowTitle("Sofia's Assistant")
-        self.resize(1100, 720)
-        self.setMinimumSize(820, 560)
+        self.resize(1280, 800)
+        self.setMinimumSize(1280, 800)
         self.setStatusBar(QStatusBar(self))
         self._connection = QLabel("Connecting…")
         self.statusBar().addPermanentWidget(self._connection)
@@ -1224,19 +1225,23 @@ class MainWindow(QMainWindow):
         self._readiness_badge.setObjectName("statusBadge")
         layout.addWidget(self._readiness_badge)
 
-        self._privacy_badge = QLabel("☁  Nuvem permitida")
+        self._privacy_badge = QLabel("Nuvem permitida")
         self._privacy_badge.setObjectName("privacyBadge")
         layout.addWidget(self._privacy_badge)
 
         layout.addStretch(1)
 
         configure = QPushButton("CONFIGURAR")
+        configure.setIcon(desktop_icon("settings", 18))
+        configure.setIconSize(QSize(18, 18))
         self._configure_action = configure
         configure.setObjectName("topBarAction")
         configure.clicked.connect(lambda: self._show_settings())
         layout.addWidget(configure)
 
         controls = QPushButton("CONTROLES")
+        controls.setIcon(desktop_icon("tasks", 18))
+        controls.setIconSize(QSize(18, 18))
         self._controls_action = controls
         controls.setObjectName("topBarAction")
         controls.clicked.connect(self._show_privacy_dialog)
@@ -1360,17 +1365,23 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 14, 8, 14)
         layout.setSpacing(10)
 
-        chat = QPushButton("◉")
+        chat = QPushButton()
+        chat.setIcon(desktop_icon("chat", 24))
+        chat.setIconSize(QSize(24, 24))
         chat.setToolTip("Conversa")
         chat.setObjectName("railActive")
         layout.addWidget(chat)
 
-        tasks = QPushButton("✓")
+        tasks = QPushButton()
+        tasks.setIcon(desktop_icon("tasks", 24))
+        tasks.setIconSize(QSize(24, 24))
         tasks.setToolTip("Atividade")
         tasks.clicked.connect(self._focus_activity)
         layout.addWidget(tasks)
 
-        settings = QPushButton("⚙")
+        settings = QPushButton()
+        settings.setIcon(desktop_icon("settings", 24))
+        settings.setIconSize(QSize(24, 24))
         settings.setToolTip("Configurações")
         settings.clicked.connect(lambda: self._show_settings())
         layout.addWidget(settings)
