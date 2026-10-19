@@ -338,3 +338,32 @@ def test_switching_from_long_to_short_history_recalculates_scroll_height(
     assert feed.verticalScrollBar().maximum() == 0
     assert feed._message_widgets[-1].modality == "voice"
     feed.close()
+
+
+def test_title_bar_keeps_actions_in_compact_and_full_width(
+    qapplication: QApplication,
+) -> None:
+    """SAS-04D: window controls remain usable at the minimum window width."""
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+    try:
+        window.resize(820, 560)
+        window._update_header_density()
+        assert window._privacy_badge.isHidden()
+        assert window._configure_action.text() == "Config."
+        assert window._controls_action.text() == "Privacidade"
+        assert not window._maximize_button.icon().isNull()
+
+        window.resize(1200, 720)
+        window._update_header_density()
+        assert not window._privacy_badge.isHidden()
+        assert window._configure_action.text() == "CONFIGURAR"
+        assert window._controls_action.text() == "CONTROLES"
+    finally:
+        window._tray.hide()
+        window.hide()
+        window.deleteLater()
+        controller.deleteLater()
