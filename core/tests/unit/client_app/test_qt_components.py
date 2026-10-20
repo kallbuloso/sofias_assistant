@@ -398,3 +398,47 @@ def test_desktop_chrome_rounded_mask_and_resize_grips(
         window.hide()
         window.deleteLater()
         controller.deleteLater()
+
+
+def test_conversation_sidebar_collapse_expand_and_restore_preference(
+    qapplication: QApplication,
+) -> None:
+    """SAS-04D Extension 01: sidebar visibility and QSettings persistence."""
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("Sofia", "SofiaAssistant")
+    key = "desktop/conversation_sidebar_collapsed"
+    original = settings.value(key, None)
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+    try:
+        window._set_conversation_sidebar_collapsed(False)
+        assert not window._sidebar_panel.isHidden()
+        assert window._sidebar_expand.isHidden()
+
+        window._sidebar_toggle.click()
+        assert window._sidebar_panel.isHidden()
+        assert not window._sidebar_expand.isHidden()
+        assert settings.value(key, False, type=bool) is True
+
+        window._sidebar_expand.click()
+        assert not window._sidebar_panel.isHidden()
+        assert window._sidebar_expand.isHidden()
+        assert settings.value(key, True, type=bool) is False
+
+        window._set_conversation_sidebar_collapsed(True, persist=True)
+        assert window._sidebar_panel.isHidden()
+        window._set_conversation_sidebar_collapsed(False)
+        assert not window._sidebar_panel.isHidden()
+    finally:
+        if original is None:
+            settings.remove(key)
+        else:
+            settings.setValue(key, original)
+        window._tray.hide()
+        window.hide()
+        window.deleteLater()
+        controller.deleteLater()
