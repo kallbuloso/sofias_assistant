@@ -1284,6 +1284,52 @@ class MainWindow(QMainWindow):
         layout.addWidget(close)
         return bar
 
+    def nativeEvent(self, event_type, message):
+        """Honor Windows resize hit testing without changing the rounded mask.
+
+        Frameless translucent windows may not deliver QWidget mouse presses
+        for their perimeter. WM_NCHITTEST is handled before Qt dispatch.
+        """
+        if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
+            import ctypes
+            from ctypes import wintypes
+
+            class MSG(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("message", wintypes.UINT),
+                    ("wParam", wintypes.WPARAM),
+                    ("lParam", wintypes.LPARAM),
+                    ("time", wintypes.DWORD),
+                    ("pt", wintypes.POINT),
+                ]
+
+            msg = MSG.from_address(int(message))
+            if msg.message == 0x0084 and not self.isMaximized() and not self.isFullScreen():
+                # WM_NCHITTEST coordinates are physical screen pixels.
+                # Map using the native window geometry to avoid DPI mismatch.
+                native = self.windowHandle()
+                if native is not None:
+                    scale = native.devicePixelRatio()
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    origin = self.mapToGlobal(self.rect().topLeft())
+                    px = x - round(origin.x() * scale)
+                    py = y - round(origin.y() * scale)
+                    width = round(self.width() * scale)
+                    height = round(self.height() * scale)
+                    border = max(7, round(8 * scale))
+                    left, right = px < border, px >= width - border
+                    top, bottom = py < border, py >= height - border
+                    hit = (
+                        13 if top and left else 14 if top and right else
+                        16 if bottom and left else 17 if bottom and right else
+                        10 if left else 11 if right else 12 if top else 15 if bottom else 0
+                    )
+                    if hit:
+                        return True, hit
+        return super().nativeEvent(event_type, message)
+
     def _edge_at(self, point):
         if self.isMaximized():
             return Qt.Edge(0)
