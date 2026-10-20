@@ -1176,6 +1176,12 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self._desktop_shell())
         self._apply_desktop_style()
+        self._sidebar_collapsed = False
+        self._set_conversation_sidebar_collapsed(
+            self._settings.value(
+                "desktop/conversation_sidebar_collapsed", False, type=bool
+            )
+        )
         self._update_header_density()
         self._refresh_window_shape()
         # The native caption previously provided the resize hit targets.
@@ -1198,7 +1204,8 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(0)
 
         body_layout.addWidget(self._navigation_rail())
-        body_layout.addWidget(self._conversation_sidebar())
+        self._sidebar_panel = self._conversation_sidebar()
+        body_layout.addWidget(self._sidebar_panel)
         body_layout.addWidget(self._conversation_workspace(), 1)
         body_layout.addWidget(self._activity_panel())
 
@@ -1476,6 +1483,15 @@ class MainWindow(QMainWindow):
         settings.clicked.connect(lambda: self._show_settings())
         layout.addWidget(settings)
 
+        self._sidebar_expand = QPushButton("❯")
+        self._sidebar_expand.setObjectName("railExpand")
+        self._sidebar_expand.setToolTip("Expandir painel de conversas")
+        self._sidebar_expand.setAccessibleName("Expandir painel de conversas")
+        self._sidebar_expand.setFixedSize(44, 44)
+        self._sidebar_expand.clicked.connect(self._toggle_conversation_sidebar)
+        layout.addWidget(self._sidebar_expand)
+        self._sidebar_expand.hide()
+
         layout.addStretch(1)
         return rail
 
@@ -1488,9 +1504,19 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
         title = QLabel("Conversas recentes")
         title.setObjectName("sectionTitle")
-        layout.addWidget(title)
+        title_row.addWidget(title, 1)
+        self._sidebar_toggle = QPushButton("❮")
+        self._sidebar_toggle.setObjectName("sidebarToggle")
+        self._sidebar_toggle.setToolTip("Recolher painel de conversas")
+        self._sidebar_toggle.setAccessibleName("Recolher painel de conversas")
+        self._sidebar_toggle.setFixedSize(30, 30)
+        self._sidebar_toggle.clicked.connect(self._toggle_conversation_sidebar)
+        title_row.addWidget(self._sidebar_toggle)
+        layout.addLayout(title_row)
 
         new_conversation = QPushButton("+ Nova conversa")
         new_conversation.setObjectName("primaryButton")
@@ -1506,6 +1532,20 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self._conversation_list, 1)
         return sidebar
+
+    def _toggle_conversation_sidebar(self) -> None:
+        self._set_conversation_sidebar_collapsed(
+            not self._sidebar_collapsed, persist=True
+        )
+
+    def _set_conversation_sidebar_collapsed(
+        self, collapsed: bool, *, persist: bool = False
+    ) -> None:
+        self._sidebar_collapsed = collapsed
+        self._sidebar_panel.setVisible(not collapsed)
+        self._sidebar_expand.setVisible(collapsed)
+        if persist:
+            self._settings.setValue("desktop/conversation_sidebar_collapsed", collapsed)
 
     def _conversation_workspace(self) -> QWidget:
         panel = QFrame()
