@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import html
-import os
 import sys
 import threading
 import traceback
@@ -1340,27 +1339,6 @@ class MainWindow(QMainWindow):
             grip.setVisible(active)
             if active:
                 grip.raise_()
-        if os.environ.get("SOFIA_DEBUG_RESIZE") == "1":
-            QTimer.singleShot(0, self._debug_resize_grips)
-
-    def _debug_resize_grips(self) -> None:
-        if not hasattr(self, "_resize_grips"):
-            return
-        data = {
-            "window_size": (self.width(), self.height()),
-            "maximized": self.isMaximized(),
-            "window_mask": self.mask().boundingRect().getRect(),
-            "grips": {
-                grip.objectName(): {
-                    "rect": grip.geometry().getRect(),
-                    "visible": grip.isVisible(),
-                    "under_mouse": grip.underMouse(),
-                    "top_level": grip.window() is self,
-                }
-                for grip in self._resize_grips
-            },
-        }
-        print(f"[SOFIA_RESIZE_GEOMETRY] {data}", flush=True)
 
     def _edge_at(self, point):
         if self.isMaximized():
@@ -1382,14 +1360,7 @@ class MainWindow(QMainWindow):
         if watched in grips and event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
                 handle = self.windowHandle()
-                started = bool(handle is not None and handle.startSystemResize(grips[watched]))
-                if os.environ.get("SOFIA_DEBUG_RESIZE") == "1":
-                    print(
-                        f"[SOFIA_RESIZE_PRESS] grip={watched.objectName()} "
-                        f"edge={grips[watched]} started={started}",
-                        flush=True,
-                    )
-                if started:
+                if handle is not None and handle.startSystemResize(grips[watched]):
                     return True
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
