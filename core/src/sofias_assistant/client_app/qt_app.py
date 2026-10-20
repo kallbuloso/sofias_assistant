@@ -1483,7 +1483,11 @@ class MainWindow(QMainWindow):
         settings.clicked.connect(lambda: self._show_settings())
         layout.addWidget(settings)
 
-        self._sidebar_expand = QPushButton("❯")
+        self._sidebar_expand = QPushButton()
+        self._sidebar_expand.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+        )
+        self._sidebar_expand.setIconSize(QSize(20, 20))
         self._sidebar_expand.setObjectName("railExpand")
         self._sidebar_expand.setToolTip("Expandir painel de conversas")
         self._sidebar_expand.setAccessibleName("Expandir painel de conversas")
@@ -1509,7 +1513,11 @@ class MainWindow(QMainWindow):
         title = QLabel("Conversas recentes")
         title.setObjectName("sectionTitle")
         title_row.addWidget(title, 1)
-        self._sidebar_toggle = QPushButton("❮")
+        self._sidebar_toggle = QPushButton()
+        self._sidebar_toggle.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)
+        )
+        self._sidebar_toggle.setIconSize(QSize(18, 18))
         self._sidebar_toggle.setObjectName("sidebarToggle")
         self._sidebar_toggle.setToolTip("Recolher painel de conversas")
         self._sidebar_toggle.setAccessibleName("Recolher painel de conversas")
@@ -1740,6 +1748,16 @@ class MainWindow(QMainWindow):
             QPushButton:hover {
                 border-color: #22d7f2;
                 background: #0c2a36;
+            }
+            QPushButton#sidebarToggle, QPushButton#railExpand {
+                border: 1px solid #145164;
+                border-radius: 8px;
+                background: #10242d;
+                padding: 0;
+            }
+            QPushButton#sidebarToggle:hover, QPushButton#railExpand:hover {
+                background: #0b3542;
+                border-color: #22d7f2;
             }
             QPushButton#primaryButton, QPushButton#railActive {
                 border-color: #22d7f2;
