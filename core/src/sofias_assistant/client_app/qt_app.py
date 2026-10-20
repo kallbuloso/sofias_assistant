@@ -1181,6 +1181,7 @@ class MainWindow(QMainWindow):
         # The native caption previously provided the resize hit targets.
         # Keep an equivalent 7px border for the frameless window.
         QApplication.instance().installEventFilter(self)
+        self._create_resize_grips()
 
     def _desktop_shell(self) -> QWidget:
         root = QWidget()
@@ -1284,51 +1285,49 @@ class MainWindow(QMainWindow):
         layout.addWidget(close)
         return bar
 
-    def nativeEvent(self, event_type, message):
-        """Honor Windows resize hit testing without changing the rounded mask.
+    def _create_resize_grips(self) -> None:
+        """Explicit mouse targets inside the rounded frameless window."""
+        edges = {
+            "top": Qt.Edge.TopEdge,
+            "bottom": Qt.Edge.BottomEdge,
+            "left": Qt.Edge.LeftEdge,
+            "right": Qt.Edge.RightEdge,
+            "top_left": Qt.Edge.TopEdge | Qt.Edge.LeftEdge,
+            "top_right": Qt.Edge.TopEdge | Qt.Edge.RightEdge,
+            "bottom_left": Qt.Edge.BottomEdge | Qt.Edge.LeftEdge,
+            "bottom_right": Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
+        }
+        self._resize_grips = {}
+        for name, edge in edges.items():
+            grip = QWidget(self)
+            grip.setObjectName("resizeGrip_" + name)
+            grip.setMouseTracking(True)
+            grip.installEventFilter(self)
+            self._resize_grips[grip] = edge
+        self._position_resize_grips()
 
-        Frameless translucent windows may not deliver QWidget mouse presses
-        for their perimeter. WM_NCHITTEST is handled before Qt dispatch.
-        """
-        if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
-            import ctypes
-            from ctypes import wintypes
-
-            class MSG(ctypes.Structure):
-                _fields_ = [
-                    ("hwnd", wintypes.HWND),
-                    ("message", wintypes.UINT),
-                    ("wParam", wintypes.WPARAM),
-                    ("lParam", wintypes.LPARAM),
-                    ("time", wintypes.DWORD),
-                    ("pt", wintypes.POINT),
-                ]
-
-            msg = MSG.from_address(int(message))
-            if msg.message == 0x0084 and not self.isMaximized() and not self.isFullScreen():
-                # WM_NCHITTEST coordinates are physical screen pixels.
-                # Map using the native window geometry to avoid DPI mismatch.
-                native = self.windowHandle()
-                if native is not None:
-                    scale = native.devicePixelRatio()
-                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
-                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                    origin = self.mapToGlobal(self.rect().topLeft())
-                    px = x - round(origin.x() * scale)
-                    py = y - round(origin.y() * scale)
-                    width = round(self.width() * scale)
-                    height = round(self.height() * scale)
-                    border = max(7, round(8 * scale))
-                    left, right = px < border, px >= width - border
-                    top, bottom = py < border, py >= height - border
-                    hit = (
-                        13 if top and left else 14 if top and right else
-                        16 if bottom and left else 17 if bottom and right else
-                        10 if left else 11 if right else 12 if top else 15 if bottom else 0
-                    )
-                    if hit:
-                        return True, hit
-        return super().nativeEvent(event_type, message)
+    def _position_resize_grips(self) -> None:
+        if not hasattr(self, "_resize_grips"):
+            return
+        active = not (self.isMaximized() or self.isFullScreen())
+        g = 8
+        corner = 20
+        w, h = self.width(), self.height()
+        positions = {
+            "top": (corner, 0, max(0, w - 2 * corner), g),
+            "bottom": (corner, h - g, max(0, w - 2 * corner), g),
+            "left": (0, corner, g, max(0, h - 2 * corner)),
+            "right": (w - g, corner, g, max(0, h - 2 * corner)),
+            "top_left": (0, 0, corner, corner),
+            "top_right": (w - corner, 0, corner, corner),
+            "bottom_left": (0, h - corner, corner, corner),
+            "bottom_right": (w - corner, h - corner, corner, corner),
+        }
+        for grip in self._resize_grips:
+            grip.setGeometry(*positions[grip.objectName().removeprefix("resizeGrip_")])
+            grip.setVisible(active)
+            if active:
+                grip.raise_()
 
     def _edge_at(self, point):
         if self.isMaximized():
@@ -1346,6 +1345,12 @@ class MainWindow(QMainWindow):
         return edges
 
     def eventFilter(self, watched, event) -> bool:
+        grips = getattr(self, "_resize_grips", {})
+        if watched in grips and event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                handle = self.windowHandle()
+                if handle is not None and handle.startSystemResize(grips[watched]):
+                    return True
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.LeftButton:
                 # The app-wide event filter also sees QWindow events. Only
@@ -1409,6 +1414,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_configure_action"):
             self._update_header_density()
         self._refresh_window_shape()
+        self._position_resize_grips()
 
     def _refresh_window_shape(self) -> None:
         """Clip the frameless window to rounded corners only in normal state."""
@@ -1428,6 +1434,7 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             self._refresh_maximize_button()
             self._refresh_window_shape()
+            self._position_resize_grips()
 
     def _navigation_rail(self) -> QWidget:
         rail = QFrame()
