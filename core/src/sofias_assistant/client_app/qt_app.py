@@ -1299,10 +1299,21 @@ class MainWindow(QMainWindow):
             "bottom_right": Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
         }
         self._resize_grips = {}
+        cursor_shapes = {
+            "top": Qt.CursorShape.SizeVerCursor,
+            "bottom": Qt.CursorShape.SizeVerCursor,
+            "left": Qt.CursorShape.SizeHorCursor,
+            "right": Qt.CursorShape.SizeHorCursor,
+            "top_left": Qt.CursorShape.SizeFDiagCursor,
+            "bottom_right": Qt.CursorShape.SizeFDiagCursor,
+            "top_right": Qt.CursorShape.SizeBDiagCursor,
+            "bottom_left": Qt.CursorShape.SizeBDiagCursor,
+        }
         for name, edge in edges.items():
             grip = QWidget(self)
             grip.setObjectName("resizeGrip_" + name)
             grip.setMouseTracking(True)
+            grip.setCursor(cursor_shapes[name])
             grip.installEventFilter(self)
             self._resize_grips[grip] = edge
         self._position_resize_grips()
