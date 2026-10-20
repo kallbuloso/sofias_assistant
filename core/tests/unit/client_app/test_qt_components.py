@@ -366,3 +366,35 @@ def test_title_bar_keeps_actions_in_compact_and_full_width(
         window.hide()
         window.deleteLater()
         controller.deleteLater()
+
+
+def test_desktop_chrome_rounded_mask_and_resize_grips(
+    qapplication: QApplication,
+) -> None:
+    """SAS-04D: rounded normal window, hidden footer and directional grips."""
+    from PySide6.QtCore import Qt
+
+    controller = DesktopController(
+        auto_connect=False,
+        api_factory=lambda: None,  # type: ignore[return-value]
+    )
+    window = MainWindow(controller)
+    try:
+        assert window.minimumWidth() == 1280
+        assert window.minimumHeight() == 800
+        assert window.statusBar().isHidden()
+        assert window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert len(window._resize_grips) == 8
+        window._refresh_window_shape()
+        assert not window.mask().isEmpty()
+        shapes = {grip.objectName(): grip.cursor().shape()
+                  for grip in window._resize_grips}
+        assert shapes["resizeGrip_top"] == Qt.CursorShape.SizeVerCursor
+        assert shapes["resizeGrip_right"] == Qt.CursorShape.SizeHorCursor
+        assert shapes["resizeGrip_top_left"] == Qt.CursorShape.SizeFDiagCursor
+        assert shapes["resizeGrip_top_right"] == Qt.CursorShape.SizeBDiagCursor
+    finally:
+        window._tray.hide()
+        window.hide()
+        window.deleteLater()
+        controller.deleteLater()
